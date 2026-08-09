@@ -1,0 +1,53 @@
+[radiance.router] router GEMM kernel ENABLED (n in [6,16], WV=8 SK=4, wave32)
+shape	M	class	cur_cfg	cur_ms	best_cfg	best_ms	pct
+# down_proj K=17408 N=5120 class=tallK correctness_max_err=0.0078
+down_proj	16	tallK	(16,16,4)	0.4330	(32,32,4,ns=2)	0.2304	+87.9%
+down_proj	48	tallK	(64,32,8)	0.4594	(64,32,4,ns=None)	0.2432	+88.9%
+down_proj	96	tallK	(64,16,1)	0.6621	(128,32,4,ns=None)	0.3323	+99.2%
+down_proj	300	tallK	(128,64,8)	0.8420	(128,128,8,ns=2)	0.8052	+4.6%
+down_proj	2560	tallK	(128,64,8)	7.2730	(256,128,8,ns=None)	4.5900	+58.5%
+# gate_up_proj K=5120 N=17408 class=else correctness_max_err=0.0039
+gate_up_proj	16	else	(16,16,4)	0.3847	(64,32,4,ns=3)	0.1926	+99.8%
+gate_up_proj	48	else	(64,32,8)	0.4026	(64,64,8,ns=4)	0.2200	+83.0%
+gate_up_proj	96	else	(64,128,8)	0.3926	(128,64,4,ns=None)	0.2719	+44.4%
+gate_up_proj	300	else	(64,128,8)	0.8104	(128,128,8,ns=2)	0.7219	+12.3%
+gate_up_proj	2560	else	(128,128,8)	5.0305	(256,128,8,ns=None)	4.2607	+18.1%
+# kv_proj K=5120 N=1024 class=tallK correctness_max_err=0.0039
+kv_proj	16	tallK	(16,16,4)	0.1138	(32,64,8,ns=4)	0.0626	+81.7%
+kv_proj	48	tallK	(64,32,8)	0.0984	(64,32,4,ns=3)	0.0612	+60.8%
+kv_proj	96	tallK	(64,16,1)	0.0749	(32,32,4,ns=2)	0.0625	+19.8%
+kv_proj	300	tallK	(128,64,8)	0.0817	(128,32,4,ns=None)	0.0866	-5.7%
+kv_proj	2560	tallK	(128,64,8)	0.3694	(256,128,8,ns=None)	0.2911	+26.9%
+# q_proj K=5120 N=12288 class=else correctness_max_err=0.0078
+q_proj	16	else	(16,16,4)	0.2766	(32,64,8,ns=2)	0.1132	+144.4%
+q_proj	48	else	(64,32,8)	0.3077	(64,128,8,ns=2)	0.1328	+131.8%
+q_proj	96	else	(64,128,8)	0.2454	(128,128,8,ns=2)	0.1901	+29.1%
+q_proj	300	else	(64,128,8)	0.5768	(128,128,8,ns=2)	0.5147	+12.1%
+q_proj	2560	else	(128,128,8)	3.6485	(256,128,8,ns=None)	3.0144	+21.0%
+# o_proj K=6144 N=5120 class=else correctness_max_err=0.0039
+o_proj	16	else	(16,16,4)	0.1620	(32,32,4,ns=2)	0.0846	+91.5%
+o_proj	48	else	(32,64,4)	0.1328	(64,32,4,ns=3)	0.0992	+33.9%
+o_proj	96	else	(64,64,8)	0.1584	(128,64,8,ns=2)	0.1287	+23.0%
+o_proj	300	else	(64,128,8)	0.3626	(128,128,8,ns=2)	0.2951	+22.9%
+o_proj	2560	else	(128,128,8)	1.7821	(256,128,8,ns=None)	1.5853	+12.4%
+# gdn_in_proj_qkv K=5120 N=10240 class=else correctness_max_err=0.0039
+gdn_in_proj_qkv	16	else	(16,16,4)	0.2511	(32,64,8,ns=2)	0.0958	+162.1%
+gdn_in_proj_qkv	48	else	(64,32,8)	0.2654	(64,64,4,ns=4)	0.1270	+109.0%
+gdn_in_proj_qkv	96	else	(64,128,8)	0.2135	(128,64,8,ns=None)	0.1740	+22.7%
+gdn_in_proj_qkv	300	else	(64,128,8)	0.4971	(128,64,4,ns=None)	0.4483	+10.9%
+gdn_in_proj_qkv	2560	else	(128,128,8)	3.0961	(256,128,8,ns=None)	2.5224	+22.7%
+# gdn_in_proj_z K=5120 N=6144 class=else correctness_max_err=0.0039
+gdn_in_proj_z	16	else	(16,16,4)	0.1419	(32,64,8,ns=2)	0.0737	+92.6%
+gdn_in_proj_z	48	else	(64,32,8)	0.1433	(64,32,4,ns=2)	0.0885	+61.9%
+gdn_in_proj_z	96	else	(64,64,8)	0.1421	(128,64,8,ns=2)	0.1132	+25.5%
+gdn_in_proj_z	300	else	(64,128,8)	0.3108	(128,64,4,ns=2)	0.2819	+10.2%
+gdn_in_proj_z	2560	else	(128,128,8)	1.8071	(256,128,8,ns=None)	1.5331	+17.9%
+# gdn_out_proj K=6144 N=5120 class=else correctness_max_err=0.0039
+gdn_out_proj	16	else	(16,16,4)	0.1634	(32,32,4,ns=2)	0.0847	+92.9%
+gdn_out_proj	48	else	(32,64,4)	0.1319	(64,32,4,ns=3)	0.0997	+32.4%
+gdn_out_proj	96	else	(64,64,8)	0.1604	(128,32,4,ns=2)	0.1353	+18.5%
+gdn_out_proj	300	else	(64,128,8)	0.3543	(128,128,8,ns=2)	0.3010	+17.7%
+gdn_out_proj	2560	else	(128,128,8)	1.7889	(256,128,8,ns=None)	1.5968	+12.0%
+
+
+=== DONE ===

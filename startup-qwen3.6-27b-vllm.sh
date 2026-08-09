@@ -64,6 +64,15 @@
 # -- this script fixes the tokenizer defect automatically by default (TOKENIZER_FIX=1),
 # rather than only warning, because a manual fix step is exactly what gets missed after a
 # fresh checkpoint re-download and the failure is silent until someone tries vision.
+#
+# TUNED_TILES=1 (default) bind-mounts patches/rdna_hybrid_w4a16.py over the RDNA hybrid
+# W4A16 kernel's own untuned gfx1201 Triton prefill tile heuristic (it ships tuned on a
+# different model's shapes/group_size). Measured end-to-end on this exact checkpoint:
+# +3.5% to +9.7% prefill tokens/sec (real server, 3 reps x 4 depths, every patched rep beat
+# every matched baseline rep), decode unaffected. See patches/README.md for the full
+# methodology, isolated-kernel sweep data, and caveats. It's a community-measured
+# override, not something upstream has reviewed -- set TUNED_TILES=0 to run the kernel
+# exactly as the image ships it.
 set -euo pipefail
 
 PORT="${PORT:-8000}"
@@ -104,6 +113,9 @@ GEN_REPPEN="${GEN_REPPEN:-1.0}"
 SPEC="${SPEC:-mtp}"            # mtp (default) | off | ngram | ngram_gpu
 SPECTOK="${SPECTOK:-4}"        # measured winner, see header. Don't assume higher is better.
 TOKENIZER_FIX="${TOKENIZER_FIX:-1}"
+TUNED_TILES="${TUNED_TILES:-1}"    # 0 to disable; bind-mounts patches/rdna_hybrid_w4a16.py, see header.
+PATCH_DIR="${PATCH_DIR:-./patches}"
+KERNEL_PATH="/opt/vllm/lib/python3.12/site-packages/vllm/model_executor/kernels/linear/mixed_precision/rdna_hybrid_w4a16.py"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -141,6 +153,16 @@ if [[ "$LMONLY" == "1" ]]; then
   LM_ARG="--language-model-only"
 else
   LM_ARG=""
+fi
+
+TILES_MOUNT_ARG=()
+if [[ "$TUNED_TILES" == "1" ]]; then
+  if [[ ! -f "$PATCH_DIR/rdna_hybrid_w4a16.py" ]]; then
+    echo "[launcher] TUNED_TILES=1 but $PATCH_DIR/rdna_hybrid_w4a16.py not found." >&2
+    exit 2
+  fi
+  TILES_MOUNT_ARG=(-v "$(cd "$PATCH_DIR" && pwd)/rdna_hybrid_w4a16.py:${KERNEL_PATH}:ro")
+  echo "[launcher] tuned W4A16 prefill tile table: ON (see patches/README.md)" >&2
 fi
 
 # JSON must contain no spaces -- expanded unquoted below, same rule as SPEC_ARGS.
@@ -187,6 +209,7 @@ exec podman run --rm --name "$NAME" \
   --shm-size 4g --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
   -v "$MODEL_DIR:/model:ro" \
   -v "$CACHE_DIR:/cache" \
+  "${TILES_MOUNT_ARG[@]}" \
   -p "127.0.0.1:${PORT}:8000" \
   -e HIP_VISIBLE_DEVICES=0 \
   -e VLLM_ROCM_USE_AITER=1 -e VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \

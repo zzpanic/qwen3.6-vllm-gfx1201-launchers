@@ -21,6 +21,12 @@ anywhere else.
   (KV cost doesn't pay off at this size), vision, 262144 context.
 - `logs/boot-qwen3.6-27b-vllm.log` / `logs/boot-qwen3.6-35b-vllm.log` — real boot logs
   from container start through `Application startup complete`, captured 2026-08-09.
+- `patches/` — per-shape override table for the 27B script's W4A16 kernel, whose stock
+  gfx1201 Triton prefill tile heuristic is tuned on a different model's shapes/group_size.
+  Measured **+3.5% to +9.7% real end-to-end prefill tokens/sec** on this exact checkpoint,
+  decode unaffected. Applied by default (`TUNED_TILES=1`); set `TUNED_TILES=0` to run the
+  kernel exactly as the image ships it. Full sweep data, generator script, and methodology
+  in `patches/README.md`.
 
 ## Usage
 
