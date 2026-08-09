@@ -79,6 +79,28 @@ BATCHTOK="${BATCHTOK:-2560}"   # >= 2240 required by --mamba-cache-mode align.
 LMONLY="${LMONLY:-0}"          # 1 = --language-model-only, drops the vision tower (~0.8 GiB
                                # of KV pool back if you don't need vision).
 ASYNCSCHED="${ASYNCSCHED:-0}"  # 0 = pass --no-async-scheduling.
+GENCFG="${GENCFG:-1}"          # 1 (default) = apply Qwen3.6's "Thinking Mode, Precise
+                               # Coding" sampling preset as the SERVER DEFAULT via
+                               # --override-generation-config, instead of the checkpoint's
+                               # own generation_config.json (temperature 1.0/top_k 20/
+                               # top_p 0.95 -- Qwen's general-chat defaults). SERVER DEFAULT
+                               # ONLY: any client request that sends its own value for a key
+                               # is unaffected. 0 = leave the checkpoint's shipped config in
+                               # force. Tune the five presets below to switch to Qwen's other
+                               # documented presets (General Tasks / Instruct non-thinking).
+GEN_TEMP="${GEN_TEMP:-0.6}"
+GEN_TOPP="${GEN_TOPP:-0.95}"
+GEN_TOPK="${GEN_TOPK:-20}"
+GEN_MINP="${GEN_MINP:-0.0}"
+GEN_REPPEN="${GEN_REPPEN:-1.0}"
+                               # presence_penalty is deliberately absent: it's not in vLLM's
+                               # --override-generation-config whitelist (server-default keys
+                               # are temperature/top_k/top_p/min_p/repetition_penalty/
+                               # max_new_tokens only), so it can only be set per-request by
+                               # the client. Qwen's coding preset wants 0.0, which already
+                               # matches the OpenAI-protocol client default, so there's no gap
+                               # here -- but Qwen's other two presets want 1.5, and that value
+                               # cannot be baked into the server this way.
 SPEC="${SPEC:-mtp}"            # mtp (default) | off | ngram | ngram_gpu
 SPECTOK="${SPECTOK:-4}"        # measured winner, see header. Don't assume higher is better.
 TOKENIZER_FIX="${TOKENIZER_FIX:-1}"
@@ -119,6 +141,14 @@ if [[ "$LMONLY" == "1" ]]; then
   LM_ARG="--language-model-only"
 else
   LM_ARG=""
+fi
+
+# JSON must contain no spaces -- expanded unquoted below, same rule as SPEC_ARGS.
+if [[ "$GENCFG" == "1" ]]; then
+  GENCFG_ARG="--override-generation-config={\"temperature\":${GEN_TEMP},\"top_p\":${GEN_TOPP},\"top_k\":${GEN_TOPK},\"min_p\":${GEN_MINP},\"repetition_penalty\":${GEN_REPPEN}}"
+  echo "[launcher] sampling override (server default only): temp=$GEN_TEMP top_p=$GEN_TOPP top_k=$GEN_TOPK min_p=$GEN_MINP rep_pen=$GEN_REPPEN" >&2
+else
+  GENCFG_ARG=""
 fi
 
 # Checkpoint defect: tokenizer.json ships with truncation/padding baked in at max_length
@@ -176,6 +206,7 @@ exec podman run --rm --name "$NAME" \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization "$GPUUTIL" \
     ${LM_ARG} \
+    ${GENCFG_ARG} \
     --max-model-len "$MAXLEN" \
     --max-num-seqs "$MAXSEQS" \
     --max-num-batched-tokens "$BATCHTOK" \

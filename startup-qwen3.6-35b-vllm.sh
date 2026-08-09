@@ -92,6 +92,29 @@ BATCHTOK="${BATCHTOK:-2560}"   # >= 2240 required by --mamba-cache-mode align.
 AITERMOE="${AITERMOE:-0}"      # 1 costs a ~125s AITER JIT build + compile-cache invalidation
                                # on first load; measured no win on this shape.
 ASYNCSCHED="${ASYNCSCHED:-0}"  # 0 = pass --no-async-scheduling (see header).
+GENCFG="${GENCFG:-1}"          # 1 (default) = apply Qwen3.6's "Thinking Mode, Precise
+                               # Coding" sampling preset as the SERVER DEFAULT via
+                               # --override-generation-config, instead of the checkpoint's
+                               # own generation_config.json (temperature 1.0/top_k 20/
+                               # top_p 0.95 -- Qwen's general-chat defaults, same shipped
+                               # values as the 27B checkpoint). SERVER DEFAULT ONLY: any
+                               # client request that sends its own value for a key is
+                               # unaffected. 0 = leave the checkpoint's shipped config in
+                               # force. Tune the five presets below to switch to Qwen's other
+                               # documented presets (General Tasks / Instruct non-thinking).
+GEN_TEMP="${GEN_TEMP:-0.6}"
+GEN_TOPP="${GEN_TOPP:-0.95}"
+GEN_TOPK="${GEN_TOPK:-20}"
+GEN_MINP="${GEN_MINP:-0.0}"
+GEN_REPPEN="${GEN_REPPEN:-1.0}"
+                               # presence_penalty is deliberately absent: it's not in vLLM's
+                               # --override-generation-config whitelist (server-default keys
+                               # are temperature/top_k/top_p/min_p/repetition_penalty/
+                               # max_new_tokens only), so it can only be set per-request by
+                               # the client. Qwen's coding preset wants 0.0, which already
+                               # matches the OpenAI-protocol client default, so there's no gap
+                               # here -- but Qwen's other two presets want 1.5, and that value
+                               # cannot be baked into the server this way.
 SPEC="${SPEC:-off}"            # off | ngram | ngram_gpu | mtp (needs mtp.safetensors, see
                                # header -- not shipped enabled here on purpose).
 SPECTOK="${SPECTOK:-4}"
@@ -123,6 +146,14 @@ else
   ASYNC_ARG="--no-async-scheduling"
 fi
 
+# JSON must contain no spaces -- expanded unquoted below, same rule as SPEC_ARGS.
+if [[ "$GENCFG" == "1" ]]; then
+  GENCFG_ARG="--override-generation-config={\"temperature\":${GEN_TEMP},\"top_p\":${GEN_TOPP},\"top_k\":${GEN_TOPK},\"min_p\":${GEN_MINP},\"repetition_penalty\":${GEN_REPPEN}}"
+  echo "[launcher] sampling override (server default only): temp=$GEN_TEMP top_p=$GEN_TOPP top_k=$GEN_TOPK min_p=$GEN_MINP rep_pen=$GEN_REPPEN" >&2
+else
+  GENCFG_ARG=""
+fi
+
 mkdir -p "$CACHE_DIR"
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 trap 'podman rm -f "$NAME" >/dev/null 2>&1 || true' EXIT INT TERM
@@ -151,6 +182,7 @@ exec podman run --rm --name "$NAME" \
     --kv-cache-dtype fp8 \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization "$GPUUTIL" \
+    ${GENCFG_ARG} \
     --max-model-len "$MAXLEN" \
     --max-num-seqs "$MAXSEQS" \
     --max-num-batched-tokens "$BATCHTOK" \
