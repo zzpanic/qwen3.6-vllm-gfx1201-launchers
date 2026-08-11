@@ -196,35 +196,52 @@ _GFX1201_PREFILL_OVERRIDES: dict[tuple[int, int, int, int], tuple[int, int, int,
     (32, 17408, 5120, 128): (128, 32, 32, 4, None),  # down_proj M<=128 (+99.2%)
     (32, 17408, 5120, 512): (128, 128, 32, 8, 2),  # down_proj M<=512 (+4.6%)
     (32, 17408, 5120, _GFX1201_MBIG): (256, 128, 32, 8, None),  # down_proj M<=big (+58.5%)
-    (32, 5120, 17408, 32): (64, 32, 32, 4, 3),  # gate_up_proj M<=32 (+99.8%)
-    (32, 5120, 17408, 64): (64, 64, 32, 8, 4),  # gate_up_proj M<=64 (+83.0%)
-    (32, 5120, 17408, 128): (128, 64, 32, 4, None),  # gate_up_proj M<=128 (+44.4%)
-    (32, 5120, 17408, 512): (128, 128, 32, 8, 2),  # gate_up_proj M<=512 (+12.3%)
-    (32, 5120, 17408, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gate_up_proj M<=big (+18.1%)
-    (32, 5120, 10240, 32): (32, 64, 32, 8, 2),  # gdn_in_proj_qkv M<=32 (+162.1%)
-    (32, 5120, 10240, 64): (64, 64, 32, 4, 4),  # gdn_in_proj_qkv M<=64 (+109.0%)
-    (32, 5120, 10240, 128): (128, 64, 32, 8, None),  # gdn_in_proj_qkv M<=128 (+22.7%)
-    (32, 5120, 10240, 512): (128, 64, 32, 4, None),  # gdn_in_proj_qkv M<=512 (+10.9%)
-    (32, 5120, 10240, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gdn_in_proj_qkv M<=big (+22.7%)
-    (32, 5120, 6144, 32): (32, 64, 32, 8, 2),  # gdn_in_proj_z M<=32 (+92.6%)
-    (32, 5120, 6144, 64): (64, 32, 32, 4, 2),  # gdn_in_proj_z M<=64 (+61.9%)
-    (32, 5120, 6144, 128): (128, 64, 32, 8, 2),  # gdn_in_proj_z M<=128 (+25.5%)
-    (32, 5120, 6144, 512): (128, 64, 32, 4, 2),  # gdn_in_proj_z M<=512 (+10.2%)
-    (32, 5120, 6144, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gdn_in_proj_z M<=big (+17.9%)
-    (32, 5120, 1024, 32): (32, 64, 32, 8, 4),  # kv_proj M<=32 (+81.7%)
-    (32, 5120, 1024, 64): (64, 32, 32, 4, 3),  # kv_proj M<=64 (+60.8%)
-    (32, 5120, 1024, 128): (32, 32, 32, 4, 2),  # kv_proj M<=128 (+19.8%)
-    (32, 5120, 1024, _GFX1201_MBIG): (256, 128, 32, 8, None),  # kv_proj M<=big (+26.9%)
+    (32, 5120, 17408, 32): (64, 32, 32, 4, 3),  # gate_up_proj M<=32 (+99.8%)  [DEAD: gate_proj/up_proj are FUSED into gate_up_proj N=34816]
+    (32, 5120, 17408, 64): (64, 64, 32, 8, 4),  # gate_up_proj M<=64 (+83.0%)  [DEAD: gate_proj/up_proj are FUSED into gate_up_proj N=34816]
+    (32, 5120, 17408, 128): (128, 64, 32, 4, None),  # gate_up_proj M<=128 (+44.4%)  [DEAD: gate_proj/up_proj are FUSED into gate_up_proj N=34816]
+    (32, 5120, 17408, 512): (128, 128, 32, 8, 2),  # gate_up_proj M<=512 (+12.3%)  [DEAD: gate_proj/up_proj are FUSED into gate_up_proj N=34816]
+    (32, 5120, 17408, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gate_up_proj M<=big (+18.1%)  [DEAD: gate_proj/up_proj are FUSED into gate_up_proj N=34816]
+    (32, 5120, 10240, 32): (32, 64, 32, 8, 2),  # gdn_in_proj_qkv M<=32 (+162.1%)  [DEAD: gdn in_proj_qkv is FUSED with in_proj_z, N=16384]
+    (32, 5120, 10240, 64): (64, 64, 32, 4, 4),  # gdn_in_proj_qkv M<=64 (+109.0%)  [DEAD: gdn in_proj_qkv is FUSED with in_proj_z, N=16384]
+    (32, 5120, 10240, 128): (128, 64, 32, 8, None),  # gdn_in_proj_qkv M<=128 (+22.7%)  [DEAD: gdn in_proj_qkv is FUSED with in_proj_z, N=16384]
+    (32, 5120, 10240, 512): (128, 64, 32, 4, None),  # gdn_in_proj_qkv M<=512 (+10.9%)  [DEAD: gdn in_proj_qkv is FUSED with in_proj_z, N=16384]
+    (32, 5120, 10240, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gdn_in_proj_qkv M<=big (+22.7%)  [DEAD: gdn in_proj_qkv is FUSED with in_proj_z, N=16384]
+    (32, 5120, 6144, 32): (32, 64, 32, 8, 2),  # gdn_in_proj_z M<=32 (+92.6%)  [DEAD: gdn in_proj_z is FUSED with in_proj_qkv, N=16384]
+    (32, 5120, 6144, 64): (64, 32, 32, 4, 2),  # gdn_in_proj_z M<=64 (+61.9%)  [DEAD: gdn in_proj_z is FUSED with in_proj_qkv, N=16384]
+    (32, 5120, 6144, 128): (128, 64, 32, 8, 2),  # gdn_in_proj_z M<=128 (+25.5%)  [DEAD: gdn in_proj_z is FUSED with in_proj_qkv, N=16384]
+    (32, 5120, 6144, 512): (128, 64, 32, 4, 2),  # gdn_in_proj_z M<=512 (+10.2%)  [DEAD: gdn in_proj_z is FUSED with in_proj_qkv, N=16384]
+    (32, 5120, 6144, _GFX1201_MBIG): (256, 128, 32, 8, None),  # gdn_in_proj_z M<=big (+17.9%)  [DEAD: gdn in_proj_z is FUSED with in_proj_qkv, N=16384]
+    (32, 5120, 1024, 32): (32, 64, 32, 8, 4),  # kv_proj M<=32 (+81.7%)  [DEAD: k_proj/v_proj are FUSED into qkv_proj N=14336]
+    (32, 5120, 1024, 64): (64, 32, 32, 4, 3),  # kv_proj M<=64 (+60.8%)  [DEAD: k_proj/v_proj are FUSED into qkv_proj N=14336]
+    (32, 5120, 1024, 128): (32, 32, 32, 4, 2),  # kv_proj M<=128 (+19.8%)  [DEAD: k_proj/v_proj are FUSED into qkv_proj N=14336]
+    (32, 5120, 1024, _GFX1201_MBIG): (256, 128, 32, 8, None),  # kv_proj M<=big (+26.9%)  [DEAD: k_proj/v_proj are FUSED into qkv_proj N=14336]
     (32, 6144, 5120, 32): (32, 32, 32, 4, 2),  # o_proj M<=32 (+91.5%)
     (32, 6144, 5120, 64): (64, 32, 32, 4, 3),  # o_proj M<=64 (+33.9%)
     (32, 6144, 5120, 128): (128, 64, 32, 8, 2),  # o_proj M<=128 (+23.0%)
     (32, 6144, 5120, 512): (128, 128, 32, 8, 2),  # o_proj M<=512 (+22.9%)
     (32, 6144, 5120, _GFX1201_MBIG): (256, 128, 32, 8, None),  # o_proj M<=big (+12.4%)
-    (32, 5120, 12288, 32): (32, 64, 32, 8, 2),  # q_proj M<=32 (+144.4%)
-    (32, 5120, 12288, 64): (64, 128, 32, 8, 2),  # q_proj M<=64 (+131.8%)
-    (32, 5120, 12288, 128): (128, 128, 32, 8, 2),  # q_proj M<=128 (+29.1%)
-    (32, 5120, 12288, 512): (128, 128, 32, 8, 2),  # q_proj M<=512 (+12.1%)
-    (32, 5120, 12288, _GFX1201_MBIG): (256, 128, 32, 8, None),  # q_proj M<=big (+21.0%)
+    (32, 5120, 12288, 32): (32, 64, 32, 8, 2),  # q_proj M<=32 (+144.4%)  [DEAD: q_proj is FUSED into qkv_proj N=14336]
+    (32, 5120, 12288, 64): (64, 128, 32, 8, 2),  # q_proj M<=64 (+131.8%)  [DEAD: q_proj is FUSED into qkv_proj N=14336]
+    (32, 5120, 12288, 128): (128, 128, 32, 8, 2),  # q_proj M<=128 (+29.1%)  [DEAD: q_proj is FUSED into qkv_proj N=14336]
+    (32, 5120, 12288, 512): (128, 128, 32, 8, 2),  # q_proj M<=512 (+12.1%)  [DEAD: q_proj is FUSED into qkv_proj N=14336]
+    (32, 5120, 12288, _GFX1201_MBIG): (256, 128, 32, 8, None),  # q_proj M<=big (+21.0%)  [DEAD: q_proj is FUSED into qkv_proj N=14336]
+    # --- group_size 128 (Intel AutoRound checkpoint, PRODUCTION from 2026-08-11) ---
+    # Swept 2026-08-11 on the SHAPES THE KERNEL IS ACTUALLY CALLED WITH (runtime
+    # census, patches/census-shapes-gs128.json) rather than the
+    # checkpoint's tensor names -- vLLM fuses qkv and gate_up, so the two largest
+    # GEMMs here, (5120,34816) and (5120,14336), have no group_size=32 counterpart
+    # above and never did. BLOCK_K is a real column in these rows: min(BLOCK_K,
+    # group_size) no longer pins it to 32.
+    (128, 5120, 14336, 32): (32, 64, 128, 8, 2),  # K5120xN14336 M<=32 (+58.4%)
+    (128, 5120, 14336, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K5120xN14336 M<=big (+18.6%)
+    (128, 5120, 16384, 32): (32, 128, 64, 8, 2),  # K5120xN16384 M<=32 (+56.5%)
+    (128, 5120, 16384, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K5120xN16384 M<=big (+15.7%)
+    (128, 5120, 34816, 32): (32, 128, 64, 8, None),  # K5120xN34816 M<=32 (+49.6%)
+    (128, 5120, 34816, _GFX1201_MBIG): (256, 128, 32, 8, 3),  # K5120xN34816 M<=big (+10.3%)
+    (128, 6144, 5120, 32): (32, 32, 64, 4, 2),  # K6144xN5120 M<=32 (+38.7%)
+    (128, 6144, 5120, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K6144xN5120 M<=big (+16.9%)
+    (128, 17408, 5120, 32): (32, 32, 128, 4, 1),  # K17408xN5120 M<=32 (+38.0%)
+    (128, 17408, 5120, _GFX1201_MBIG): (256, 128, 32, 8, 1),  # K17408xN5120 M<=big (+27.2%)
 }
 
 
@@ -603,6 +620,23 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+
+        # _get_weight_params returns whatever `self.w_zp_name` points at, WITHOUT
+        # consulting c.zero_points -- and process_weights_after_loading only unpacks
+        # and transforms that param when c.zero_points is True. On a SYMMETRIC
+        # GPTQ-format checkpoint both are true at once: the layer really does own a
+        # `qzeros` param (GPTQ always ships one, filled with the constant 7), so the
+        # name is not None, but it is still raw packed int32 [K//G, N//8] here.
+        # Passing it through crashes in triton_w4a16_skinny_fmt_gemm's
+        # `assert zp.shape == (N, num_groups)`.
+        # Symmetric means there is nothing to pass: the ZP_BIAS=8 branch is exactly
+        # right, since GPTQ's stored 7 denotes zero point 7+1=8, which is also what
+        # scalar_types.uint4b8 encodes. Verified against this checkpoint -- every
+        # qzeros nibble in it is 7, with no exceptions.
+        # Inert on compressed-tensors symmetric weights (production), where the param
+        # does not exist at all and w_zp is already None.
+        if not c.zero_points:
+            w_zp = None
 
         x_2d = x.reshape(-1, x.shape[-1])
         N = w_q.shape[0]

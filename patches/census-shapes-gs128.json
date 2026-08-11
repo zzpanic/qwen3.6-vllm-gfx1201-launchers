@@ -1,0 +1,128 @@
+[
+ {
+  "group_size": 128,
+  "K": 6144,
+  "N": 5120,
+  "bucket": "big",
+  "calls": 4854,
+  "m_min": 1664,
+  "m_max": 2560,
+  "m_examples": [
+   1664,
+   2560
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 34816,
+  "bucket": "big",
+  "calls": 4854,
+  "m_min": 1664,
+  "m_max": 2560,
+  "m_examples": [
+   1664,
+   2560
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 17408,
+  "N": 5120,
+  "bucket": "big",
+  "calls": 4854,
+  "m_min": 1664,
+  "m_max": 2560,
+  "m_examples": [
+   1664,
+   2560
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 16384,
+  "bucket": "big",
+  "calls": 3584,
+  "m_min": 1664,
+  "m_max": 2560,
+  "m_examples": [
+   1664,
+   2560
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 14336,
+  "bucket": "big",
+  "calls": 1271,
+  "m_min": 1664,
+  "m_max": 2560,
+  "m_examples": [
+   1664,
+   2560
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 17408,
+  "N": 5120,
+  "bucket": 32,
+  "calls": 1132,
+  "m_min": 2,
+  "m_max": 10,
+  "m_examples": [
+   2,
+   10
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 6144,
+  "N": 5120,
+  "bucket": 32,
+  "calls": 532,
+  "m_min": 10,
+  "m_max": 10,
+  "m_examples": [
+   10
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 34816,
+  "bucket": 32,
+  "calls": 532,
+  "m_min": 10,
+  "m_max": 10,
+  "m_examples": [
+   10
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 16384,
+  "bucket": 32,
+  "calls": 384,
+  "m_min": 10,
+  "m_max": 10,
+  "m_examples": [
+   10
+  ]
+ },
+ {
+  "group_size": 128,
+  "K": 5120,
+  "N": 14336,
+  "bucket": 32,
+  "calls": 148,
+  "m_min": 10,
+  "m_max": 10,
+  "m_examples": [
+   10
+  ]
+ }
+]
