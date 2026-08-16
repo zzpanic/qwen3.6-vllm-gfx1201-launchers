@@ -119,7 +119,9 @@ exists:
 | NVFP4 family | no gfx1201 kernel |
 
 Verify you got the int4-head build at load: `Model loading took 17.93 GiB`. An 18.4-ish GiB
-figure means a BF16-head checkpoint.
+figure means a BF16-head checkpoint — that was measured here at 236,470 KV tokens against
+249,982, i.e. the head costs you 0.51 GiB of weights and ~13,500 tokens of context.
+Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
 
 ## Contents
 
@@ -129,8 +131,15 @@ figure means a BF16-head checkpoint.
   vision, 131072 context.
 - `startup-qwen3.6-35b-vllm.sh` — MoE 35B-A3B (256 experts), int4 W4A16, MTP off
   (KV cost doesn't pay off at this size), vision, 262144 context.
-- `logs/boot-qwen3.6-27b-vllm.log` / `logs/boot-qwen3.6-35b-vllm.log` — real boot logs
-  from container start through `Application startup complete`, captured 2026-08-09.
+- `logs/boot-qwen3.8-27b-vllm.log` — real boot log for the 3.8, container start through
+  `Application startup complete` plus the first inference JIT warnings, captured 2026-08-15.
+  Contains the three lines worth grepping for: `Using RDNAHybridW4A16LinearKernel`,
+  `Model loading took 17.93 GiB`, `GPU KV cache size: 249,982 tokens`. Captured from the
+  homelab llama-swap launcher rather than this script, so its `non-default args` line carries
+  three extra metrics flags (`enable_prompt_tokens_details`, `enable_per_request_metrics`,
+  `enable_force_include_usage`) that this script doesn't set. Nothing else differs.
+- `logs/boot-qwen3.6-27b-vllm.log` / `logs/boot-qwen3.6-35b-vllm.log` — same, for the 3.6
+  models, captured 2026-08-09.
 - `patches/` — a per-shape override table for the 27B scripts' W4A16 kernel, whose stock
   gfx1201 Triton tile heuristic is tuned on a different model's shapes and group_size.
   Measured **+4.6% to +9.6% real end-to-end prefill tokens/sec** and **+4.3% decode step

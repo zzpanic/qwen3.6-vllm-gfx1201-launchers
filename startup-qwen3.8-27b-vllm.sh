@@ -114,12 +114,16 @@ MAXSEQS="${MAXSEQS:-2}"        # per-sequence GDN state -- keep small, see the 3
 BATCHTOK="${BATCHTOK:-2560}"   # >= 2240 required by --mamba-cache-mode align.
 LMONLY="${LMONLY:-0}"          # 1 = --language-model-only, drops the vision tower.
 ASYNCSCHED="${ASYNCSCHED:-0}"  # 0 = pass --no-async-scheduling.
-GENCFG="${GENCFG:-1}"          # 1 = apply Qwen's "Thinking Mode, Precise Coding" sampling
-                               # preset as the SERVER DEFAULT via --override-generation-config
-                               # instead of the checkpoint's own generation_config.json
-                               # (temp 1.0/top_k 20/top_p 0.95). Server default only: a client
-                               # sending its own value for a key is unaffected.
-GEN_TEMP="${GEN_TEMP:-0.6}"
+GENCFG="${GENCFG:-1}"          # 1 = pin Qwen's "Thinking Mode / General Tasks" sampling preset
+                               # as the SERVER DEFAULT via --override-generation-config rather
+                               # than inheriting the checkpoint's own generation_config.json.
+                               # Server default only: a client sending its own value for a key
+                               # is unaffected.
+GEN_TEMP="${GEN_TEMP:-1.0}"    # Qwen model card, Thinking Mode / General Tasks. This is the
+                               # value every benchmark in README.md was measured at -- set it
+                               # to 0.6 for the "Precise Coding" preset (what the 3.6 script
+                               # here defaults to) if that suits your workload better, but then
+                               # the README numbers no longer describe your server.
 GEN_TOPP="${GEN_TOPP:-0.95}"
 GEN_TOPK="${GEN_TOPK:-20}"
 GEN_MINP="${GEN_MINP:-0.0}"
