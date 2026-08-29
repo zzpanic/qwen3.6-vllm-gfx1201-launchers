@@ -191,7 +191,22 @@ MAXLEN="${MAXLEN:-204800}"     # NOT 262144. The model's max_position_embeddings
 GPUUTIL="${GPUUTIL:-0.98}"
 ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}"
 MAXSEQS="${MAXSEQS:-2}"        # per-sequence GDN state -- keep small, see the 3.6 header.
-BATCHTOK="${BATCHTOK:-2560}"   # >= 2240 required by --mamba-cache-mode align.
+BATCHTOK="${BATCHTOK:-3240}"   # MUST be n*block_size + 2*(K-1), where block_size is the
+                               # align-mode attention block (1616 on this model) and K is
+                               # SPECTOK (the term is 0 with speculation off). --mamba-
+                               # cache-mode align FLOORS every mid-prefill chunk to a
+                               # block multiple, and spec decoding takes its slots off
+                               # the top first, so a budget that clears the multiple by
+                               # fewer than 2*(K-1) tokens silently drops a whole block.
+                               # The old 2560 default dispatched 1616 tokens/step and
+                               # paid activation memory for the other 944 for nothing.
+                               # 3240 = 2*1616+8 is correct with or without speculation:
+                               # +4.3% prefill @32K, +5.5% @98K, -1.3% KV pool.
+                               # Measured 2026-08-29; see the tuning log in the README.
+                               # (The previous ">= 2240 required" comment was wrong: 2240
+                               # is not a floor, and any value between block multiples is
+                               # wasted. Do NOT use n*block exactly under speculation --
+                               # that is 2*(K-1) tokens short and falls back a block.)
 LMONLY="${LMONLY:-0}"          # 1 = --language-model-only, drops the vision tower.
 ASYNCSCHED="${ASYNCSCHED:-0}"  # 0 = pass --no-async-scheduling.
 GENCFG="${GENCFG:-1}"          # 1 = pin Qwen's "Thinking Mode / General Tasks" sampling preset

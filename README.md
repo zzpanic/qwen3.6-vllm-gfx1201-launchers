@@ -226,7 +226,7 @@ Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
   on (with `SPEC=mtp` as a supported fallback), vision, 204800 context,
   `REASONING_EFFORT` knob.
 - `startup-qwen3.6-27b-vllm.sh` — dense 27B, int4 W4A16, MTP speculative decoding on,
-  vision, 131072 context.
+  vision (images only -- video untested, see TUNING.md), 131072 context.
 - `startup-qwen3.6-35b-vllm.sh` — MoE 35B-A3B (256 experts), int4 W4A16, MTP off
   (KV cost doesn't pay off at this size), vision, 262144 context.
 - `logs/boot-qwen3.8-27b-vllm-dflash2.log` — real boot log of the **shipped DFlash2
@@ -263,6 +263,9 @@ Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
   the upstream commit it came from and any deviation. Provenance, the one mandatory
   non-obvious file, the three deliberate deviations, and the one function that is not
   upstream at all are all in `patches/dflash2/README.md`.
+
+See [TUNING.md](TUNING.md) for the dated tuning log: what each non-obvious default
+is set to, what it was measured against, and the traps found along the way.
 
 ## Running the 3.8
 
