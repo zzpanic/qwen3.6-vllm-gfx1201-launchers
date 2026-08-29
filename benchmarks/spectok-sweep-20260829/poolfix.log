@@ -1,0 +1,34 @@
+### SPECTOK pool fixup, started 2026-08-29T04:19:39+00:00
+=== POOL FIXUP C-spectok6 : SPECTOK=6 BATCHTOK=4906 ===
+--- fixup boot 1 ---
+  healthy
+  Setting attention block size to 1632 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 8.97 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 218,453 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.67x
+--- fixup boot 2 ---
+  healthy
+  Setting attention block size to 1632 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 8.97 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 218,453 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.67x
+
+=== POOL FIXUP D-spectok7 : SPECTOK=7 BATCHTOK=4956 ===
+--- fixup boot 1 ---
+  healthy
+  Setting attention block size to 1648 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 8.95 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 212,098 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.62x
+--- fixup boot 2 ---
+  healthy
+  Setting attention block size to 1648 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 8.95 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 212,098 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.62x
+
+### done 2026-08-29T04:33:58+00:00

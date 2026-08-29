@@ -2,10 +2,10 @@
 
 Standalone podman/vLLM startup scripts for serving Qwen3.8-27B and Qwen3.6-27B (dense) and
 Qwen3.6-35B-A3B (MoE) int4 on a single 32 GiB AMD Radeon AI PRO R9700 (gfx1201, RDNA4),
-using the `docker.io/stilldeadcode/vllm-radiance:0.5.8` image (ROCm + AITER + a few
-gfx1201-specific perf hooks). See
-[The image these build on, and where this repo diverges](#the-image-these-build-on-and-where-this-repo-diverges)
-for what that image is and which of the decisions here are ours rather than its defaults.
+using the `docker.io/stilldeadcode/vllm-radiance` image (ROCm + AITER + a few
+gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 script, `:0.5.8` for the 3.6 ones. See
+[BACKGROUND.md](BACKGROUND.md) for what that image is, which of the decisions here are
+ours rather than its defaults, and the measurements behind each of them.
 
 Extracted from a homelab multi-model setup normally driven by
 [llama-swap](https://github.com/mostlygeek/llama-swap); these scripts have no dependency
@@ -27,198 +27,131 @@ Checkpoint: [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/d
 
 ### Throughput
 
-`MAXLEN=204800`, `MAXSEQS=2`, **DFlash2 ×4**, fp8 KV, single stream. Captured 2026-08-22.
+`MAXLEN=204800`, `MAXSEQS=2`, **DFlash2 ×4**, fp8 KV, single stream. Re-captured
+2026-08-29 against the live server, after the `KV_GROUP_SIZE=auto` group-padding fix and
+the W4A16 tile gap-fill.
 
 | prompt depth | prefill tok/s | decode tok/s | accepted draft len | engine steps/s |
 |---|---|---|---|---|
-| 3,183 | 1685.2 | 62.40 | 3.01 | 20.72 |
-| 12,520 | 1605.8 | 61.10 | 3.05 | 20.05 |
-| 38,997 | 1378.1 | 56.68 | 3.05 | 18.60 |
-| 77,851 | 1151.3 | 47.62 | 2.84 | 16.74 |
+| 3,183 | 1776.6 | 59.94 | 2.81 | 21.31 |
+| 25,565 | 1657.4 | 69.44 | 3.37 | 20.61 |
+| 76,552 | 1426.4 | 48.54 | 2.49 | 19.53 |
 
 `steps/s` is the low-noise metric — it's counted, not derived. Decode and accepted-length
-carry roughly ±6% run-to-run noise: a second pass of this identical config read
-`56.42 / 54.50 / 52.78 / 51.71` decode against step rates that matched to three figures.
-**Read the step rate, not tokens/sec.**
+carry roughly ±6% run-to-run noise, and the 25,565 rung above is a good illustration:
+its decode reads *higher* than the shallow rung, which is not a real depth effect, it is
+acceptance variance (3.37 vs 2.81) moving tokens-per-step around. **Read the step rate,
+not tokens/sec** — the step rate declines monotonically with depth, as it should.
 
-Load-time facts to check against your own boot log: **`Model loading took 19.01 GiB`**
-(target 17.93 + draft ~1.08, reported as one figure) and **`GPU KV cache size: 250,148
-tokens`** = 1.22× concurrency at `MAXLEN=204800`. Compare against
-`logs/boot-qwen3.8-27b-vllm-dflash2.log`, which is a real boot of this configuration.
+Against the same benchmark on 2026-08-22 (pre group-padding, depths 3,183 / 12,520 /
+38,997 → 1685.2 / 1605.8 / 1378.1 prefill, 20.72 / 20.05 / 18.60 steps/s): prefill is up
+~5% at the shallow rung and the step rate up ~3%, at depths that are deeper rather than
+shallower. Both passes are single captures, so treat the direction as sound and the
+magnitude as soft.
+
+Load-time facts to check against your own boot log: **`Model loading took 18.91 GiB`**
+(target 17.93 + draft ~1.08, reported as one figure) and **`GPU KV cache size: 269,837
+tokens`** = 1.32× concurrency at `MAXLEN=204800`, from `Available KV cache memory:
+9.62 GiB`. The published boot log in `logs/` predates the group-padding fix and shows
+250,148 / 1.22× — if your own boot reads ~250k, you are running `KV_GROUP_SIZE=5` and are
+leaving ~8% of the pool on the floor; see TUNING.md.
 
 **First boot after any change to the image, `MAXLEN`, or the model graph may fail**, with
 `ValueError: ... estimated maximum model length is 198016`. torch.compile runs cold on
 that boot and transiently costs ~2.28 GiB of the pool. Run it again — the second boot
 loads the compiled graph from cache and succeeds. Nothing needs changing.
 
-#### DFlash2 versus MTP
+#### BetterBench, production config, live endpoint
 
-Both are speculative decoding and both go through the same rejection sampler. MTP uses a
-draft head inside the target checkpoint and walks a **sequential** chain of K forwards;
-DFlash2 is a **separate draft model** that proposes all K tokens in **one parallel**
-forward. Measured at matched depth, same window, same card, both at `MAXLEN=131072`:
+[BetterBench](https://github.com/GGZ14/BetterBench) run against the running server with the
+production sampler, 4 runs per category, cold prefix cache. Full report and raw JSON in
+`benchmarks/live-20260829/`.
 
-| | MTP ×4 | DFlash2 ×4 | ratio |
-|---|---|---|---|
-| engine steps/s | 14.03 | 19.07 | 1.36 |
-| accepted draft len | 2.83 | 3.01 | 1.07 |
-| decode tok/s | 39.74 | 57.31 | **1.44** |
+Single stream, by workload category. ITL columns are tokens/sec: **1% low** is the stutter
+floor, median is the typical rate.
 
-The cheaper step is most of it; the slightly longer accepted draft is the rest. Prefill
-isn't in that table because speculation only runs in decode — the two arms' prefill agreed
-inside noise.
+| category | TTFT p50 (ms) | prefill t/s (med) | ITL 1% low | ITL median | decode t/s (med) | CV |
+|---|--:|--:|--:|--:|--:|--:|
+| chat | 166.4 | 852.0 | 45.8 | 71.7 | 68.7 | 18.0% |
+| code | 137.7 | 716.8 | 68.6 | 84.6 | 85.7 | 3.0% |
+| file_edit | 169.4 | 797.1 | 86.5 | 98.4 | 99.4 | 0.8% |
+| json | 140.2 | 748.9 | 57.3 | 80.3 | 89.7 | 12.0% |
+| math | 136.4 | 668.7 | 74.9 | 91.9 | 93.9 | 5.9% |
+| prose | 136.5 | 700.9 | 47.1 | 55.9 | 57.6 | 4.8% |
+| reasoning | 137.5 | 719.9 | 47.1 | 60.1 | 70.9 | 22.8% |
+| summarization | 171.2 | 826.7 | 70.6 | 79.7 | 79.9 | 7.0% |
 
-**What it costs is 8.2% of the KV pool**, because the draft model is resident and its own
-KV comes out of the same budget: 250,148 tokens against MTP's 272,585 at `MAXLEN=204800`.
-At `MAXSEQS=2` that's 1.22× concurrency instead of 1.33×. If the second full-length slot
-is worth more to you than the decode speed, `SPEC=mtp` is still supported and still
-correct — it's one environment variable, and the MTP numbers below describe it.
+Weighted combined: **decode ≈ 79.9 tok/s**, ITL 1%-low ≈ 61.4 tok/s, **TTFT p50 ≈ 144 ms**.
+The prefill column here is lower than the depth ladder above because these prompts are short
+— prefill rate climbs with depth until the pool starts to bite, which is what the sweep below
+shows.
 
-`SPECTOK=4` is measured, not assumed: K was swept over {4, 6, 7, 8} and 4 wins, with
-K ≥ 7 unable to hold `MAXLEN=204800` at all (the draft's own KV grows with K).
+Prefill against input depth (tiny decode, cold cache):
 
-#### Which DFlash2 draft checkpoint
+| target depth | prompt tokens (med) | TTFT p50 (ms) | prefill t/s (median) |
+|--:|--:|--:|--:|
+| 2,000 | 1,544 | 946.0 | 1632.4 |
+| 8,000 | 5,948 | 3,424.8 | **1736.8** |
+| 16,000 | 11,824 | 6,967.7 | 1696.8 |
+| 32,000 | 23,573 | 14,448.7 | 1631.5 |
+| 64,000 | 47,086 | 30,759.9 | 1530.7 |
 
-Two exist. Both were measured here at `MAXLEN=131072`, everything else held constant:
+Prefill peaks near 8k and has lost only **12%** by 47k tokens of context. The 1%-low to
+99%-high spread is under one tok/s at every rung — prefill on this card is essentially
+noiseless, unlike decode.
 
-| draft checkpoint | added weights | steps/s | acc. len | decode tok/s |
-|---|---|---|---|---|
-| *(none — MTP head in the target)* | — | 14.03 | 2.83 | 39.74 |
-| [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) (bf16), greedy | +3.47 GiB | 17.58 | 2.68 | 47.19 |
-| [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16) (int4), greedy | +1.08 GiB | 18.74 | 2.61 | 48.80 |
-| **`syvai/…-W4A16` (int4), probabilistic** | **+1.08 GiB** | **19.07** | **3.01** | **57.31** |
+Concurrency, at the shipped `MAXSEQS=2`:
 
-"Added weights" is the measured `Model loading took` figure minus the 17.93 GiB target,
-which is what actually comes out of the KV pool.
+| concurrent requests | aggregate t/s | per-request decode t/s | TTFT p50 (ms) |
+|--:|--:|--:|--:|
+| 1 | 74.9 | 87.6 | 139.5 |
+| 2 | 113.9 | 68.4 | 187.5 |
 
-**Take the int4 one and sample it probabilistically.** int4 is not a quality compromise
-here — it is *faster* than the bf16 draft and 2.39 GiB lighter, and that 2.39 GiB goes
-straight back into the KV pool.
+**1.52× aggregate throughput for 0.78× per-request speed.** Two streams is worth it if you
+have two streams; it is not free.
 
-`draft_sample_method` is the larger of the two levers and it is one word.
-`greedy` makes the drafter commit to its argmax; `probabilistic` samples from its
-distribution, and the target then accepts more of it — 2.61 → 3.01 tokens per step, +15%,
-worth +17% decode on its own. It's the single largest tuning win in this configuration.
+### Speculative decoding, in one paragraph
 
-The int4 draft is a **packed compressed-tensors** checkpoint, which merged upstream vLLM
-cannot load at all — see `patches/dflash2/README.md`.
-
-<details>
-<summary>The MTP numbers this replaced (2026-08-15, <code>MAXLEN=131072</code>, MTP ×4)</summary>
-
-| prompt depth | prefill tok/s | decode tok/s | accepted draft len | engine steps/s |
-|---|---|---|---|---|
-| 3,183 | 1618.9 | 44.34 | 3.03 | 14.64 |
-| 12,520 | 1546.7 | 39.81 | 2.77 | 14.40 |
-| 38,997 | 1335.1 | 43.91 | 3.18 | 13.80 |
-| **mean** | **1500.2** | **42.69** | **2.99** | **14.28** |
-
-Weights 17.93 GiB, GPU KV cache 249,982 tokens = 1.91× concurrency at `MAXLEN=131072`.
-This is what `SPEC=mtp` still gives you, and it is what `logs/boot-qwen3.8-27b-vllm.log`
-was captured on.
-
-</details>
-
-**Against Qwen3.6-27B**, which still runs MTP. The 3.6 arm was captured 2026-08-11 and not
-re-baselined in the same window, so treat the magnitudes as soft:
-
-| | 3.6-27B (MTP) | 3.8-27B (MTP) | 3.8-27B (DFlash2) |
-|---|---|---|---|
-| prefill tok/s | 1513.2 | 1500.2 | ~1500 |
-| engine steps/s | 16.61 | 14.28 | 19.07 |
-| accepted draft len | 4.25 | 2.99 | 3.01 |
-| decode tok/s | 71.2 | 42.7 | 57.3 |
-
-**On MTP the 3.8 decoded materially slower than the 3.6, and it was not a missing
-optimisation.** All 13 performance env vars are byte-identical between the two launchers;
-the difference was speculative-decode *acceptance* — the 3.8 checkpoint's MTP head drafts
-worse, and the two `mean_len` distributions didn't overlap. Whether that is Qwen 3.8 or
-that particular quantizer's head was never tested, and with DFlash2 it stops mattering:
-swapping the drafter recovers most of the gap without touching the target checkpoint. The
-3.6 has not been re-measured on DFlash2 — no DFlash2 draft has been published for it.
+The default is **DFlash2 ×4** with the int4 draft checkpoint sampled probabilistically. That
+combination decodes **1.44× faster than the target's own MTP head** (19.07 vs 14.03 engine
+steps/s at matched depth) and costs **8.2% of the KV pool**, because the draft model is
+resident. `SPEC=mtp` remains supported and drops the draft model entirely. `SPECTOK=4` is a
+measured **workload** choice, not a universal one: over K ∈ {4,5,6,7} aggregate decode barely
+moves, but math gains 13.9% and chat loses 8.9% going to K=7. A math- or code-heavy server
+should run K=7. Draft-checkpoint comparison, the K tables, and the retracted "K≥7 doesn't
+fit" claim are in [BACKGROUND.md](BACKGROUND.md#dflash2-versus-mtp) and TUNING.md.
 
 ### Quality
 
-Measured against the **live server through this exact config** (fp8 KV + speculative
-decoding + thinking template at `REASONING_EFFORT=low`), not against the weights in
-isolation.
+Measured against the **live server through this exact config** — fp8 KV, speculative
+decoding, thinking template — not against the weights in isolation.
 
 | | **this checkpoint** | AMD Quark-Qronos | AMD Quark-AWQ | Qwen BF16 base |
 |---|---|---|---|---|
 | GSM8K 5-shot (thinking), DFlash2 | **93.71%** | — | — | — |
 | GSM8K 5-shot (thinking), MTP | **94.77%** | 94.62% | 91.21% | 93.33% |
 | BFCL v4 overall (single_turn) | **25.29%** | 23.80% | 24.06% | 24.38% |
-| BFCL Non-Live AST | 87.46% | 85.17% | 86.58% | **88.52%** |
-| BFCL Live AST | 81.87% | **82.09%** | 81.57% | **83.05%** |
-| BFCL Relevance Detection | **75.00%** | 62.50% | **75.00%** | **75.00%** |
-| BFCL Irrelevance Detection | **83.62%** | 70.79% | 72.47% | 72.22% |
 
-**The BFCL row was measured on the MTP config and has not been re-scored on DFlash2.**
-The GSM8K pair above is the like-for-like decoder comparison: same harness, same config,
-one variable. The 1.06 pp gap is **1.17σ on 1319 problems** — not a distinguishable
-difference at this sample size, in either direction. Both are temperature-1.0 numbers;
-greedy scores ~97.6% on the same harness, which is worth knowing before reading either
-figure as a quality ceiling.
+Single runs, no seeds, and not a like-for-like reproduction of AMD's harness — the 0.15 pp
+over Qronos is not a win, and both GSM8K figures are temperature-1.0 (greedy scores ~97.6%
+on the same harness). The DFlash2-vs-MTP gap is 1.17σ on 1319 problems, i.e. not
+distinguishable. Per-category BFCL, the caveats in full, and the one generalisable takeaway
+— **the standard AutoRound recipe transfers across uploaders**, beating two AMD checkpoints
+built with more sophisticated algorithms — are in [BACKGROUND.md](BACKGROUND.md#quality-in-full).
 
-BFCL per-category, ours: `simple_python 95.00 · simple_java 63.00 · simple_javascript
-68.00 · multiple 95.50 · parallel 90.50 · parallel_multiple 88.50 · irrelevance 86.25 ·
-live_simple 87.60 · live_multiple 80.44 · live_parallel 93.75 · live_parallel_multiple
-75.00 · live_irrelevance 81.00 · live_relevance 75.00`. 3641 entries, `--temperature 0.001`,
-`--num-threads 2`, 3 h 02 m. "Overall Acc" is ~25% rather than ~85% because this is
-single-turn only — the multi-turn and agentic categories, which AMD also omits, drag the
-aggregate down for everyone.
+### Checkpoint choice, and the image
 
-Read these honestly:
+There is **no Intel AutoRound release for 3.8**; every other int4 candidate was rejected for
+a specific measured reason (BF16 MTP heads, gs=32 off the tuned table, or simply not fitting
+the card). Verify you got the right build at load: `Model loading took 17.93 GiB`, or
+19.01 GiB with the DFlash2 draft included. The rejection table is in
+[BACKGROUND.md](BACKGROUND.md#why-not-the-other-38-int4-checkpoints).
 
-- **Not a like-for-like reproduction of AMD's harness.** They ran `--model vllm` in-process
-  with `enforce_eager`, BF16 KV and no speculative decoding. These numbers went through the
-  full production serving stack. That measures *the deployed path*, which is the useful
-  thing here, but it is not the same experiment.
-- **Single run, no seeds, no error bars.** GSM8K's ±0.61 is binomial SE only; the 0.15 pp
-  over Qronos is not a win. Scoring above the BF16 base is a known temperature-1.0 artifact
-  (AMD's Qronos shows it too), not evidence that quantization helped.
-- **Distrust the irrelevance row specifically.** +11.4 pp over the BF16 base is not
-  something int4 does. The likely cause is the thinking template talking the model out of
-  spurious calls, i.e. a harness difference rather than a checkpoint difference.
-- **The losses are real and they're Java/JavaScript typed literals** — `simple_java` 63.00%
-  against `simple_python` 95.00%, dominated by `type_error:simple`. That is the whole of
-  the gap to the BF16 base.
-- Neither eval says anything about the drafter comparison above. Both measure
-  target-model output.
-
-The takeaway worth generalising: **the AutoRound recipe transfers across uploaders.** This
-is an unknown author's checkpoint using AutoRound's standard settings (gs=128, symmetric,
-`auto_round:auto_gptq`, the default `linear_attn.in_proj_a/b` fp16 exclusions), and it beats
-two AMD-authored checkpoints built with more sophisticated algorithms — Qronos is
-Hessian-based PTQ with a paper behind it. Prefer standard AutoRound over a clever algorithm
-with a bespoke module list.
-
-### Why not the other 3.8 int4 checkpoints
-
-There is **no Intel AutoRound release for 3.8** (they published three for the 3.6). Of what
-exists:
-
-**One caveat on this whole table, added 2026-08-22.** It ranks candidates largely on their
-MTP draft head, and with `SPEC=dflash2` — now the default — the target's MTP head is never
-called. It is then simply 0.51 GiB of resident dead weight, so the argument weakens from
-"the int4 head drafts better" to "the int4 head is smaller". It still selects the same
-checkpoint, for a weaker reason. The argument returns in full under `SPEC=mtp`.
-
-| candidate | why not |
-|---|---|
-| `amd/…Quark-Qronos-INT4-W4A16` | **BF16 MTP head** (all 15 `mtp.*` tensors plain BF16). A sibling 3.8 checkpoint with the same BF16 head was measured here at +0.51 GiB and ~9% slower decode; AMD's own were not downloaded, so that cost is inferred from the shape, not measured on theirs |
-| `amd/…Quark-AWQ-INT4-W4A16` | same, BF16 MTP head |
-| `goldhub/…INT4-W4A16-AutoRound` | gs=32 → clamps `BLOCK_K` to 32, off the tuned gs=128 table; also 26.37 GiB |
-| `Israeli-AI/…MTP-W4A16` | 25.77 GiB, mostly unquantized, BF16 MTP head |
-| `Qwen/Qwen3.8-27B-FP8` (official) | 28.75 GiB + 3.29 GiB measured overhead = **overruns the 31.86 GiB card before a single KV byte** |
-| NVFP4 family | no gfx1201 kernel |
-
-Verify you got the int4-head build at load: `Model loading took 17.93 GiB`. With
-`SPEC=dflash2` that line reports target *and* draft as one figure — 19.01 GiB — so subtract
-~1.08 GiB for the int4 draft before comparing. An 18.4-ish GiB figure (19.5-ish with the
-draft) means a BF16-head checkpoint — that was measured here at 236,470 KV tokens against
-249,982, i.e. the head costs you 0.51 GiB of weights and ~13,500 tokens of context.
-Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
+These scripts run a third-party ROCm image (`vllm-radiance`) whose own tested envelope is
+FP8 weights on two cards; this repo runs int4 on one, i.e. **outside it** — so nothing here
+should be read as a defect report against that image. The full divergence table, one
+divergence per row with the measurement behind it, is in
+[BACKGROUND.md](BACKGROUND.md#the-image-these-build-on-and-where-this-repo-diverges).
 
 ## Contents
 
@@ -253,16 +186,38 @@ Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
 
   **The same table serves 3.6 and 3.8.** It is keyed `(group_size, K, N, M-bucket)` — GEMM
   shape, not model name — and 3.8 is the same architecture at the same group_size, so every
-  fused shape is identical. Re-confirmed by a runtime kernel census on a 3.8 load: **99.45%
-  of kernel work lands on tuned rows.** Nothing to re-sweep.
+  fused shape is identical. Re-confirmed by a runtime kernel census on a 3.8 load under
+  DFlash2, then gap-filled on 2026-08-29: **100.00% of kernel work lands on tuned rows**
+  (0.61% uncovered before). Bucket 64 had been entirely empty and the DFlash2 drafter GEMM
+  `K25600xN5120` had no row at any bucket. Census, sweep and the measurement trap are in
+  `benchmarks/w4a16-census-20260829/`. **This closed coverage, not throughput** — the
+  uncovered work was inside the prefill noise floor, so expect benchmarks not to move.
+
+- `patches/radiance-0.9.3/` — two patched **copies of the default image's own files**,
+  mounted read-only on every 3.8 boot: `v1/core/kv_cache_utils.py` adds the `KV_GROUP_SIZE`
+  knob (+21.2% KV pool, see the tuning log) and `model_executor/models/qwen3_dflash.py`
+  lets merged-upstream DFlash2 load a *packed int4* draft checkpoint. Every local hunk is
+  marked in-file. These are copies, so they are **version-bound**: bumping the image tag
+  silently reverts that image's own fixes in these two files. Rebase by diffing against the
+  new image's stock file, never by replaying the patch.
 
 - `patches/dflash2/` — a ten-file back-port of vLLM **PR #52816** (DFlash2 speculative
-  decoding) onto the vLLM 0.26.0 inside the image, bind-mounted read-only over the image's
-  `vllm` package whenever `SPEC=dflash2`. **The 3.8 script cannot run DFlash2 without it** —
-  the image predates the PR and fails on an unknown model architecture. Every file names
+  decoding) onto the vLLM 0.26.0 inside `vllm-radiance:0.5.8`. **Only needed on that
+  image**, which the 3.8 script no longer defaults to: on the default `:0.9.3` DFlash2 is
+  native, `DFLASH2_PATCH` defaults to 0, and the launcher refuses the combination outright
+  because this port would land on top of theirs. Every file names
   the upstream commit it came from and any deviation. Provenance, the one mandatory
   non-obvious file, the three deliberate deviations, and the one function that is not
   upstream at all are all in `patches/dflash2/README.md`.
+
+- `benchmarks/` — the raw numbers and the scripts that produced them: the production server
+  as shipped (depth ladder, prefill sweep, concurrency, per-category BetterBench), the
+  speculative-depth sweep over K ∈ {4,5,6,7}, and the W4A16 shape census. `benchmarks/README.md`
+  explains how to read them and which ones are soft.
+
+See [BACKGROUND.md](BACKGROUND.md) for the long-form reasoning: the decoder and
+draft-checkpoint comparisons, the quality evals in full, the rejected checkpoints, and the
+divergence table against the underlying image.
 
 See [TUNING.md](TUNING.md) for the dated tuning log: what each non-obvious default
 is set to, what it was measured against, and the traps found along the way.
@@ -281,7 +236,8 @@ The second download is the DFlash2 draft model. To run without it:
 SPEC=mtp MAXLEN=131072 ./startup-qwen3.8-27b-vllm.sh
 ```
 
-which is the configuration every MTP number in this README was measured on.
+which is the configuration every MTP number in [BACKGROUND.md](BACKGROUND.md) was
+measured on.
 
 The DFlash2 knobs are `SPEC` (`dflash2` | `mtp` | `off` | `ngram`), `DRAFT_DIR`,
 `DRAFT_SAMPLE_METHOD` (`probabilistic` | `greedy`), `DRAFT_ATTN`, and `DFLASH2_PATCH`.
@@ -367,66 +323,29 @@ comment.
 Whichever you use, confirm `RDNAHybridW4A16LinearKernel` appears in the boot log. On
 AutoRound its absence means the config patch didn't take.
 
-## The image these build on, and where this repo diverges
 
-Every script here runs **`docker.io/stilldeadcode/vllm-radiance:0.5.8`** — a third-party
-ROCm build of vLLM carrying gfx1201/RDNA4-specific work that stock vLLM does not have.
-None of these launchers would reach these numbers on an upstream vLLM image, and the
-credit for that half belongs to its author, not to this repo.
+## Credit
 
-The image is built from a public source repository:
-**[codeberg.org/StillDeadcode/vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance)**.
-Read that before this section — it is the authority on what the image is, and its
-`DOCKERHUB.md` carries the full environment-variable reference.
-
-Two things to know about it before you depend on it:
-
-- **Pin it by commit, not by tag.** The repository publishes no git tags and no releases; the
-  version lives in a single `VERSION` file on `main`, which read `0.5.8` at the time of writing
-  (commit `a55f1bc`, 2026-08-14). `main` moving does not change the Docker tag it produces, so a
-  future `0.5.8` build need not be this one — if you need to reproduce these numbers exactly, pin
-  the commit as well as the image tag. The repository also carries no `LICENSE` file at the time
-  of writing, which is worth knowing before you vendor any of it.
-- **Its own centre of gravity is not this configuration**, by its author's own statement. Its
-  README gives the tested envelope as three FP8 models "all with fp8 (or bf16/`auto`) KV cache on
-  **two R9700 GPUs (tensor parallel)**", and says in as many words that "**non-FP8 weights, single
-  or 3+ GPUs** … are untested". This repo sits squarely in that untested region: **int4 W4A16 on a
-  single card at TP=1**, every model. The practical read is that the fp8-weight GEMM path the image
-  *owns* is not a path any of these scripts take, and neither is the TP=2 collective work; what they
-  do use — attention and the fp8 **KV cache** — sits much closer to stock vLLM. That is the good
-  news, because it means upstream fixes to those reach us through a version bump rather than needing
-  the fork to carry them. It is also why nothing here should be read as a defect report against that
-  image: it is being run well outside the envelope its author tested.
-
-### Where this repo diverges, and why
-
-| divergence | why |
-|---|---|
-| **int4 W4A16, not FP8** | The 27B in FP8 is 28.75 GiB of weights plus 3.29 GiB measured overhead, which overruns a 31.86 GiB card before a single KV byte. FP8 is the configuration this card *wants* on models that fit; these don't. |
-| **TP=1, single card** | One R9700, not two. Everything here — KV budgeting, `MAXSEQS`, the concurrency arithmetic — is sized for one. |
-| **Tuned W4A16 tile table** (`patches/rdna_hybrid_w4a16.py`, `TUNED_TILES=1`) | The image's own gfx1201 Triton tile heuristic is tuned on a different model's shapes and group_size. Re-sweeping it for these shapes at gs=128 measured **+4.6–9.6% prefill and +4.3% decode step rate**. It also carries a symmetric-GPTQ zero-point fix the AutoRound checkpoints need to run at all. |
-| **`--no-async-scheduling`** (`ASYNCSCHED=0`) | vLLM's default is async scheduling on. On this host (a 4-vCPU guest) enabling it measured **42–45% slower decode** — the per-step CPU-side scheduling work is the bottleneck, so overlapping it with GPU execution hurts. Likely host-specific; it's a knob. |
-| **`ROCM_AITER_UNIFIED_ATTN`** for the target | Swept against `TRITON_ATTN` and `ROCM_ATTN` on this card; AITER unified won by 88–92% on deep prefill and 97–99% on decode against the respective runners-up. The cost is that CPU KV offload, which needs `TRITON_ATTN`, is off the table — a real trade. |
-| **`TRITON_ATTN` for the DFlash2 draft** | Not a preference — DFlash2's draft attention is non-causal and AITER refuses a non-causal mask. The two backends are set independently. |
-| **fp8 KV cache** | Doubles the KV pool on a card where the pool is the binding constraint. |
-| **The AutoRound `config.json` routing patch** (`CONFIG_FIX=1`) | vLLM 0.26's INC backend hijacks any checkpoint declaring `quant_method: "auto-round"` and lands on the wrong kernel, and a missing `modules_in_block_to_quantize` loads the model **fully unquantized** — both silently. Not an image issue; it bites any stack at this vLLM version. |
-| **`MAXLEN=204800`** on the 3.8 | Sized to the measured KV pool, not to the model's 262144 `max_position_embeddings`. vLLM refuses to start when `max-model-len` exceeds the pool. |
-| **DFlash2 back-port** (`patches/dflash2/`) | The image is built on vLLM **0.26.0** (its Dockerfile pins `ARG VLLM_VERSION=0.26.0`), which predates DFlash2 (upstream PR #52816, merged 2026-08-21). Rebuilding the image to get it would have cost the gfx1201 work above, so the PR was back-ported onto 0.26.0 as ten bind-mounted files instead. Full provenance in `patches/dflash2/README.md`. |
-
-One image behaviour is left at its default and is worth naming because it is
-**fork-specific rather than upstream vLLM**: `RADIANCE_DYNAMIC_DRAFT=1` enables a per-request
-draft-depth controller that lives in the image, not in the `vllm` package (source:
-`radiance_draft.py`; the image's `DOCKERHUB.md` documents the knob, and `=0` restores stock
-behaviour). It applies to `method=mtp` only, so it is inert on the DFlash2 default here and
-live under `SPEC=mtp`. These scripts leave it alone.
-
-### Credit
+Almost none of the code here was written for this repo. The launchers are shell wrappers;
+the substance — the ROCm/gfx1201 kernel work, DFlash2, vLLM itself — is other people's, and
+what this repo adds on top is measurement, configuration, and documentation of both.
 
 - **`stilldeadcode`** — the [`vllm-radiance`](https://codeberg.org/StillDeadcode/vllm-radiance)
   image, and the gfx1201 kernel work in it. Bug reports about the *image* belong on its issue
   tracker there, not here.
-- **vLLM PR #52816** — DFlash2 itself. Everything in `patches/dflash2/` is a derived work
-  of vLLM, Apache-2.0, headers intact.
+- **The vLLM project** — everything under `patches/` is a derived work of vLLM,
+  Apache-2.0, SPDX headers intact. None of it is original code. `patches/dflash2/` is
+  upstream **PR #52816** back-ported; `patches/radiance-0.9.3/` is two of the radiance
+  image's own vLLM 0.27.1 files with a marked local hunk each; `patches/rdna_hybrid_w4a16.py`
+  is vLLM's own kernel with a per-shape override table added. Every file names the base it
+  was copied from and comments each deviation in place.
+- **The checkpoints** — [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/devan-carlin/Qwen3.8-27B-int4-AutoRound)
+  (the served weights) and [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
+  (the DFlash2 draft model). Neither was quantized here; both are other people's work and
+  carry their own licences on the Hub.
+- **[BetterBench](https://github.com/GGZ14/BetterBench)** (Apache-2.0) — the benchmark
+  harness behind `benchmarks/live-20260829/betterbench-full.*`. Not vendored; run against
+  the live endpoint, output published verbatim.
 - **[`BMorgan1296/qwen3.6-vllm-gfx1201-launchers`](https://github.com/BMorgan1296/qwen3.6-vllm-gfx1201-launchers)**
   — an independent adaptation of these launchers that got DFlash2 running on this card
   first. Its `_dense_kv_rows()` is the piece merged upstream doesn't have and without

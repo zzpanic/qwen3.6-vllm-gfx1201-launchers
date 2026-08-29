@@ -1,0 +1,31 @@
+census: 182 distinct (gs,K,N,M) keys, 30,720 calls, 10034.14 Tflop-equiv (sum M*K*N)
+distinct M values observed: [2, 4, 5, 8, 10, 16, 45, 59, 64, 1616, 1621, 1702, 1790, 1878, 1948, 1973, 2126, 2208, 2249, 2336, 2356, 2424, 2434, 2513, 2515, 2593, 3232, 3237, 4224, 4518, 4848, 4854, 5120]
+
+             shape  bucket  covered     calls   work%  M values
+      K5120xN34816    MBIG      yes     6,578  46.60%  1616,1621,1702,1790,1878,1948...
+      K17408xN5120    MBIG      yes     6,578  23.30%  1616,1621,1702,1790,1878,1948...
+      K5120xN16384    MBIG      yes     4,934  16.45%  1616,1621,1702,1790,1878,1948...
+       K6144xN5120    MBIG      yes     6,578   8.22%  1616,1621,1702,1790,1878,1948...
+      K5120xN14336    MBIG      yes     1,644   4.80%  1616,1621,1702,1790,1878,1948...
+      K25600xN5120    MBIG       NO       102   0.53%  1616,1621,1702,1790,1878,1948...
+      K5120xN34816      64       NO       256   0.03%  45,59,64
+      K17408xN5120      64       NO       256   0.01%  45,59,64
+      K25600xN5120      32       NO     1,283   0.01%  2,5,8,10,16
+      K5120xN16384      64       NO       192   0.01%  45,59,64
+       K5120xN6144    MBIG       NO         5   0.01%  5120
+      K5120xN34816      32      yes       399   0.01%  8,10,16
+      K17408xN5120      32      yes       793   0.01%  2,4,5,8,10,16
+       K6144xN5120      64       NO       256   0.00%  45,59,64
+      K5120xN16384      32      yes       288   0.00%  8,10,16
+      K5120xN14336      64       NO        64   0.00%  45,59,64
+       K6144xN5120      32      yes       384   0.00%  8,10,16
+      K5120xN14336      32      yes        96   0.00%  8,10,16
+      K25600xN5120      64       NO         4   0.00%  45,59,64
+       K5120xN6144      32       NO        15   0.00%  10
+       K4096xN5120      32       NO        15   0.00%  10
+
+UNCOVERED WORK: 0.61% of total GEMM work
+
+--- sweep candidates (uncovered, >=1% of work) ---
+  none. Every bucket carrying >=1% of work already has a tuned row.
+  => the installed table is optimal for this workload; nothing to sweep.

@@ -118,6 +118,21 @@ reachable. That sweep's three biggest headline "wins" (`gate_up_proj` +99.8%, `q
 The GDN fusion (`in_proj_qkv` + `in_proj_z` → N=16384) was **not** predictable from reading
 the model source. Only the census caught it.
 
+**Re-censused 2026-08-29 under DFlash2, and the shape set had moved.** The five above were
+an MTP-era picture; a separate draft model adds shapes the table predated. The new census
+(182 distinct keys, 30,720 calls, in `benchmarks/w4a16-census-20260829/`) found two
+structural holes: **bucket 64 was entirely empty** while DFlash2 puts real traffic at
+M = 45/59/64, and **`K25600xN5120` had no row at any bucket** — the drafter GEMM, 87% of all
+uncovered work, where 25600 is `num_hidden_layers(5) × hidden_size(5120)`. Fourteen rows
+were installed and coverage went **0.61% uncovered → 0.0000%**.
+
+That closed *coverage*, not throughput: 0.61% of GEMM flops sits inside a 0.2–0.6% prefill
+noise floor, so a flat benchmark afterwards is the expected result. And if you re-run that
+sweep, note that its `current_cfg()` reproduces the **stock** heuristic and never consults
+the installed table — its percentages mean "win over stock", which equals "win over what you
+are running" only for keys with no installed row. Rows were therefore installed **only where
+no incumbent existed**.
+
 `make_shapelog_kernel.py` generates an instrumented kernel for this. Run the server once,
 then read the census back. **Trap:** vLLM runs ≥2 processes and both import the kernel
 module, but only EngineCore ever calls it — so an `atexit` dump from the API-server process
@@ -127,7 +142,9 @@ was never called". Refuse to flush an empty census.
 ## What's here
 
 - `rdna_hybrid_w4a16.orig.py` — the stock kernel as shipped in `vllm-radiance:0.5.8`,
-  pulled unmodified from the container, kept for diffing.
+  pulled unmodified from the container, kept for diffing. Still current: the fork touches
+  `rdna_hybrid_w4a16.py` nowhere, and `:0.9.3`'s copy is byte-identical to stock vLLM
+  0.27.1's, so this table carries across image bumps with no rebase work.
 - `rdna_hybrid_w4a16.py` — the file the launcher actually mounts. `diff` it against
   `.orig.py` to see everything that changed; it is small and additive.
 - `bench_gapfill.py` / `bench_gapfill_results.tsv` — the group_size=32 isolated-kernel

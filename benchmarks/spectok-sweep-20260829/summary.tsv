@@ -1,0 +1,9 @@
+# SPECTOK sweep, qwen3.8-27b int4 + dflash2, MAXLEN=131072, MAXSEQS=2, greedy, 8 runs/category
+# decode t/s = median. acceptance/accepted_len from vLLM spec_decode counters (exact, not sampled).
+# pool/conc measured on a WARM boot. max_ctx modelled (calibrated 0.05% on K=4).
+K	block	batchtok	pool_131072	conc	max_ctx_model	acceptance	accepted_len	drafts	draft_tok	accepted_tok	chat	code	math	reasoning	combined
+4	1616	4854	231602	1.77	260176	0.639	3.556	5099	20396	13031	65.5	84.5	97.0	70.6	79.0
+5	1616	4856	222575	1.72	255328	0.581	3.905	4675	23375	13580	59.6	74.8	92.3	61.5	69.5
+6	1632	4906	218453	1.67	249696	0.524	4.142	4413	26478	13862	60.2	82.8	102.1	66.6	76.3
+7	1648	4956	212098	1.62	243904	0.481	4.369	4175	29225	14065	59.7	85.6	110.5	68.1	78.6
+# control: K=4 re-run last -> combined 78.8 (-0.25% vs arm A), counters bit-identical

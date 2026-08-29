@@ -242,6 +242,41 @@ _GFX1201_PREFILL_OVERRIDES: dict[tuple[int, int, int, int], tuple[int, int, int,
     (128, 6144, 5120, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K6144xN5120 M<=big (+16.9%)
     (128, 17408, 5120, 32): (32, 32, 128, 4, 1),  # K17408xN5120 M<=32 (+38.0%)
     (128, 17408, 5120, _GFX1201_MBIG): (256, 128, 32, 8, 1),  # K17408xN5120 M<=big (+27.2%)
+
+    # ---- 2026-08-29 DFlash2 gap-fill (benchmarks/w4a16-census-20260829) ----
+    # Added ONLY where the table had no incumbent row, so the sweep's baseline
+    # (the stock gfx12x heuristic, which is what these keys actually fall to) is
+    # the true baseline. Rows for keys already tuned at bucket 32/MBIG were NOT
+    # touched: there the sweep compared against stock, not against the installed
+    # row, so its percentages do not apply. Percentages below are ISOLATED-KERNEL
+    # only -- total uncovered work was 0.61% of GEMM flops, which is inside the
+    # end-to-end noise floor. This closes COVERAGE, not throughput; see the
+    # Ornith 35b sweep for isolated wins that did not transfer.
+    #
+    # Bucket 64 was entirely EMPTY before this block (only 32 and MBIG existed),
+    # while DFlash2 puts real traffic at M=45/59/64. Each bucket-64 row is the
+    # winner measured AT M=64, the bucket's upper bound and its costliest M.
+    (128, 4096, 5120, 64): (64, 32, 128, 4, 2),  # K4096xN5120 M<=64 (+40.0%)
+    (128, 5120, 6144, 64): (64, 64, 64, 4, 1),  # K5120xN6144 M<=64 (+43.3%)
+    (128, 5120, 14336, 64): (64, 64, 64, 4, 2),  # K5120xN14336 M<=64 (+16.7%)
+    (128, 5120, 16384, 64): (64, 64, 64, 4, None),  # K5120xN16384 M<=64 (+17.2%)
+    (128, 5120, 34816, 64): (64, 64, 64, 4, 2),  # K5120xN34816 M<=64 (+16.6%)
+    (128, 6144, 5120, 64): (64, 32, 128, 8, 2),  # K6144xN5120 M<=64 (+22.6%)
+    (128, 17408, 5120, 64): (64, 32, 128, 8, None),  # K17408xN5120 M<=64 (+6.7%)
+    (128, 25600, 5120, 64): (64, 32, 128, 4, 1),  # K25600xN5120 M<=64 (+1.1%)
+    # K25600xN5120 is the DFlash2 drafter GEMM the table predated entirely: no
+    # row at ANY bucket, and 87% of all uncovered work. MBIG is the prize --
+    # stock runs (128,64,64,8) at 31.11ms where 14.43ms suffices. M=1616 wanted
+    # ns=3 and M=4848 ns=2 on the same tile; ns=2 wins because M=4848 (BATCHTOK
+    # 4854 = 3x1616 + 2x(SPECTOK-1)) is 6.6x the cost of the M=1616 case.
+    (128, 25600, 5120, 32): (32, 32, 64, 4, 1),  # K25600xN5120 M<=32 (+30.2%)
+    (128, 25600, 5120, _GFX1201_MBIG): (256, 128, 32, 8, 2),  # K25600xN5120 M<=big (+115.6%)
+    (128, 5120, 6144, 32): (32, 64, 128, 8, 4),  # K5120xN6144 M<=32 (+42.4%)
+    (128, 5120, 6144, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K5120xN6144 M<=big (+18.1%)
+    (128, 4096, 5120, 32): (32, 64, 64, 8, None),  # K4096xN5120 M<=32 (+10.8%)
+    (128, 4096, 5120, _GFX1201_MBIG): (256, 128, 32, 8, None),  # K4096xN5120 M<=big (+16.5%)
+    # Buckets 128 and 512 stay empty on purpose: the census observed M values
+    # jump straight from 64 to 1616, so nothing lands there under this workload.
 }
 
 
@@ -621,6 +656,8 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
+        # SYMMETRIC W4A16 CARRIES NO ZERO-POINTS -- drop whatever the loader handed us.
+        #
         # _get_weight_params returns whatever `self.w_zp_name` points at, WITHOUT
         # consulting c.zero_points -- and process_weights_after_loading only unpacks
         # and transforms that param when c.zero_points is True. On a SYMMETRIC
@@ -631,11 +668,25 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         # `assert zp.shape == (N, num_groups)`.
         # Symmetric means there is nothing to pass: the ZP_BIAS=8 branch is exactly
         # right, since GPTQ's stored 7 denotes zero point 7+1=8, which is also what
-        # scalar_types.uint4b8 encodes. Verified against this checkpoint -- every
-        # qzeros nibble in it is 7, with no exceptions.
-        # Inert on compressed-tensors symmetric weights (production), where the param
-        # does not exist at all and w_zp is already None.
-        if not c.zero_points:
+        # scalar_types.uint4b8 encodes.
+        # Inert on compressed-tensors symmetric weights, where the param does not
+        # exist at all and w_zp is already None.
+        #
+        # MERGED 2026-08-25 from rdna_hybrid_w4a16_symzp.py, which was forked from the
+        # IMAGE's stock kernel on 2026-08-14 (hence no tile table) and guarded the same
+        # bug with a different condition. Both disjuncts are kept because they fail in
+        # opposite directions:
+        #   * `not c.zero_points` is what actually fires today -- AutoGPTQLinearMethod
+        #     hardcodes zero_points=False at auto_gptq.py:350 for EVERY checkpoint,
+        #     symmetric or not, while registering a `qzeros` param anyway at :445.
+        #   * `c.weight_type.has_bias()` is the same statement made at the type level:
+        #     uint4b8 IS the symmetric type, and it stays correct if a future vLLM
+        #     stops hardcoding :350. On an asymmetric checkpoint it correctly does NOT
+        #     fire, so such a checkpoint would crash loudly on the shape assert rather
+        #     than silently dequantize with the wrong zero points.
+        # Verified against ornith-35b (biMEMO AutoRound int4 gs=128, sym): 400 qzeros
+        # tensors sampled across all 6 shards, 3,276,800 nibbles, every one is 7.
+        if c.weight_type.has_bias() or not c.zero_points:
             w_zp = None
 
         x_2d = x.reshape(-1, x.shape[-1])

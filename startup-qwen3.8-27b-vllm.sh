@@ -109,12 +109,21 @@
 # (K mask-token rows), where MTP walks a sequential chain of K forwards. vLLM verifies the
 # proposal with the same rejection sampler either way. Upstream vLLM PR #52816.
 #
-# THE IMAGE DOES NOT CONTAIN IT. vllm-radiance:0.5.8 is built on vLLM 0.26.0, which
-# predates the PR, so this script bind-mounts a 10-file overlay from patches/dflash2/vllm
-# over the image's vllm package (DFLASH2_PATCH=1, on by default whenever SPEC=dflash2).
-# Every file carries a header naming the upstream commit it came from and any deviation.
-# Read patches/dflash2/README.md before changing the image tag -- the overlay is pinned to
-# 0.26.0 and will not apply cleanly to a different base.
+# WHICH IMAGE YOU RUN DECIDES WHETHER YOU NEED A BACKPORT.
+#
+#   vllm-radiance:0.9.3  (vLLM 0.27.1)  DEFAULT.  DFlash2 is NATIVE -- the PR landed
+#                                       upstream before this base was cut, so no backport
+#                                       is needed and DFLASH2_PATCH defaults to 0.
+#   vllm-radiance:0.5.8  (vLLM 0.26.0)  predates the PR entirely.  DFLASH2_PATCH defaults
+#                                       to 1 and bind-mounts the 10-file backport from
+#                                       patches/dflash2/vllm over the image's vllm package.
+#                                       That overlay is PINNED to 0.26.0 and will not apply
+#                                       to any other base -- read patches/dflash2/README.md.
+#
+# Separately from the backport, this script always mounts a small LOCAL overlay chosen by
+# image tag (patches/radiance-0.9.3/vllm for the default). That overlay is not upstream
+# code: it is patched copies of the image's own files, two of them today, each carrying a
+# header naming the base version and marking every local hunk. See patches/README.md.
 #
 # WHICH DRAFT CHECKPOINT. Two exist and both were measured here, at MAXLEN=131072 against
 # the same MTP baseline, everything else held constant:
@@ -137,8 +146,17 @@
 # The int4 draft is a PACKED compressed-tensors checkpoint, which merged upstream cannot
 # load at all -- see the _dense_kv_rows() note in patches/dflash2/README.md.
 #
-# SPECTOK=4 IS MEASURED, NOT ASSUMED. K was swept over {4,6,7,8} on this card: 4 wins, and
-# K>=7 cannot hold MAXLEN=204800 at all (the draft's own KV grows with K). Don't raise it.
+# SPECTOK=4 IS MEASURED, AND IT IS A WORKLOAD CHOICE. K was swept over {4,5,6,7} on this
+# card (2026-08-29, MAXLEN=131072, greedy, control-validated to 0.25%). In aggregate K
+# barely matters -- but math throughput RISES 13.9% from K=4 to K=7 while chat FALLS 8.9%,
+# and the mean only looks flat because those cancel. K=4 is the default because this rig is
+# chat- and reasoning-heavy and both peak there; a math- or code-heavy server should run 7.
+# K=5 measures a real -12% dip and should be skipped. Full table in TUNING.md.
+#
+# RETRACTED: an earlier version of this comment said "K>=7 cannot hold MAXLEN=204800 at
+# all". That was true only under KV_GROUP_SIZE=5 and died with the group-padding fix --
+# every K in 4..7 now clears 204800 (K=7 tops out near 243,900). It was a context
+# constraint that had been mistaken for a speed finding.
 #
 # *** AutoRound NEEDS A THREE-KEY config.json PATCH ON THIS STACK, AND WITHOUT IT THE
 # *** MODEL LOADS SILENTLY WRONG -- NOT WITH AN ERROR. Identical mechanism and identical
@@ -177,21 +195,52 @@ QUANT="${QUANT:-auto_gptq}"    # must AGREE with the checkpoint's config.json or
                                # upstream file says "auto-round", which is neither -- the
                                # ROUTING GUARD below rewrites it.
 CACHE_DIR="${CACHE_DIR:-./vllm-cache}"
-IMAGE="${IMAGE:-docker.io/stilldeadcode/vllm-radiance:0.5.8}"
+IMAGE="${IMAGE:-docker.io/stilldeadcode/vllm-radiance:0.9.3}"
+                               # 0.9.3 = vLLM 0.27.1, DFlash2 native. Every benchmark in
+                               # benchmarks/ was measured on this tag. 0.5.8 (vLLM 0.26.0)
+                               # still works but needs DFLASH2_PATCH=1; see the header.
 MAXLEN="${MAXLEN:-204800}"     # NOT 262144. The model's max_position_embeddings is 262144,
-                               # but the measured KV pool is 250,148 tokens with SPEC=dflash2
-                               # and vLLM refuses to start when max-model-len exceeds it.
-                               # 204800 leaves 1.22x concurrency at MAXSEQS=2 -- i.e. this
-                               # default buys context and spends most of the second slot.
-                               # Trade the other way by lowering it: 131072 gives 1.91x.
+                               # but the measured KV pool is 269,837 tokens with SPEC=dflash2
+                               # and KV_GROUP_SIZE=auto, and vLLM refuses to start when
+                               # max-model-len exceeds it. 204800 leaves 1.32x concurrency at
+                               # MAXSEQS=2 -- i.e. this default buys context and spends most
+                               # of the second slot. Trade the other way by lowering it:
+                               # at 131072 the pool measures 231,602, i.e. 1.77x. (The pool
+                               # itself moves with MAXLEN -- the full-attention bucket is
+                               # ceil(MAXLEN/block) -- so it is not a fixed number divided by
+                               # a smaller one.) Without the group-padding fix the pool
+                               # is 222,639 and 204800 only just fits, at 1.09x.
                                # Nothing here depends on the value except how much of the
                                # pool each sequence may claim.
                                # See the COLD-BOOT HAZARD note in the header before you
                                # conclude that a first-boot failure here means it's too high.
-GPUUTIL="${GPUUTIL:-0.98}"
-ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}"
+GPUUTIL="${GPUUTIL:-0.97}"     # 0.97, not 0.98. Every pool figure quoted in this file and
+                               # in benchmarks/ was measured at 0.97 with BATCHTOK=4854.
+                               # BATCHTOK buys its prefill win with activation memory, and
+                               # 0.98 on top of 4854 is the combination that turns an OOM
+                               # into a DEVICE-LOST rather than a clean error. If you do hit
+                               # one, back BATCHTOK down to 3240 first (it keeps most of the
+                               # prefill win) and only then lower this.
+case "$IMAGE" in
+  *:0.5.8) ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}" ;;
+  *)       ATTN="${ATTN:-R4D}" ;;
+esac
+                               # R4D is radiance's own gfx1201 attention and does not exist
+                               # on 0.5.8, hence the split. It is a DEEP-PREFILL win that
+                               # grows with depth -- AITER -> R4D measured 2K +0.4%, 8K
+                               # -1.8%, 16K +1.0%, 32K +2.9%, 64K +7.2% -- and it costs
+                               # nothing: the pool went UP (216,137 -> 218,763 at the time),
+                               # because mamba-page alignment lands on block 1616 instead of
+                               # 1664. Decode and acceptance both unchanged within noise.
+                               # It has a shape gate (head_dim 256, gqa 6, causal, bf16 or
+                               # fp8_e4m3 KV, paged block 16, decode q_len <= 10); this model
+                               # under SPECTOK=4 matches all of it. TRAP: the first boot
+                               # after changing backend reports ~7.0 GiB of KV and may refuse
+                               # to start. That is the cold compile cache, not a cost. Boot
+                               # again. Revert = ATTN=ROCM_AITER_UNIFIED_ATTN. This is the
+                               # TARGET's backend only; DRAFT_ATTN below is separate.
 MAXSEQS="${MAXSEQS:-2}"        # per-sequence GDN state -- keep small, see the 3.6 header.
-BATCHTOK="${BATCHTOK:-3240}"   # MUST be n*block_size + 2*(K-1), where block_size is the
+BATCHTOK="${BATCHTOK:-4854}"   # MUST be n*block_size + 2*(K-1), where block_size is the
                                # align-mode attention block (1616 on this model) and K is
                                # SPECTOK (the term is 0 with speculation off). --mamba-
                                # cache-mode align FLOORS every mid-prefill chunk to a
@@ -234,11 +283,28 @@ SPEC="${SPEC:-dflash2}"        # dflash2 (default) | mtp | off | ngram | ngram_g
                                # 8.2% of the KV pool. mtp = the target's own head, no extra
                                # weights, larger pool. Both are supported and correct; see
                                # the DFlash2 section in the header for the tradeoff.
-SPECTOK="${SPECTOK:-4}"        # measured winner for BOTH mtp and dflash2 on this card. The
-                               # 3.6 mtp ladder had 4 beating 8 by 17-48% decode at every
-                               # depth; the 3.8 dflash2 sweep over {4,6,7,8} also lands on 4,
-                               # and K>=7 cannot hold MAXLEN=204800. Don't assume higher is
-                               # better -- it is not, in either mode.
+SPECTOK="${SPECTOK:-4}"        # measured, and for dflash2 it is a WORKLOAD choice, not a
+                               # speed one -- see the SPECTOK block in the header and the
+                               # tuning log. Short version: the 3.6 mtp ladder had 4 beating
+                               # 8 by 17-48% decode at every depth; the 3.8 dflash2 sweep
+                               # over {4,5,6,7} moves aggregate decode almost not at all
+                               # (79.0 / 69.5 / 76.3 / 78.6) but shifts it BETWEEN
+                               # categories -- math +13.9%, chat -8.9% from K=4 to K=7 --
+                               # and costs context (231,602 -> 212,098 tokens at 131072).
+                               # 4 is the right default for a chat/reasoning box. Don't
+                               # assume higher is better; it is not, in either mode.
+                               # This is also the CEILING on draft length. The image bakes
+                               # RADIANCE_DRAFT_SCHEDULE=1:8,2:7,4:6,8:5,16:4, which reads
+                               # as though batch size 1 drafts 8 regardless -- but that
+                               # controller applies its ceiling as
+                               #   if 0 < batch_ceil < num_speculative_tokens
+                               # so it can only clamp DOWNWARD, never above SPECTOK. Raising
+                               # K here is the only way to lengthen a draft. (The controller
+                               # is NOT mtp-only, despite its own naming: it patches
+                               # SpecDecodeBaseProposer, which DFlashProposer inherits. It is
+                               # mostly inert here for a different reason -- its depth logic
+                               # sits in _greedy_sample, which probabilistic draft sampling
+                               # bypasses. See TUNING.md.)
 DRAFT_DIR="${DRAFT_DIR:-./models/qwen3.8-27b-dflash2-int4}"
                                # SPEC=dflash2 only. The DFlash2 draft model. Default expects
                                # syvai/Qwen3.8-27B-DFlash2-W4A16 (int4, +1.08 GiB loaded).
@@ -247,14 +313,20 @@ DRAFT_ATTN="${DRAFT_ATTN:-TRITON_ATTN}"
                                # DFlash2's draft attention is NON-CAUSAL (it attends across
                                # all K mask rows), and ROCM_AITER_UNIFIED_ATTN refuses a
                                # non-causal mask. TRITON_ATTN takes it. The target keeps
-                               # ATTN=ROCM_AITER_UNIFIED_ATTN; the two are set independently.
+                               # the backend chosen above (R4D on 0.9.3); the two are set
+                               # independently and only the DRAFT one is pinned here.
 DRAFT_SAMPLE_METHOD="${DRAFT_SAMPLE_METHOD:-probabilistic}"
                                # probabilistic | greedy. Measured +15% accepted length and
                                # +17% decode for probabilistic. See the header table.
-DFLASH2_PATCH="${DFLASH2_PATCH:-1}"
+case "$IMAGE" in
+  *:0.5.8) DFLASH2_PATCH="${DFLASH2_PATCH:-1}" ;;   # vLLM 0.26.0: backport REQUIRED
+  *)       DFLASH2_PATCH="${DFLASH2_PATCH:-0}" ;;   # vLLM 0.27.1+: DFlash2 is native
+esac
                                # 1 = bind-mount patches/dflash2/vllm over the image's vllm
-                               # package. REQUIRED for SPEC=dflash2 on this image (0.26.0
-                               # predates upstream PR #52816). Ignored for other SPEC values,
+                               # package. REQUIRED for SPEC=dflash2 on vllm-radiance:0.5.8
+                               # (0.26.0 predates upstream PR #52816), and WRONG on 0.9.3 --
+                               # the 0.26.0 files will not run on a 0.27.1 base. Ignored for
+                               # other SPEC values,
                                # deliberately: one file in the overlay (v1/core/kv_cache_utils
                                # .py) is NOT DFlash2-gated and would also move MTP's prefix-
                                # hash granularity from 1664 to 832. Keeping the overlay scoped
@@ -266,6 +338,23 @@ CONFIG_FIX="${CONFIG_FIX:-1}"      # 1 = auto-apply the AutoRound config.json ro
                                    # check and refuse.
 TUNED_TILES="${TUNED_TILES:-1}"    # 0 to disable; bind-mounts patches/rdna_hybrid_w4a16.py.
 ALLOW_STOCK_KERNEL="${ALLOW_STOCK_KERNEL:-0}"   # see the TUNED_TILES=0 guard below.
+RADIANCE_SKINNY_GEMM="${RADIANCE_SKINNY_GEMM:-all}"
+                               # 0.9.3+ only (the name does not exist in 0.5.8, which ignores
+                               # it). 1 = the bf16 projections that win outright; "all" adds
+                               # shapes that differ from rocBLAS at a bf16 ULP on a few
+                               # elements in ten thousand -- notably the gated-delta-net
+                               # in_proj_ba, 480 KiB run 48 TIMES PER STEP, 28.5us -> 3.6us.
+                               # radiance keeps those out of the default because under
+                               # speculative decoding a ULP can move acceptance; measured
+                               # here on DFlash2 it did not. Set 1 to take the image default.
+KV_GROUP_SIZE="${KV_GROUP_SIZE:-auto}"
+                               # Read by the local overlay's v1/core/kv_cache_utils.py only.
+                               # This model has three KV bucket sizes -- 48 GDN layers, 16
+                               # full-attention, 5 drafter -- and stock vLLM pads every group
+                               # to min() = 5, wasting 75 slots across 69 layers. auto picks
+                               # the group size that minimises padded slots (8 here), which
+                               # measured 222,639 -> 269,837 tokens for the same VRAM, +21.2%.
+                               # Unset (empty) = stock, byte-identical. An integer forces it.
 PATCH_DIR="${PATCH_DIR:-./patches}"
 KERNEL_PATH="/opt/vllm/lib/python3.12/site-packages/vllm/model_executor/kernels/linear/mixed_precision/rdna_hybrid_w4a16.py"
 
@@ -284,10 +373,16 @@ case "$SPEC" in
     # The DFlash2 draft model is a SEPARATE checkpoint, not tensors inside the target.
     # Three things are checked, because each fails in a way that is either silent or
     # confusing several minutes into a load:
-    if [[ "$DFLASH2_PATCH" != "1" ]]; then
-      echo "[launcher] SPEC=dflash2 with DFLASH2_PATCH=0. vLLM 0.26.0 (this image) has no" >&2
-      echo "[launcher] DFlash2 support at all -- it will fail on an unknown architecture." >&2
+    if [[ "$IMAGE" == *:0.5.8 && "$DFLASH2_PATCH" != "1" ]]; then
+      echo "[launcher] SPEC=dflash2 with DFLASH2_PATCH=0 on vllm-radiance:0.5.8. vLLM 0.26.0" >&2
+      echo "[launcher] has no DFlash2 support at all -- it fails on an unknown architecture." >&2
       echo "[launcher] The overlay in patches/dflash2/ is what adds it. See the header." >&2
+      exit 2
+    fi
+    if [[ "$IMAGE" != *:0.5.8 && "$DFLASH2_PATCH" == "1" ]]; then
+      echo "[launcher] DFLASH2_PATCH=1 but IMAGE is not :0.5.8. That overlay is pinned to" >&2
+      echo "[launcher] vLLM 0.26.0 and will not run on a newer base. DFlash2 is native on" >&2
+      echo "[launcher] 0.9.3 -- unset DFLASH2_PATCH." >&2
       exit 2
     fi
     if [[ ! -d "$DRAFT_DIR" ]]; then
@@ -372,6 +467,32 @@ if [[ "$SPEC" == "dflash2" && "$DFLASH2_PATCH" == "1" ]]; then
   # spec_decode/dflash2/ package only exists because __init__.py is mounted, and podman
   # will create the intermediate directory for that. If a future overlay adds a file under
   # a directory the image lacks AND no __init__.py beside it, check that assumption.
+fi
+
+# LOCAL OVERLAY (separate from the DFlash2 backport above, and not upstream code).
+# patches/radiance-<tag>/vllm holds patched COPIES of files the image already ships. Each
+# one carries a header naming its base version and marking every local hunk. Today there
+# are two, both for the 0.9.3 base:
+#   v1/core/kv_cache_utils.py                  KV cache group padding (KV_GROUP_SIZE below)
+#   model_executor/models/qwen3_dflash.py      packed-int4 draft checkpoint load fix
+# Mounted read-only, file-by-file, exactly like the backport. An overlay directory is
+# VERSION-BOUND: these are copies of 0.9.3 sources, so bumping the image tag silently
+# reverts the image's own fixes in those two files back to 0.9.3. Rebase by diffing this
+# overlay against the NEW image's stock file, never by replaying the patch blind.
+LOCAL_OVERLAY="${LOCAL_OVERLAY:-1}"
+if [[ "$LOCAL_OVERLAY" == "1" && "$IMAGE" != *:0.5.8 ]]; then
+  TAG="${IMAGE##*:}"
+  LOCALROOT="$(cd "$PATCH_DIR/radiance-$TAG/vllm" 2>/dev/null && pwd)" || {
+    echo "[launcher] No local overlay for image tag $TAG ($PATCH_DIR/radiance-$TAG/vllm)." >&2
+    echo "[launcher] Set LOCAL_OVERLAY=0 to run stock, but KV_GROUP_SIZE will do nothing" >&2
+    echo "[launcher] and the KV pool drops ~21% (see TUNING.md)." >&2; exit 2; }
+  n=0
+  while IFS= read -r f; do
+    rel="${f#$LOCALROOT/}"
+    DFLASH2_MOUNT_ARGS+=(-v "$f:/opt/vllm/lib/python3.12/site-packages/vllm/$rel:ro")
+    n=$((n+1))
+  done < <(find "$LOCALROOT" -name '*.py' | sort)
+  echo "[launcher] local overlay (radiance-$TAG): $n files" >&2
 fi
 
 if [[ "$ASYNCSCHED" == "1" ]]; then
@@ -576,9 +697,11 @@ exec podman run --rm --name "$NAME" \
   -e VLLM_ROCM_USE_AITER_FP4BMM=0 -e VLLM_ROCM_USE_AITER_RMSNORM=0 \
   -e RADIANCE_PRESHUFFLE=1 -e RADIANCE_ATTN_TUNE=1 -e RADIANCE_GDN_WMMA=1 \
   -e RADIANCE_VIT_FLASH=1 -e RADIANCE_FUSE_RMS_QUANT=1 -e RADIANCE_DYNAMIC_DRAFT=1 \
+  -e RADIANCE_SKINNY_GEMM="$RADIANCE_SKINNY_GEMM" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
   -e TRITON_CACHE_DIR=/cache/triton -e AITER_ROOT_DIR=/cache/aiter \
   -e TRITON_CACHE_AUTOTUNING=1 \
+  ${KV_GROUP_SIZE:+-e KV_GROUP_SIZE=$KV_GROUP_SIZE} \
   "$IMAGE" \
     /model \
     --served-model-name "$SERVED" \

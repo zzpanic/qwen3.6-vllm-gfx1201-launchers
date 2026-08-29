@@ -1,0 +1,101 @@
+### SPECTOK sweep @131072, started 2026-08-29T03:16:09+00:00
+=== ARM A-spectok4 : SPECTOK=4 MAXLEN=131072 ===
+--- boot 1 (cold graph, also tells us the true block size) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.62% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 6.89 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 177,519 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.35x
+  block size 1616 -> BATCHTOK 4854  (3*1616 + 2*(4-1))
+--- boot 2 (warm, aligned BATCHTOK, this is the one benched) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.62% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 8.98 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 231,602 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.77x
+  betterbench exit 0
+
+=== ARM B-spectok5 : SPECTOK=5 MAXLEN=131072 ===
+--- boot 1 (cold graph, also tells us the true block size) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 6.77 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 169,404 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.29x
+  block size 1616 -> BATCHTOK 4856  (3*1616 + 2*(5-1))
+--- boot 2 (warm, aligned BATCHTOK, this is the one benched) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Available KV cache memory: 8.88 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 222,575 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.70x
+  betterbench exit 0
+
+=== ARM C-spectok6 : SPECTOK=6 MAXLEN=131072 ===
+--- boot 1 (cold graph, also tells us the true block size) ---
+  healthy
+  Setting attention block size to 1632 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.37% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 6.89 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 167,480 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.28x
+  block size 1632 -> BATCHTOK 4906  (3*1632 + 2*(6-1))
+--- boot 2 (warm, aligned BATCHTOK, this is the one benched) ---
+  healthy
+  Setting attention block size to 1632 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.37% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 6.88 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 167,480 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.28x
+  betterbench exit 0
+
+=== ARM D-spectok7 : SPECTOK=7 MAXLEN=131072 ===
+--- boot 1 (cold graph, also tells us the true block size) ---
+  healthy
+  Setting attention block size to 1648 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.73% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 6.89 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 162,648 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.24x
+  block size 1648 -> BATCHTOK 4956  (3*1648 + 2*(7-1))
+--- boot 2 (warm, aligned BATCHTOK, this is the one benched) ---
+  healthy
+  Setting attention block size to 1648 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.73% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 6.87 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 162,648 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.24x
+  betterbench exit 0
+
+=== ARM Z-spectok4-control : SPECTOK=4 MAXLEN=131072 ===
+--- boot 1 (cold graph, also tells us the true block size) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.62% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 8.98 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 231,602 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.77x
+  block size 1616 -> BATCHTOK 4854  (3*1616 + 2*(4-1))
+--- boot 2 (warm, aligned BATCHTOK, this is the one benched) ---
+  healthy
+  Setting attention block size to 1616 tokens to ensure that attention page size is >= mamba page size.
+  Padding mamba page size by 0.62% to ensure that mamba page size and attention page size are exactly equal.
+  Available KV cache memory: 8.98 GiB
+  Add 3 padding layers, may waste at most 60.00% KV cache memory
+  GPU KV cache size: 231,602 tokens
+  Maximum concurrency for 131,072 tokens per request: 1.77x
+  betterbench exit 0
+
+### done 2026-08-29T04:19:12+00:00
+EXIT=0

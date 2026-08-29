@@ -1,0 +1,5 @@
+A-spectok4 K=4 block=1616 batchtok=4854
+B-spectok5 K=5 block=1616 batchtok=4856
+C-spectok6 K=6 block=1632 batchtok=4906
+D-spectok7 K=7 block=1648 batchtok=4956
+Z-spectok4-control K=4 block=1616 batchtok=4854
