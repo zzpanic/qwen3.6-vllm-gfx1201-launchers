@@ -192,7 +192,8 @@ Verify you got the int4-head build at load: `Model loading took 17.93 GiB`. With
 ~1.08 GiB for the int4 draft before comparing. An 18.4-ish GiB figure (19.5-ish with the
 draft) means a BF16-head checkpoint — that was measured here at 236,470 KV tokens against
 249,982, i.e. the head costs you 0.51 GiB of weights and ~13,500 tokens of context.
-Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log`.
+Compare your own boot against `logs/boot-qwen3.8-27b-vllm.log` (MTP) or
+`logs/boot-qwen3.8-27b-vllm-0.9.3.log` (the current DFlash2 default).
 
 ## The image these build on, and where this repo diverges
 

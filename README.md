@@ -52,9 +52,9 @@ magnitude as soft.
 Load-time facts to check against your own boot log: **`Model loading took 18.91 GiB`**
 (target 17.93 + draft ~1.08, reported as one figure) and **`GPU KV cache size: 269,837
 tokens`** = 1.32× concurrency at `MAXLEN=204800`, from `Available KV cache memory:
-9.62 GiB`. The published boot log in `logs/` predates the group-padding fix and shows
-250,148 / 1.22× — if your own boot reads ~250k, you are running `KV_GROUP_SIZE=5` and are
-leaving ~8% of the pool on the floor; see TUNING.md.
+9.62 GiB`. Both lines are in `logs/boot-qwen3.8-27b-vllm-0.9.3.log`. If your own boot reads
+~250k instead, you are running `KV_GROUP_SIZE=5` and leaving ~8% of the pool on the floor;
+see TUNING.md.
 
 **First boot after any change to the image, `MAXLEN`, or the model graph may fail**, with
 `ValueError: ... estimated maximum model length is 198016`. torch.compile runs cold on
@@ -162,19 +162,26 @@ divergence per row with the measurement behind it, is in
   vision (images only -- video untested, see TUNING.md), 131072 context.
 - `startup-qwen3.6-35b-vllm.sh` — MoE 35B-A3B (256 experts), int4 W4A16, MTP off
   (KV cost doesn't pay off at this size), vision, 262144 context.
-- `logs/boot-qwen3.8-27b-vllm-dflash2.log` — real boot log of the **shipped DFlash2
-  configuration**, container start through `Application startup complete` plus the first
-  inference JIT warnings and the first `SpecDecoding metrics` line, captured 2026-08-22.
-  Worth grepping for: `Using RDNAHybridW4A16LinearKernel` (twice — once for the target's
-  AutoGPTQ path, once for the draft's compressed-tensors path), `Model loading took 19.01
-  GiB`, `GPU KV cache size: 250,148 tokens`, `Capturing dflash2 CUDA graphs`, and
-  `Mean acceptance length: 3.00`.
+- `logs/boot-qwen3.8-27b-vllm-0.9.3.log` — **the current configuration**: `:0.9.3`, R4D
+  attention, `KV_GROUP_SIZE=auto`, `BATCHTOK=4854`, `GPUUTIL=0.97`, DFlash2 ×4 with the int4
+  draft. Container start through `Application startup complete` plus the first inference JIT
+  warnings and the first `SpecDecoding metrics` line, captured 2026-08-29. Worth grepping
+  for: `Using RDNAHybridW4A16LinearKernel` (twice — once for the target's AutoGPTQ path,
+  once for the draft's compressed-tensors path), `Using R4D backend`, `libr4d 0.5.0, 19
+  kernels built, 12 of 12 queries resolved`, `Model loading took 18.91 GiB`,
+  `KV_GROUP_SIZE=auto -> group_size 8 for layer buckets [48, 16, 5]`, and
+  `GPU KV cache size: 269,837 tokens`.
+- `logs/boot-qwen3.8-27b-vllm-dflash2.log` — the same for the **previous** `:0.5.8` +
+  back-ported-DFlash2 configuration, captured 2026-08-22, before the group-padding fix:
+  `Model loading took 19.01 GiB`, `GPU KV cache size: 250,148 tokens`, `Capturing dflash2
+  CUDA graphs`, `Mean acceptance length: 3.00`.
 - `logs/boot-qwen3.8-27b-vllm.log` — the same for the **MTP** configuration, captured
   2026-08-15: `Model loading took 17.93 GiB`, `GPU KV cache size: 249,982 tokens`.
-  Both were captured from the homelab llama-swap launcher rather than these scripts, so
-  their `non-default args` line carries three extra metrics flags
+  All three 3.8 logs were captured from the homelab llama-swap launcher rather than these
+  scripts, so their `non-default args` line carries three extra metrics flags
   (`enable_prompt_tokens_details`, `enable_per_request_metrics`,
-  `enable_force_include_usage`) that these scripts don't set. Nothing else differs.
+  `enable_force_include_usage`) that these scripts don't set, and client IPs are redacted to
+  `CLIENT`. Nothing else differs.
 - `logs/boot-qwen3.6-27b-vllm.log` / `logs/boot-qwen3.6-35b-vllm.log` — same, for the 3.6
   models, captured 2026-08-09.
 - `patches/` — a per-shape override table for the 27B scripts' W4A16 kernel, whose stock
