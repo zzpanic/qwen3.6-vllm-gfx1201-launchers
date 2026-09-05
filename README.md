@@ -1,9 +1,16 @@
 # Qwen3.6 / Qwen3.8 vLLM launchers for AMD gfx1201 (Radeon AI PRO R9700)
 
 Standalone podman/vLLM startup scripts for serving Qwen3.8-27B and Qwen3.6-27B (dense) and
-Qwen3.6-35B-A3B (MoE) int4 on a single 32 GiB AMD Radeon AI PRO R9700 (gfx1201, RDNA4),
+Qwen3.6-35B-A3B (MoE) on a single 32 GiB AMD Radeon AI PRO R9700 (gfx1201, RDNA4),
 using the `docker.io/stilldeadcode/vllm-radiance` image (ROCm + AITER + a few
-gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 script, `:0.5.8` for the 3.6 ones. See
+gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 scripts, `:0.5.8` for the 3.6 ones.
+
+**Start with [Quick start](#quick-start).** The current, actively tuned configuration is
+`startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). The int4 script beside it is the
+maintained fallback; the two Qwen3.6 scripts are historical and kept for the reasoning
+rather than to be served. The status table under [Contents](#contents) says which is which.
+
+See
 [BACKGROUND.md](BACKGROUND.md) for what that image is, which of the decisions here are
 ours rather than its defaults, and the measurements behind each of them.
 
@@ -14,6 +21,71 @@ the boot log, KV cache budgeting, why MTP is on for one model and off for the ot
 measured speculative-decode tuning, checkpoint defects that silently break things) is
 explained inline in each script's header comment, since most of it isn't documented
 anywhere else.
+
+## Quick start
+
+The fastest configuration in this repo is the MXFP4 one. End to end on a clean box:
+
+```bash
+# 1. the launchers
+git clone https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers
+cd qwen3.6-vllm-gfx1201-launchers
+
+# 2. ggz14's radiance repo, NEXT TO the script and under this exact directory name.
+#    The MXFP4 launcher sources gpu-detect.sh from it at start-up and mounts it as
+#    /patches, so it is a hard dependency, not an optional extra. The GitHub repo is
+#    named vllm-mxfp4; the directory must be radiance-vllm-mxfp4, hence the argument.
+git clone https://github.com/GGZ14/vllm-mxfp4 radiance-vllm-mxfp4
+
+# 3. the two checkpoints (~21 GiB). setup-mxfp4.sh is ggz14's, in the repo you just
+#    cloned; it downloads AMD's Quark MXFP4 weights and runs fp8_mtp.py over the MTP
+#    head, which is mandatory for that checkpoint (see below).
+cd radiance-vllm-mxfp4 && ./setup-mxfp4.sh && cd ..
+
+# 4. serve
+./startup-qwen3.8-27b-mxfp4.sh
+```
+
+Then check it is alive, and that it is serving what you think it is:
+
+```bash
+curl -s localhost:8080/v1/models | python3 -m json.tool     # max_model_len should be 204800
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.8-27b-mxfp4","messages":[{"role":"user","content":"hello"}]}'
+```
+
+`./startup-qwen3.8-27b-mxfp4.sh -h` prints every knob, its default, and what it does.
+Nothing needs editing to run: the defaults **are** the measured production configuration.
+
+### Four things that go wrong
+
+- **`gpu-detect.sh: No such file`** — step 2 was skipped, or the clone landed under
+  `vllm-mxfp4` instead of `radiance-vllm-mxfp4`. Pass `REPO=/path/to/it` if you want it
+  somewhere else.
+- **An assertion about a half-width parameter during load** — the MTP head was not
+  requantised. AMD's `Qwen3.8-27B-Quark-AWQ-MXFP4` names its `mtp.*` layers as *tensor*
+  names inside a list of *module* names, so Quark's exclusion never fires and vLLM applies
+  the mxfp4 scheme to a bf16 head. `fp8_mtp.py` fixes it; `setup-mxfp4.sh` runs it for you.
+  A checkpoint that declares `mtp.*` in `layer_quant_config` needs neither — point `SNAP`
+  at it directly.
+- **"current platform does not support native MXFP4/MXFP6" in the log** — a false alarm.
+  It comes from a separate `supports_mx()` call, not the kernel gate. The line that matters
+  is `Using RadianceMxfp4W4A8LinearKernel for MXFP4 GEMM`.
+- **It starts, then dies on the first long prompt** — the KV pin is sized for a 32 GiB
+  card. See "The KV pin, which is the one that will bite you" below; it is the one default
+  here that is genuinely hardware-specific.
+
+### Requirements
+
+- An **AMD gfx1201** card with **32 GiB** (Radeon AI PRO R9700). This is tuned for that
+  card specifically — attention backend, kernel gates and KV budgeting are card-shape
+  specific and will not transfer as-is.
+- **rootless podman** (or docker) with ROCm/kfd device access. On a systemd box that means
+  `loginctl enable-linger $USER`, or a cold boot fails with "crun not found".
+- **~25 GiB of disk** for the two checkpoints, plus room for the image (~20 GiB).
+- **Host RAM**: the weights are sharded on disk into four parts, so loading needs roughly
+  the size of the largest part rather than the whole checkpoint.
+- No Resizable BAR requirement — this was developed on a board without it.
 
 ## Qwen3.8-27B: what it actually does on this card
 
@@ -162,15 +234,32 @@ divergence per row with the measurement behind it, is in
 
 ## Contents
 
+**Status, so you pick the right one.** Only the MXFP4 script is actively tuned. The
+others are kept deliberately and are not abandonware, but they are not where the work is
+going:
+
+| script | status |
+| --- | --- |
+| `startup-qwen3.8-27b-mxfp4.sh` | **current.** Every measurement in `benchmarks/` dated 2026-09-05 is this one. |
+| `startup-qwen3.8-27b-vllm.sh` | **maintained fallback** (int4 W4A16). Same model, better-understood path, measurably slower. Kept because it is what to fall back to when a radiance bump breaks the MXFP4 stack — that has happened. |
+| `startup-qwen3.6-27b-vllm.sh` | **historical.** Qwen3.6 is superseded by Qwen3.8 on the same architecture; kept for the reasoning and the tile table, not because you should serve it. |
+| `startup-qwen3.6-35b-vllm.sh` | **historical.** As above, plus the MoE-specific findings (why MTP is off at that size). |
+
+The two 3.6 scripts pin `:0.5.8` rather than `:0.9.3` and have not been re-measured since
+2026-08-09. Their numbers are correct **for what they measured** and are not comparable to
+anything in `benchmarks/` dated later. Treat them as a record of how this card was tuned,
+which is genuinely the useful part — the W4A16 tile table in `patches/` came out of that
+work and still serves the 3.8, because it is keyed on GEMM shape rather than model name.
+
 - `startup-qwen3.8-27b-mxfp4.sh` — dense 27B, **native MXFP4 W4A8**, DFlash2 ×7 with an fp8
   drafter, R4D attention, vision, 204800 context on a **pinned** KV cache. The fastest
   configuration in this repo; see "MXFP4 vs int4" below for when to prefer it.
 - `startup-qwen3.8-27b-vllm.sh` — dense 27B, int4 W4A16, **DFlash2 speculative decoding**
   on (with `SPEC=mtp` as a supported fallback), vision, 204800 context,
   `REASONING_EFFORT` knob.
-- `startup-qwen3.6-27b-vllm.sh` — dense 27B, int4 W4A16, MTP speculative decoding on,
+- `startup-qwen3.6-27b-vllm.sh` — *(historical)* dense 27B, int4 W4A16, MTP speculative decoding on,
   vision (images only -- video untested, see TUNING.md), 131072 context.
-- `startup-qwen3.6-35b-vllm.sh` — MoE 35B-A3B (256 experts), int4 W4A16, MTP off
+- `startup-qwen3.6-35b-vllm.sh` — *(historical)* MoE 35B-A3B (256 experts), int4 W4A16, MTP off
   (KV cost doesn't pay off at this size), vision, 262144 context.
 - `logs/boot-qwen3.8-27b-mxfp4.log` — the boot for `startup-qwen3.8-27b-mxfp4.sh`, captured
   2026-09-05: `:0.9.3`, R4D attention, `max_model_len 204800`, `kv_cache_memory_bytes
@@ -245,7 +334,11 @@ divergence table against the underlying image.
 See [TUNING.md](TUNING.md) for the dated tuning log: what each non-obvious default
 is set to, what it was measured against, and the traps found along the way.
 
-## Running the 3.8
+## Running the 3.8 int4 fallback
+
+This section is the **int4 W4A16** path (`startup-qwen3.8-27b-vllm.sh`). For the current
+MXFP4 configuration see [Quick start](#quick-start) above.
+
 
 ```
 hf download devan-carlin/Qwen3.8-27B-int4-AutoRound --local-dir ./models/qwen3.8-27b-autoround
@@ -360,7 +453,7 @@ context-length-dependent (218 blocks/request at 131072, 308 at 204800).
   ~2.8% here. Two agreeing samples from one boot are *one* sample — re-measure the control on
   its own boot, in the same session, or you will publish a phantom win. We nearly did.
 
-## Which 27B checkpoint (Qwen3.6)
+## Which 27B checkpoint (Qwen3.6) — historical
 
 Two are supported and both work. **Intel AutoRound is the default and the one to use.**
 
@@ -438,10 +531,4 @@ what this repo adds on top is measurement, configuration, and documentation of b
 
 All scripts are configured entirely through environment variables (see each header) with
 working defaults; nothing needs to be edited to run as-is once weights are downloaded.
-
-## Requirements
-
-- rootless podman with ROCm/kfd device access
-- an AMD gfx1201 card (this is tuned for the R9700 specifically — attention backend,
-  MoE/kernel gates, and KV budgeting numbers are card-shape-specific and won't transfer
-  as-is to other GPUs)
+Full requirements and the install walk-through are under [Quick start](#quick-start).

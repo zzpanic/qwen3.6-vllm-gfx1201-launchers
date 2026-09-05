@@ -20,7 +20,8 @@
 #              v0.4.0 produced NaNs in the GDN path (perplexity 653586) that looked exactly
 #              like broken speculative decoding. Do not float it.
 #
-# TWO CHECKPOINTS are needed under $MODELS, both produced by the repo's setup-mxfp4.sh:
+# TWO CHECKPOINTS are needed under $MODELS, both produced by setup-mxfp4.sh -- which lives in
+# ggz14's radiance repo (the $REPO clone below), NOT in the launcher repo this script is in:
 #   Qwen3.8-27B-MXFP4-mtpfp8   AMD's amd/Qwen3.8-27B-Quark-AWQ-MXFP4 with the MTP head
 #                              requantized to fp8 by ./fp8_mtp.py. NOT optional for THAT
 #                              checkpoint: its exclude list names the mtp.* layers as TENSOR
@@ -56,14 +57,14 @@ set -euo pipefail
 # ---------------------------------------------------------------- usage / arguments
 usage() {
   cat <<'USAGE'
- llama-swap-ggz14-27b.sh -- native MXFP4 Qwen3.8-27B on AMD RDNA4 (gfx1201)
+ startup-qwen3.8-27b-mxfp4.sh -- native MXFP4 Qwen3.8-27B on AMD RDNA4 (gfx1201)
 
 GPU count, tensor-parallel size and KV cache size are all detected; nothing below has to be
 edited to run on a host with a different number of cards.
 
-  llama-swap-ggz14-27b.sh --port <N>   serve on http://<host>:<N>/v1 (llama-swap's contract;
+  startup-qwen3.8-27b-mxfp4.sh --port <N>   serve on http://<host>:<N>/v1 (llama-swap's contract;
                                        the container uses host networking and binds <N> directly)
-  llama-swap-ggz14-27b.sh [ARGS]       any extra arguments are passed through to `vllm serve`
+  startup-qwen3.8-27b-mxfp4.sh [ARGS]       any extra arguments are passed through to `vllm serve`
 
 Everything is an environment variable; these are the ones worth knowing.
 
