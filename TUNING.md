@@ -3,8 +3,9 @@
 Dated notes on what was changed and why, so a default that looks arbitrary can be traced to
 the measurement that set it. Split out of the README to keep that file about *running* the
 launchers. Everything here was measured on **1x R9700**
-(gfx1201, TP=1). Benchmarks are llama-benchy, `--pp 2048 --tg 256 --runs 3 --concurrency 1
---no-cache`, on the second boot after any graph change (see the cold-compile trap below).
+(gfx1201, TP=1). Numbers come from a live vLLM endpoint — BetterBench and the depth ladder
+in `benchmarks/`, not `llama-bench` — and are taken on the second boot after any graph
+change (see the cold-compile trap below).
 
 **Two stacks live in this log.** Every entry says which one it applies to in its first
 line. As a default: entries dated **2026-09-05** are the MXFP4 W4A8 path

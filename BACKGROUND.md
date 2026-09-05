@@ -12,7 +12,10 @@ selection, the quality evals and the rejected checkpoints below are all measured
 Two things carry across to the MXFP4 path unchanged, because they are properties of the
 method and the model rather than of the quantisation: **DFlash2 over MTP** (MTP is not
 lossless — +15.8 sigma against the model's own logits, where DFlash2 measures clean at
-+1.4), and the quality results. Everything numeric does **not** carry across. The MXFP4
++1.4), and the *shape* of the quality argument — measure the serving path, not the weights,
+and mind the error bar on a difference. The quality **numbers** do not carry across: they
+are int4 figures, and the MXFP4 stack is evaluated separately (see the Quality section of
+[README.md](README.md#quality)). Everything else numeric does **not** carry across either. The MXFP4
 configuration is in [README.md](README.md#quick-start) and its decisions are in the
 2026-09-05 entries of [TUNING.md](TUNING.md).
 
@@ -53,8 +56,11 @@ correct — it's one environment variable, and the MTP numbers below describe it
 `SPECTOK=4` is measured, not assumed — and it is a **workload** choice. K was swept over
 {4, 5, 6, 7} and aggregate decode barely moves (79.0 / 69.5 / 76.3 / 78.6 tok/s), but the
 categories move in opposite directions: **math +13.9% and chat −8.9% going from K=4 to
-K=7**. A math- or code-heavy server should run K=7; this one is chat- and reasoning-heavy,
-where 4 peaks. It also costs context (231,602 → 212,098 tokens at `MAXLEN=131072`). The
+K=7**. A math- or code-heavy server should run K=7 — **and that is what the MXFP4 script
+ships**. The K=4 default below survives only on the int4 script: it was chosen against a
+prose-weighted corpus, and re-run against the agentic code/reasoning corpus this box
+actually serves, K 4 → 7 moved the weighted score +35.1%. See the retraction on the
+2026-08-29 `SPECTOK` entry in TUNING.md. It also costs context (231,602 → 212,098 tokens at `MAXLEN=131072`). The
 older claim that K ≥ 7 could not hold `MAXLEN=204800` is **retracted** — that was an
 artifact of `KV_GROUP_SIZE=5` and died with the group-padding fix. Full tables, the
 unexplained K=5 dip, and the control arm are in TUNING.md.

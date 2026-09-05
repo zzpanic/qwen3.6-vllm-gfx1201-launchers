@@ -429,7 +429,8 @@ work and still serves the 3.8, because it is keyed on GEMM shape rather than mod
   `draft_sample_method: 'probabilistic'`, and the vision tower loaded. Worth grepping for
   the `non-default args` line (it is the whole configuration on one line) and
   `GPU KV cache size: 228,737 tokens`.
-- `logs/boot-qwen3.8-27b-vllm-0.9.3.log` — **the current configuration**: `:0.9.3`, R4D
+- `logs/boot-qwen3.8-27b-vllm-0.9.3.log` — **the current *int4* configuration** (the MXFP4
+  boot is the bullet above): `:0.9.3`, R4D
   attention, `KV_GROUP_SIZE=auto`, `BATCHTOK=4854`, `GPUUTIL=0.97`, DFlash2 ×4 with the int4
   draft. Container start through `Application startup complete` plus the first inference JIT
   warnings and the first `SpecDecoding metrics` line, captured 2026-08-29. Worth grepping
@@ -486,8 +487,13 @@ work and still serves the 3.8, because it is keyed on GEMM shape rather than mod
 
 - `benchmarks/` — the raw numbers and the scripts that produced them: the production server
   as shipped (depth ladder, prefill sweep, concurrency, per-category BetterBench), the
-  speculative-depth sweep over K ∈ {4,5,6,7}, and the W4A16 shape census. `benchmarks/README.md`
-  explains how to read them and which ones are soft.
+  speculative-depth sweep over K ∈ {4,5,6,7}, and the W4A16 shape census. Folders are named
+  for the quantisation — `int4-*` is the fallback script, `deep-prefill-*` is MXFP4 — because
+  the llama-swap entry name is *not* a reliable guide (`qwen3.8-27b-vllm` served int4 in
+  August and MXFP4 now). Three runner scripts reproduce the quality and prefill numbers
+  against a live endpoint with no exclusive GPU window: `run-betterbench-prefill.sh`,
+  `run-gsm8k.sh` and `run-bfcl.sh`. `benchmarks/README.md` explains how to read them all and
+  which ones are soft.
 
 See [BACKGROUND.md](BACKGROUND.md) for the long-form reasoning: the decoder and
 draft-checkpoint comparisons, the quality evals in full, the rejected checkpoints, and the
@@ -693,9 +699,13 @@ and it is the reason the pinned-commit approach is used here at all. Credited he
 it would otherwise be invisible — nothing in the running system carries its name.
 
 **3. [`hifi/vllm-radlight`](https://codeberg.org/hifi/vllm-radlight) — the yardstick, not a dependency.** The published R9700 MXFP4
-throughput numbers this configuration was measured against and eventually passed (85.6 vs
-81.7 t/s weighted decode, 19.6 vs 17.6 steps/s — and with the vision tower **loaded**,
-which those numbers drop via `--language-model-only`). Two ROCm runtime settings here were
+throughput numbers this configuration was measured against and eventually passed — **83.6
+vs 81.7 t/s** weighted decode, and with the vision tower **loaded**, which those numbers
+drop via `--language-model-only`. (During config selection this stack measured 85.6 at
+`MAXLEN=131072`; 83.6 is the same stack at the shipped 204800, and the ~2 t/s is the
+KV-pool cost, not a regression — see the caveat in
+[`benchmarks/deep-prefill-20260905/`](benchmarks/deep-prefill-20260905/). The number this
+repo publishes is the one it actually serves.) Two ROCm runtime settings here were
 taken from it and are marked as such in the launcher: `GPU_MAX_HW_QUEUES=1` and
 `HSA_ENABLE_MWAITX=1`. A third, `HSA_ENABLE_INTERRUPT=1`, was tried and measured flat, and
 is documented as not adopted. Reproducing someone else's published numbers before trying to
