@@ -5,6 +5,15 @@
 # draft_sample_method=probabilistic, vision tower loaded. Warm boot (second boot
 # after the last graph change), captured from the live service journal.
 #
+# EDITED: 299 lines of llama-swap proxy retry noise were stripped from this log
+#   2026/09/05 15:06:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
+# one per second, 15:06:27 -> 15:11:25, ending the instant vLLM printed
+# "Application startup complete." That is llama-swap dialing its own upstream
+# once a second while vLLM does its ~5-minute cold work (weight load, compile,
+# graph capture, KV pool alloc); healthCheckTimeout: 900 in ~/ai/config.yaml is
+# what lets it keep retrying. Expected on every cold boot, not a fault. Nothing
+# else was removed.
+#
   OK    topk composite: new-worker states
   OK    topk composite: new-worker sampler
   OK    gdn shared build: runner dict
@@ -19,45 +28,12 @@
   OK    vllm/v1/worker/gpu_model_runner.py
   OK    vllm/v1/worker/gpu/model_runner.py
   OK    vllm/v1/core/sched/scheduler.py
-2026/09/05 15:06:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
   OK    radiance_allreduce.py
   OK    gdn strided gates
   OK    gdn fallback re-pack
   OK    gdn core_attn_out alloc
   OK    qwen3 parser: thinking-off agreement
-2026/09/05 15:06:28 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:29 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:30 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:31 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:32 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:33 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:34 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:35 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:36 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:37 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:38 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:39 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:40 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:41 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:42 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:43 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:44 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:45 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:46 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:47 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:48 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:49 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:50 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:51 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:52 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:53 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:54 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:55 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [radiance] using patched r4d.so from $HOME/.cache/radiance-libr4d/b9e42ab-rx5
-2026/09/05 15:06:56 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:57 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:58 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:06:59 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 ██████╗  █████╗ ██████╗ ██╗ █████╗ ███╗   ██╗ ██████╗███████╗
 ██╔══██╗██╔══██╗██╔══██╗██║██╔══██╗████╗  ██║██╔════╝██╔════╝
 ██████╔╝███████║██║  ██║██║███████║██╔██╗ ██║██║     █████╗
@@ -114,92 +90,12 @@
     rocm          7.14.0
     python        3.12.3
 ──────────────────────────────────────────────────────────────
-2026/09/05 15:07:00 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:01 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:02 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:03 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:04 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:05 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:06 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:07 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:08 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:09 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:10 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:11 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:12 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:13 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:14 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:15 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:16 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:17 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:18 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:19 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:20 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:21 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:22 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:23 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:24 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:25 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:26 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:28 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:29 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:30 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:31 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:32 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:33 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:34 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:35 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:36 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:37 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:38 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:39 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:40 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:41 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:42 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:43 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:44 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:45 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:46 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:47 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:48 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [radiance.gemm] no gemm_nt kernel for M<=64 bf16, disabled
-2026/09/05 15:07:49 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [aiter] [pid=1 pname=MainProcess] start build [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/build/module_aiter_core
-2026/09/05 15:07:50 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:51 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:52 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:53 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:54 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:55 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:56 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:57 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
-2026/09/05 15:07:58 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:07:59 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:00 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:01 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:02 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:03 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:04 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:05 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:06 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:07 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:08 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:09 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:10 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:11 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:12 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:13 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:14 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:15 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:16 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:17 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:18 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [aiter] [pid=1 pname=MainProcess] [32mfinish build [module_aiter_core], cost 28.7s [0m
 [aiter] import [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/module_aiter_core.so
 [radiance] preshuffle weight-shuffle-at-load hook installed
-2026/09/05 15:08:19 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [radiance] attn tuned-config override installed on 2 module aliases
 [radiance] fast-reduce hook armed (RADIANCE_USE_R4D_AR=1, all_reduce wrap)
 [radiance.draft] RADIANCE_DYNAMIC_DRAFT=ON  controller=policy  tau=0.2  schedule=1:8,2:7,4:6,8:5,16:4  (GPU-resident capture + n-gram matcher; per-slot confidence gate short-circuits the forward loop)
@@ -214,11 +110,7 @@
 (APIServer pid=1) INFO 09-05 05:08:19 [api_utils.py:273] non-default args: {'model_tag': '/models/Qwen3.8-27B-MXFP4-mtpfp8', 'chat_template': '/patches/qwen-fixed-v22.3.jinja', 'default_chat_template_kwargs': {'reasoning_effort': 'low'}, 'enable_auto_tool_choice': True, 'tool_call_parser': 'qwen3_xml', 'enable_prompt_tokens_details': True, 'enable_per_request_metrics': True, 'enable_force_include_usage': True, 'host': '0.0.0.0', 'port': 5804, 'model': '/models/Qwen3.8-27B-MXFP4-mtpfp8', 'max_model_len': 204800, 'served_model_name': ['qwen3.8-27b-vllm'], 'override_generation_config': {'temperature': 1.0, 'top_p': 0.95, 'top_k': 20}, 'attention_backend': 'R4D', 'reasoning_parser': 'qwen3', 'gpu_memory_utilization': 0.97, 'kv_cache_memory_bytes': 9300000000, 'kv_cache_dtype': 'fp8', 'enable_prefix_caching': True, 'mamba_cache_mode': 'align', 'limit_mm_per_prompt': {'image': 2, 'video': 0}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 2, 'async_scheduling': False, 'speculative_config': {'method': 'dflash', 'model': '/models/Qwen3.8-27B-DFlash2-FP8', 'num_speculative_tokens': 7, 'attention_backend': 'TRITON_ATTN', 'disable_padded_drafter_batch': True, 'draft_sample_method': 'probabilistic'}, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': None, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
 (APIServer pid=1) INFO 09-05 05:08:19 [model.py:645] Resolved architecture: Qwen3_5ForConditionalGeneration
 (APIServer pid=1) INFO 09-05 05:08:19 [model.py:1883] Using max model len 204800
-2026/09/05 15:08:20 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) [radiance.gdn] gdn_chunk_scan ENABLED (head_k 128, head_v 128, chunk 64; replaces wy + delta_h + chunk_o)
-2026/09/05 15:08:21 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:22 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:23 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) INFO 09-05 05:08:23 [cache.py:296] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
 (APIServer pid=1) INFO 09-05 05:08:23 [model.py:645] Resolved architecture: DFlash2DraftModel
 (APIServer pid=1) INFO 09-05 05:08:23 [model.py:1883] Using max model len 262144
@@ -228,60 +120,23 @@
 (APIServer pid=1) WARNING 09-05 05:08:23 [vllm.py:1774] max_num_scheduled_tokens is set to 2036 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens or max_num_seqs.
 (APIServer pid=1) WARNING 09-05 05:08:23 [vllm.py:2284] Model Runner V2 does not yet support the thinking_token_budget request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required.
 (APIServer pid=1) INFO 09-05 05:08:23 [compilation.py:329] Enabled custom fusions: norm_quant, act_quant, mla_dual_rms_norm
-2026/09/05 15:08:24 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:25 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:26 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:28 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:29 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:30 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
-2026/09/05 15:08:31 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:32 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:33 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:34 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:35 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) WARNING 09-05 05:08:35 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES instead.
-2026/09/05 15:08:36 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:37 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:38 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES instead.
-2026/09/05 15:08:39 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:40 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:41 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:42 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:43 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:44 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:45 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:46 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:47 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:48 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:49 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:50 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:51 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:52 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:53 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:54 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [radiance.gemm] no gemm_nt kernel for M<=64 bf16, disabled
-2026/09/05 15:08:55 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:08:56 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [aiter] import [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/module_aiter_core.so
 (EngineCore pid=342) [radiance] preshuffle weight-shuffle-at-load hook installed
 (EngineCore pid=342) [radiance] attn tuned-config override installed on 2 module aliases
 (EngineCore pid=342) [radiance] fast-reduce hook armed (RADIANCE_USE_R4D_AR=1, all_reduce wrap)
-2026/09/05 15:08:57 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [radiance.draft] RADIANCE_DYNAMIC_DRAFT=ON  controller=policy  tau=0.2  schedule=1:8,2:7,4:6,8:5,16:4  (GPU-resident capture + n-gram matcher; per-slot confidence gate short-circuits the forward loop)
 (EngineCore pid=342) [radiance.vit] head_dim-72 attention installed
 (EngineCore pid=342) [radiance.vit] Gemma4 vision attention installed (head_dim 72)
 (EngineCore pid=342) INFO 09-05 05:08:57 [core.py:121] Initializing a V1 LLM engine (v0.27.1) with config: model='/models/Qwen3.8-27B-MXFP4-mtpfp8', speculative_config=SpeculativeConfig(method='dflash', model='/models/Qwen3.8-27B-DFlash2-FP8', num_spec_tokens=7), tokenizer='/models/Qwen3.8-27B-MXFP4-mtpfp8', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=204800, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=quark, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=fp8, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='qwen3', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=qwen3.8-27b-vllm, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+sparse_attn_indexer', 'none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_mla_dual_rms_norm': True, 'fuse_rope_kvcache': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 16, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, enable_bf16x3_router_gemm=False, moe_backend='auto', linear_backend='auto')
 (EngineCore pid=342) [radiance.gdn] gdn_chunk_scan ENABLED (head_k 128, head_v 128, chunk 64; replaces wy + delta_h + chunk_o)
-2026/09/05 15:08:58 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:08:59 [parallel_state.py:1640] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://192.168.1.17:50671 backend=nccl
 (EngineCore pid=342) INFO 09-05 05:08:59 [parallel_state.py:1977] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
 (EngineCore pid=342) INFO 09-05 05:08:59 [gpu_worker.py:385] Using V2 Model Runner
-2026/09/05 15:08:59 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:08:59 [model_runner.py:308] Loading model from scratch...
-2026/09/05 15:09:00 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:09:00 [rocm.py:437] Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable Flash Attention Triton backend on RDNA.
 (EngineCore pid=342) INFO 09-05 05:09:00 [rocm.py:723] Using Torch SDPA backend for ViT model.
 (EngineCore pid=342) WARNING 09-05 05:09:00 [activation.py:856] [ROCm] PyTorch's native GELU with tanh approximation is unstable. Falling back to GELU(approximate='none').
@@ -298,74 +153,18 @@ WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is depre
 (EngineCore pid=342) WARNING 09-05 05:09:00 [compilation.py:1347] Op 'sparse_attn_indexer' not present in model, enabling with '+sparse_attn_indexer' has no effect
 (EngineCore pid=342) INFO 09-05 05:09:00 [weight_utils.py:867] Filesystem type for checkpoints: EXT4. Checkpoint size: 18.04 GiB. Available RAM: 19.51 GiB.
 (EngineCore pid=342) INFO 09-05 05:09:00 [weight_utils.py:897] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre) and the checkpoint size (18.04 GiB) exceeds 90% of available RAM (19.51 GiB).
-(EngineCore pid=342) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-2026/09/05 15:09:01 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:02 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:03 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:04 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:05 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:06 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:07 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:08 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:09 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:10 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:11 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:12 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:13 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:14 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:15 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:16 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:17 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:18 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:19 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:20 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:21 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:22 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:23 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:24 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:25 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:26 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:28 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:29 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:30 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:31 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:32 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:33 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:34 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:35 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:36 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:37 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:38 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:39 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:40 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:41 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:42 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:43 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:44 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:45 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:46 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:47 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:48 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:49 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:50 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:51 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:52 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:53 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:54 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:55 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:56 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:09:57 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-(EngineCore pid=342) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:56<00:00, 56.85s/it]
-(EngineCore pid=342) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:56<00:00, 56.86s/it]
+(EngineCore pid=342) 
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=342) 
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:56<00:00, 56.85s/it]
+(EngineCore pid=342) 
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:56<00:00, 56.86s/it]
 (EngineCore pid=342)
-2026/09/05 15:09:58 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:09:58 [default_loader.py:430] Loading weights took 57.86 seconds
 (EngineCore pid=342) [radiance.mxfp4] decode kernel ON (M<=64), 32 MiB split-K scratch
 (EngineCore pid=342) WARNING 09-05 05:09:59 [kv_cache.py:134] Checkpoint does not provide a q scaling factor. Setting it to k_scale. This only matters for FP8 Attention backends (flash-attn or flashinfer).
 (EngineCore pid=342) WARNING 09-05 05:09:59 [kv_cache.py:151] Using KV cache scaling factor 1.0 for fp8_e4m3. If this is unintended, verify that k/v_scale scaling factors are properly set in the checkpoint.
 (EngineCore pid=342) WARNING 09-05 05:09:59 [kv_cache.py:190] Using uncalibrated q_scale 1.0 and/or prob_scale 1.0 with fp8 attention. This may cause accuracy issues. Please make sure q/prob scaling factors are available in the fp8 checkpoint.
-2026/09/05 15:09:59 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [radiance.gdnmerge] merged 48 GDN layers (96 launches/forward removed), 0 left unmerged
 (EngineCore pid=342) [radiance.fp8stream] tp=1, skipping (epilogue exists to absorb the AR)
 (EngineCore pid=342) INFO 09-05 05:10:00 [eagle3_utils.py:28] Using Eagle3 auxiliary layers from config: (6, 20, 34, 48, 62)
@@ -373,82 +172,36 @@ WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is depre
 (EngineCore pid=342) WARNING 09-05 05:10:00 [vllm.py:1774] max_num_scheduled_tokens is set to 2036 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens or max_num_seqs.
 (EngineCore pid=342) WARNING 09-05 05:10:00 [vllm.py:2284] Model Runner V2 does not yet support the thinking_token_budget request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required.
 (EngineCore pid=342) INFO 09-05 05:10:00 [compilation.py:329] Enabled custom fusions: norm_quant, act_quant, mla_dual_rms_norm
-2026/09/05 15:10:00 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:01 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:02 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:03 [__init__.py:634] Selected TritonFp8BlockScaledMMKernel for Fp8LinearMethod
 (EngineCore pid=342) INFO 09-05 05:10:03 [rocm.py:610] Using TRITON_ATTN backend (selected via --attention-backend).
 (EngineCore pid=342) INFO 09-05 05:10:03 [weight_utils.py:867] Filesystem type for checkpoints: EXT4. Checkpoint size: 1.97 GiB. Available RAM: 21.81 GiB.
 (EngineCore pid=342) INFO 09-05 05:10:03 [weight_utils.py:890] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
-(EngineCore pid=342) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-(EngineCore pid=342) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 41.17it/s]
+(EngineCore pid=342) 
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=342) 
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 41.17it/s]
 (EngineCore pid=342)
-2026/09/05 15:10:03 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:04 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:05 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:06 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:07 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:07 [default_loader.py:430] Loading weights took 4.14 seconds
-2026/09/05 15:10:08 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:09 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:10 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:10 [model_runner.py:332] Model loading took 19.99 GiB and 71.195096 seconds
 (EngineCore pid=342) INFO 09-05 05:10:10 [interface.py:911] Setting attention block size to 1648 tokens to ensure that attention page size is >= mamba page size.
 (EngineCore pid=342) INFO 09-05 05:10:10 [interface.py:935] Padding mamba page size by 0.73% to ensure that mamba page size and attention page size are exactly equal.
-2026/09/05 15:10:11 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:12 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:13 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:14 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
-2026/09/05 15:10:15 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:16 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:17 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:18 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:19 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:19 [encoder_runner.py:80] Encoder cache will be initialized with a budget of 4096 tokens, and profiled with 1 image items of the maximum feature size.
-2026/09/05 15:10:20 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:21 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:22 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:23 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:24 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:25 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:26 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:27 [backends.py:1094] Using cache directory: /cache/vllm/torch_compile_cache/d500c0c203/rank_0_0/backbone for vLLM's torch.compile
 (EngineCore pid=342) INFO 09-05 05:10:27 [backends.py:1155] Dynamo bytecode transform time: 5.36 s
-2026/09/05 15:10:27 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:28 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:29 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:30 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:31 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:32 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:33 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:34 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:35 [backends.py:292] Directly load the compiled graph(s) for compile range (1, 2048) from the cache, took 5.305 s
 (EngineCore pid=342) INFO 09-05 05:10:35 [decorators.py:311] Directly load AOT compilation from path /cache/vllm/torch_compile_cache/torch_aot_compile/a7d382354968ef98232ce2fdad98b6d59087ff5b872efb7668810185f284b10d/rank_0_0/model
 (EngineCore pid=342) INFO 09-05 05:10:35 [monitor.py:53] torch.compile took 13.41 s in total
 (EngineCore pid=342) [radiance.mxfp4] linear layers: 304/304 on our kernel, 0 FORCED ONTO AITER (kernel cannot run them); aiter below M=0 (DISABLED)
-2026/09/05 15:10:35 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:36 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:37 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:38 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:39 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:40 [monitor.py:81] Initial profiling/warmup run took 5.09 s
-2026/09/05 15:10:40 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:41 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:42 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:43 [backends.py:1094] Using cache directory: /cache/vllm/torch_compile_cache/d500c0c203/rank_0_0/dflash_head for vLLM's torch.compile
 (EngineCore pid=342) INFO 09-05 05:10:43 [backends.py:1155] Dynamo bytecode transform time: 1.12 s
-2026/09/05 15:10:43 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:44 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:45 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:45 [backends.py:292] Directly load the compiled graph(s) for compile range (1, 2048) from the cache, took 0.551 s
 (EngineCore pid=342) INFO 09-05 05:10:45 [decorators.py:311] Directly load AOT compilation from path /cache/vllm/torch_compile_cache/torch_aot_compile/10832fd75d3a730c5b1d12f9598c849cc6efce04726967dbb09c1ebf4235c4a7/rank_0_0/model
 (EngineCore pid=342) INFO 09-05 05:10:45 [monitor.py:53] torch.compile took 3.36 s in total
 (EngineCore pid=342) INFO 09-05 05:10:45 [monitor.py:81] Initial profiling/warmup run took 0.04 s
 (EngineCore pid=342) INFO 09-05 05:10:46 [backends.py:1094] Using cache directory: /cache/vllm/torch_compile_cache/d500c0c203/rank_0_0/dflash2_candidate_selector for vLLM's torch.compile
 (EngineCore pid=342) INFO 09-05 05:10:46 [backends.py:1155] Dynamo bytecode transform time: 0.06 s
-2026/09/05 15:10:46 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:47 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:47 [backends.py:292] Directly load the compiled graph(s) for compile range (1, 2048) from the cache, took 0.060 s
 (EngineCore pid=342) INFO 09-05 05:10:47 [decorators.py:311] Directly load AOT compilation from path /cache/vllm/torch_compile_cache/torch_aot_compile/b953ad561e230b9b9a1fd765069e32eb687389a5bc2d99c5f7ebc50ad71e6036/rank_0_0/model
 (EngineCore pid=342) INFO 09-05 05:10:47 [monitor.py:53] torch.compile took 1.82 s in total
@@ -462,24 +215,31 @@ WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is depre
 (EngineCore pid=342) [radiance] R4D attention: 24 q heads / 4 kv heads, head_dim 256, block 16, attn_prefill_h256_gqa6_fp8kv + attn_decode_h256_gqa6_fp8kv, 3.8 MiB split-KV scratch
 (EngineCore pid=342) INFO 09-05 05:10:48 [kernel.py:306] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
 (EngineCore pid=342) INFO 09-05 05:10:48 [qwen_triton_warmup.py:270] Warming up Qwen Triton kernels for model_type=qwen3_5_text.
-2026/09/05 15:10:48 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:48 [ll_bf16.py:30] cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled
-(EngineCore pid=342) Capturing CUDA graphs (PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s][radiance.gdn] all-R4D prefill path live
-2026/09/05 15:10:49 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-(EngineCore pid=342) Capturing CUDA graphs (PIECEWISE):  20%|██        | 1/5 [00:00<00:03,  1.30it/s]Capturing CUDA graphs (PIECEWISE):  40%|████      | 2/5 [00:01<00:01,  1.95it/s]Capturing CUDA graphs (PIECEWISE):  60%|██████    | 3/5 [00:01<00:00,  2.70it/s][radiance.gdn] step not handled by the fused path: mixed batch: prefills 0 decodes 2 spec False
-(EngineCore pid=342) Capturing CUDA graphs (PIECEWISE):  80%|████████  | 4/5 [00:01<00:00,  3.31it/s]2026/09/05 15:10:50 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
+(EngineCore pid=342) 
+Capturing CUDA graphs (PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s][radiance.gdn] all-R4D prefill path live
+(EngineCore pid=342) 
+Capturing CUDA graphs (PIECEWISE):  20%|██        | 1/5 [00:00<00:03,  1.30it/s]
+Capturing CUDA graphs (PIECEWISE):  40%|████      | 2/5 [00:01<00:01,  1.95it/s]
+Capturing CUDA graphs (PIECEWISE):  60%|██████    | 3/5 [00:01<00:00,  2.70it/s][radiance.gdn] step not handled by the fused path: mixed batch: prefills 0 decodes 2 spec False
 [radiance.gdn] step not handled by the fused path: mixed batch: prefills 0 decodes 1 spec False
-(EngineCore pid=342) Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  3.53it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  2.86it/s]
-(EngineCore pid=342) Capturing CUDA graphs (FULL):   0%|          | 0/2 [00:00<?, ?it/s][radiance.gdn] all-R4D decode path live
-(EngineCore pid=342) Capturing CUDA graphs (FULL):  50%|█████     | 1/2 [00:00<00:00,  8.21it/s]Capturing CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00,  8.77it/s]Capturing CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00,  8.67it/s]
+(EngineCore pid=342) 
+Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  3.53it/s]
+Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:01<00:00,  2.86it/s]
+(EngineCore pid=342) 
+Capturing CUDA graphs (FULL):   0%|          | 0/2 [00:00<?, ?it/s][radiance.gdn] all-R4D decode path live
+(EngineCore pid=342) 
+Capturing CUDA graphs (FULL):  50%|█████     | 1/2 [00:00<00:00,  8.21it/s]
+Capturing CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00,  8.77it/s]
+Capturing CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00,  8.67it/s]
 (EngineCore pid=342) INFO 09-05 05:10:51 [speculator.py:140] Capturing model for DFlash2 speculator...
-(EngineCore pid=342) Capturing dflash2 CUDA graphs (FULL):   0%|          | 0/2 [00:00<?, ?it/s]Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00, 14.82it/s]Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00, 14.81it/s]
+(EngineCore pid=342) 
+Capturing dflash2 CUDA graphs (FULL):   0%|          | 0/2 [00:00<?, ?it/s]
+Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00, 14.82it/s]
+Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00, 14.81it/s]
 (EngineCore pid=342) INFO 09-05 05:10:51 [model_runner.py:794] Graph capturing finished in 3 secs, took 0.26 GiB
-2026/09/05 15:10:51 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [radiance.gdn] all-R4D prefill+spec path live
-2026/09/05 15:10:52 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) INFO 09-05 05:10:53 [jit_monitor.py:79] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
-2026/09/05 15:10:53 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (EngineCore pid=342) [radiance] R4D kernel selection: libr4d 0.4.0, 15 kernels built, 12 of 13 queries resolved
 (EngineCore pid=342) [radiance]   gemm_nt               M=64 K=5120 dtype=bf16
 (EngineCore pid=342) [radiance]                         -> no kernel, fallback runs: M=64, needs <= 16
@@ -509,37 +269,9 @@ WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is depre
 (EngineCore pid=342) [radiance]                         -> attn_decode_h256_gqa6_bf16kv
 (EngineCore pid=342) INFO 09-05 05:10:53 [core.py:348] init engine (profile, create kv cache, warmup model) took 43.00 s (compilation: 18.60 s)
 (EngineCore pid=342) INFO 09-05 05:10:54 [kernel.py:306] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
-2026/09/05 15:10:54 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:55 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) INFO 09-05 05:10:56 [api_server.py:678] Supported tasks: ['generate']
-2026/09/05 15:10:56 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:57 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) INFO 09-05 05:10:57 [parser_manager.py:37] "auto" tool choice has been enabled.
 (APIServer pid=1) INFO 09-05 05:10:57 [hf.py:540] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
-2026/09/05 15:10:58 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:10:59 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:00 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:01 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:02 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:03 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:04 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:05 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:06 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:07 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:08 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:09 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:10 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:11 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:12 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:13 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:14 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:15 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:16 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:17 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:18 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:19 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:20 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:21 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) INFO 09-05 05:11:21 [base.py:235] Multi-modal warmup completed in 23.554s
 (APIServer pid=1) INFO 09-05 05:11:21 [base.py:235] Readonly multi-modal warmup completed in 0.181s
 (APIServer pid=1) WARNING 09-05 05:11:21 [model.py:1637] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 1.0, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
@@ -578,10 +310,6 @@ WARNING 09-05 05:08:38 [rocm.py:123] Using CUDA_VISIBLE_DEVICES on ROCm is depre
 (APIServer pid=1) INFO 09-05 05:11:22 [launcher.py:99] API server: waiting for HTTP server to start
 (APIServer pid=1) INFO:     Started server process [1]
 (APIServer pid=1) INFO:     Waiting for application startup.
-2026/09/05 15:11:22 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:23 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
-2026/09/05 15:11:24 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 [WARN] metrics: empty body, recording minimal metrics
 [INFO] Request 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 0 "curl/8.5.0" 5m0.026062666s
-2026/09/05 15:11:25 http: proxy error: dial tcp 127.0.0.1:5804: connect: connection refused
 (APIServer pid=1) INFO:     Application startup complete.
