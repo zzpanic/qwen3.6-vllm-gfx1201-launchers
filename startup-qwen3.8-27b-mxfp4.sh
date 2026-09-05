@@ -818,11 +818,17 @@ with safe_open(src, framework="pt") as f:
         sizes[k] = n * NBYTES.get(sl.get_dtype(), 1)
 
 total = sum(sizes.values())
-target = total / nshard
+# Greedy fill against a target RECOMPUTED from what is left, not a fixed total/nshard. With a
+# fixed target every group that closes under it pushes its slack into the final group: the
+# first cut of this checkpoint produced 2.4/4.6/4.6/6.9 GiB, and the 6.9 -- not the mean -- is
+# what bounds the loader's working set. Re-deriving remaining/left after each cut spreads the
+# slack instead of accumulating it, and it self-corrects if the size estimate above is off.
 groups, cur, acc = [], [], 0
+remaining, left = total, nshard
 for k in keys:                      # keep the checkpoint's own tensor order
-    if cur and acc + sizes[k] > target and len(groups) < nshard - 1:
-        groups.append(cur); cur, acc = [], 0
+    target = remaining / left if left > 1 else float("inf")
+    if cur and acc + sizes[k] > target:
+        groups.append(cur); remaining -= acc; left -= 1; cur, acc = [], 0
     cur.append(k); acc += sizes[k]
 if cur:
     groups.append(cur)
@@ -855,7 +861,9 @@ with safe_open(src, framework="pt") as fo:
 with open(os.path.join(tmp, "model.safetensors.index.json"), "w") as fh:
     json.dump(index, fh, indent=2)
 for fn in os.listdir(tmp):
-    os.replace(os.path.join(tmp, fn), os.path.join(snap, fn))
+    dst = os.path.join(snap, fn)
+    os.replace(os.path.join(tmp, fn), dst)
+    os.chmod(dst, 0o644)             # the container umask writes 0600; match the checkpoint
 os.rmdir(tmp)
 os.remove(src)
 print("[shard] verified %d tensors across %d parts; monolith removed"
