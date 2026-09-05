@@ -10,6 +10,32 @@ Qwen3.8-27B with a DFlash2 draft head.
 entry name: the name `qwen3.8-27b-vllm` served int4 in August and serves MXFP4 now. Each
 folder's README states which stack it is and what it can honestly be compared against.
 
+## Reproducing these
+
+Three runner scripts, all of which drive a **live endpoint over HTTP** and take **no
+exclusive GPU window** — the model just has to be resident. Each carries its setup, its
+traps and how to read its output in its own header.
+
+| script | measures | runtime |
+| --- | --- | --- |
+| `run-betterbench-prefill.sh` | prefill throughput against input depth, to near-full context | ~25 min |
+| `run-gsm8k.sh` | GSM8K 5-shot — a regression check against silent numerical damage | ~76 min |
+| `run-bfcl.sh` | BFCL v4 tool-calling — the eval that matters most for agentic use | ~65 min subset, ~3 h full |
+
+All three measure the **serving path**, not the weights: fp8 KV, speculative decoding, the
+chat template and the server-default sampler are all in the measurement. That is the more
+useful quantity if you are choosing how to serve, and it is a different quantity from what
+a weights-only eval reports — so these numbers are not directly comparable to a published
+leaderboard entry for the same checkpoint.
+
+Two things worth reading before you compare any of it:
+
+- **A single run's error bar is not the error bar on a comparison.** GSM8K's ±0.6 pp is
+  binomial error on 1319 problems; the standard error on a *difference* between two single
+  runs is ~0.9 pp, so gaps inside ~1.7 pp are not distinguishable.
+- **BFCL's aggregate reweights when the category set changes**, so a subset's "Overall Acc"
+  cannot be compared to a full run's. Compare per-category.
+
 | folder | what it measures |
 | --- | --- |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
