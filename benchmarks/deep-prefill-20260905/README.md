@@ -14,6 +14,8 @@ between them (see that folder's README).
 | `betterbench-prefill.md` | BetterBench 0.4.0 prefill sweep, 8 depths, 1 warm-up + 5 passes each |
 | `betterbench-prefill.json` | the same run, machine-readable, with `sample_gate` |
 | `betterbench-prefill-config.json` | the exact config that produced it |
+| `betterbench-decode-concurrency.md` | BetterBench 0.4.0 decode-by-category and concurrency sweep, 20 passes per category |
+| `betterbench-decode-concurrency.json` | the same, machine-readable |
 | `bench-live-deep.tsv` | `bench-live.sh` at the same 8 depths — prefill, decode, acceptance, mean accepted length, step rate |
 | `bench-live-deep-env.txt` | provenance for that run |
 
@@ -89,3 +91,61 @@ Two results:
   the within-boot ±0.6%.
 - BetterBench's p1/p99 columns are flagged `†` in its own report: 5 passes
   cannot support a percentile. Read them as "roughly the worst observed".
+
+## Decode by category, and concurrency
+
+`betterbench-decode-concurrency.md`, 20 passes per category, temp 0.7.
+
+| category | tok/update | decode t/s (med) | CV |
+| --- | --: | --: | --: |
+| file_edit | 5.67 | **109.1** | 11.5% |
+| math | 5.98 | 105.2 | 5.8% |
+| code | 4.91 | 96.8 | 15.6% |
+| json | 5.15 | 95.7 | 15.2% |
+| reasoning | 3.43 | 64.5 | 28.6% |
+| chat | 3.64 | 57.6 | 22.5% |
+| prose | 2.86 | 50.2 | 8.2% |
+
+**Weighted combined: 83.6 t/s**, update p99 62.7 ms, TTFT p50 ~102 ms.
+
+The spread is almost entirely `tok/update` — the speculative acceptance rate. Update
+spacing is flat at 58.0–58.3 ms p50 across every category, so **the engine steps at a
+constant rate and the category only decides how many tokens ride each step.** Structured
+output (file_edit, math, code, json) is predictable enough for the drafter to land 5–6
+tokens per update; prose lands 2.86 and is the floor. That is the same mechanism as the
+depth result above, seen along a different axis.
+
+Read `CV` before reading a single row: reasoning at 28.6% and chat at 22.5% are noisy
+enough that their ordering against each other is not stable.
+
+### Concurrency
+
+| level | aggregate t/s | TTFT p50 (ms) | per-request decode t/s (med) |
+| --: | --: | --: | --: |
+| 1 | 74.3 | 102 | 90.9 |
+| 2 | **134.5** | 163 | 86.0 |
+| 4 | 137.0 | 5104 | 86.7 |
+| 8 | 133.8 | 14856 | 86.0 |
+| 16 | 139.0 | 15583 | 88.5 |
+
+**All the aggregate throughput this configuration has is available at concurrency 2, and
+nothing above 2 buys anything.** 1 → 2 is +81%; 2 → 16 is +3.3% for a **95× worse TTFT**
+(163 ms → 15.6 s). Per-request decode is flat throughout, so the queue is where the time
+goes, not the GPU.
+
+That is `MAXSEQS=2` working as configured, not a limit being hit: the scheduler has two
+slots, so requests 3 and beyond queue. It is the right trade for a single-user agentic box
+— see the 2026-09-05 concurrency entry in [`../../TUNING.md`](../../TUNING.md) — but if you
+are serving several people, this is the number to change first, and it will cost context.
+
+## A caveat on the headline number
+
+83.6 t/s weighted here, against **85.6** measured on 2026-09-05 during config selection.
+Same stack, and the gap is not a regression: the earlier figure was taken at
+`MAXLEN=131072` before the context was raised, and there is a real ~5% decode cost to a
+bigger KV pool (TUNING.md, 2026-09-05 CHUNK entry). **83.6 with 204800 tokens of context is
+the number this repo actually serves**, and the trade was deliberate.
+
+*Note also that 110/160 single-stream runs stopped at `max_tokens`. On a thinking model a
+truncated run measures the thinking phase rather than a complete answer, so read the
+reasoning/answer split table in the report as indicative.*
