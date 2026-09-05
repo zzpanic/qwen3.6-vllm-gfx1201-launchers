@@ -101,6 +101,10 @@ Nothing needs editing to run: the defaults **are** the measured production confi
 
 ## What this card actually does — MXFP4, the current configuration
 
+Qwen3.8-27B is a **retrained release of the Qwen3.6-27B architecture**, not a new one —
+same `model_type qwen3_5`, same 64 layers / 5120 hidden / 17408 intermediate / 24:4 heads /
+head_dim 256 / vocab 248320, which is why tuning done on 3.6 transfers to it unchanged.
+
 Everything in this section is `startup-qwen3.8-27b-mxfp4.sh` at its shipped defaults:
 `MAXLEN=204800`, `KV_MEM=9300000000`, `MAXSEQS=2`, DFlash2 **K=7** sampled
 probabilistically, fp8 KV, vision tower loaded. Raw files in
@@ -200,6 +204,39 @@ That is `MAXSEQS=2` working as configured, not a limit being hit — the right t
 single-user agentic box. **If you are serving several people, this is the first thing to
 change**, and it will cost context.
 
+### Quality
+
+GSM8K, 5-shot, thinking template, measured **through the live server in this exact
+configuration** — MXFP4 weights, fp8 KV, DFlash2 K=7, production sampler — rather than
+against the weights in isolation. That is the number that matters for serving, and it is
+not the number a weights-only eval reports.
+
+> **MXFP4 result: measurement in progress (2026-09-05).** The run is under way against the
+> live endpoint; this paragraph carries the figure once it completes. It is stated here as
+> pending rather than omitted so that a missing number reads as unfinished work rather than
+> as a result nobody wanted to publish.
+
+**The int4 path scores 94.77%** on the same harness (93.71% with DFlash2 rather than MTP).
+Read the MXFP4 figure against that one, and only with these four caveats, which apply
+whichever way the comparison lands:
+
+- **It is a temperature-1.0 number**, because that is what these scripts serve. Greedy
+  scores about 97.6% on the same harness, so ~5 points of the headline are the sampler, not
+  the quantisation. GSM8K at temp 1.0 is a poor discriminator between decoders.
+- **Single run, no seeds.** The binomial standard error on 1319 problems at ~95% is
+  ±0.6 pp, so the standard error on a *difference* between two single runs is ~0.9 pp.
+  **Anything inside about ±1.7 pp is not a distinguishable difference**, in either
+  direction. Do not read a gap that size as MXFP4 costing or saving quality.
+- **It measures the whole serving path**, so a change to the draft head, the KV dtype or
+  the chat template moves it. It is not a property of the checkpoint alone.
+- **GSM8K is grade-school arithmetic.** It is a regression check against silent numerical
+  damage — the kind a bad quantisation causes — not evidence about coding or agentic work,
+  which is what this box actually does.
+
+The int4 quality table, the BFCL v4 tool-calling results and the full caveats are in the
+[int4 section below](#quality-1) and in
+[BACKGROUND.md](BACKGROUND.md#quality-in-full).
+
 ---
 
 ## The int4 fallback: what it does
@@ -210,11 +247,6 @@ change**, and it will cost context.
 > **Do not compare them to the MXFP4 table above**: the checkpoint, the speculative depth
 > (K=4 vs 7), the KV pool and the sampling temperature all differ. A different pool size
 > alone is worth ~5% decode on this card.
-
-Qwen3.8-27B is a **retrained release of the Qwen3.6-27B architecture**, not a new one —
-same `model_type qwen3_5`, same 64 layers / 5120 hidden / 17408 intermediate / 24:4 heads /
-head_dim 256 / vocab 248320. So every tuning decision here transfers unchanged, including
-the W4A16 tile table in `patches/` (keyed on GEMM shape, not model name — see below).
 
 Checkpoint: [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/devan-carlin/Qwen3.8-27B-int4-AutoRound),
 17.93 GiB, int4 W4A16 gs=128, **int4 MTP draft head**.
