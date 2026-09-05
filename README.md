@@ -7,14 +7,18 @@ gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 scripts, `:0.5.8` for the 
 
 **Start with [Quick start](#quick-start).** The current, actively tuned configuration is
 `startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). That path is **not this repo's work** —
-it stands on three upstream pieces, and you must fetch all three to run it:
+it is downstream of three R9700 community projects.
+[**ggz14**](https://github.com/GGZ14/vllm-mxfp4) (`brian_launch80`) wrote the MXFP4 kernels
+and the image; **malicz**'s launchers are how that work was picked up here; and
+**hifi/vllm-radlight** published the numbers this was measured against and eventually
+passed. [Where the MXFP4 path came from](#where-the-mxfp4-path-came-from) says what each
+one contributed. To *run* it you must fetch three pieces:
 [**ggz14**](https://github.com/GGZ14/vllm-mxfp4)'s MXFP4 kernels, DFlash2 integration and
 setup script; [**AMD**](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4)'s Quark
 MXFP4 weights; and
 [**tcclaviger**](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8)'s FP8 DFlash2
 draft head — all running inside `stilldeadcode`'s `vllm-radiance` image. What this repo
-adds is the arrangement, the tuning and the measurement. Full attribution under
-[Credit](#credit). The int4 script beside it is the
+adds is the arrangement, the tuning and the measurement. The int4 script beside it is the
 maintained fallback; the two Qwen3.6 scripts are historical and kept for the reasoning
 rather than to be served. The status table under [Contents](#contents) says which is which.
 
@@ -512,15 +516,43 @@ Almost none of the code here was written for this repo. The launchers are shell 
 the substance — the ROCm/gfx1201 kernel work, DFlash2, vLLM itself — is other people's, and
 what this repo adds on top is measurement, configuration, and documentation of both.
 
-### The MXFP4 path (`startup-qwen3.8-27b-mxfp4.sh`) — three sources, all required
+### Where the MXFP4 path came from
 
-- **`ggz14`** — the MXFP4 kernels themselves, the DFlash2 integration, and `setup-mxfp4.sh`.
-  [codeberg.org/ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4),
-  mirrored to [github.com/GGZ14/vllm-mxfp4](https://github.com/GGZ14/vllm-mxfp4) (the
-  Quick start clones the mirror). This is the substance of the MXFP4 path — the launcher
-  here sources `gpu-detect.sh` from that clone and mounts it as `/patches`, and dies without
-  it. Also the author of [BetterBench](https://github.com/GGZ14/BetterBench), credited
-  separately below, and the same person as `brian_launch80` in the R9700 community.
+**This configuration is downstream of three other people's projects.** None of the MXFP4
+work is ours; the chain is worth stating explicitly because two of the three are easy to
+miss when you arrive at this repo from a search engine.
+
+**1. `ggz14` (`brian_launch80`) — the origin, and the only hard dependency.**
+[codeberg.org/ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4),
+mirrored to [github.com/GGZ14/vllm-mxfp4](https://github.com/GGZ14/vllm-mxfp4) (the Quick
+start clones the mirror; the trees are identical). The MXFP4 kernels, the W4A8 fp8-WMMA HIP
+kernel, the DFlash2 integration and `setup-mxfp4.sh` are all theirs. That repo and the
+`stilldeadcode/vllm-radiance` image are **one project, not two** — its `DOCKERHUB.md` is
+that image's Docker Hub page, and MXFP4 is a runtime flag in the image (`RADIANCE_MXFP4=1`,
+plus `RADIANCE_MXFP4_W4A8=1`), not a separate build. The launcher here sources
+`gpu-detect.sh` from that clone and mounts it as `/patches`, so it does not start without
+it. Same author as [BetterBench](https://github.com/GGZ14/BetterBench), the harness every
+number in `benchmarks/` comes from. Markedly understated about what is a full vendor-grade
+RDNA4 stack.
+
+**2. `malicz/vllm-gfx1201-launchers` — the intermediary we actually picked this up
+through.** A thin config layer over ggz14's work: it names both upstreams in its README and
+`curl`s ggz14's files from a pinned commit at build time rather than vendoring them, plus
+one original file. The arrangement in this repo was arrived at by working through theirs,
+and it is the reason the pinned-commit approach is used here at all. Credited here because
+it would otherwise be invisible — nothing in the running system carries its name.
+
+**3. `hifi/vllm-radlight` — the yardstick, not a dependency.** The published R9700 MXFP4
+throughput numbers this configuration was measured against and eventually passed (85.6 vs
+81.7 t/s weighted decode, 19.6 vs 17.6 steps/s — and with the vision tower **loaded**,
+which those numbers drop via `--language-model-only`). Two ROCm runtime settings here were
+taken from it and are marked as such in the launcher: `GPU_MAX_HW_QUEUES=1` and
+`HSA_ENABLE_MWAITX=1`. A third, `HSA_ENABLE_INTERRUPT=1`, was tried and measured flat, and
+is documented as not adopted. Reproducing someone else's published numbers before trying to
+beat them is most of why the decode gap here closed at all.
+
+### The weights, and the rest
+
 - **AMD** — [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4),
   the served body weights, quantized with AMD's Quark. Used as published; the only change
   is that its MTP head is requantised to fp8 by ggz14's `fp8_mtp.py`, because that
@@ -529,10 +561,6 @@ what this repo adds on top is measurement, configuration, and documentation of b
   weights.
 - **`tcclaviger`** — [`Qwen3.8-27B-DFlash2-FP8`](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8),
   the DFlash2 draft head this path speculates with. Not trained or quantized here.
-- **`hifi/vllm-radlight`** — not a dependency, but the published R9700 MXFP4 numbers this
-  configuration was measured against and eventually passed. Several ROCm runtime settings
-  here (`GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_MWAITX=1`) were taken from it and are marked as
-  such in the launcher.
 
 ### Shared, and the int4 path
 
