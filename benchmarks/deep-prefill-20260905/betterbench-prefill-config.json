@@ -1,0 +1,8 @@
+{
+  "prefill_depths": [2000, 8000, 16000, 32000, 64000, 128000, 160000, 200000],
+  "prefill_runs": 5,
+  "prefill_warmup": 1,
+  "prefill_max_tokens": 16,
+  "max_model_len": 204800,
+  "timeout_s": 1800.0
+}
