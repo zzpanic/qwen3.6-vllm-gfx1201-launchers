@@ -9,8 +9,8 @@ gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 scripts, `:0.5.8` for the 
 `startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). That path is **not this repo's work** —
 it is downstream of three R9700 community projects.
 [**ggz14**](https://github.com/GGZ14/vllm-mxfp4) (`brian_launch80`) wrote the MXFP4 kernels
-and the image; **malicz**'s launchers are how that work was picked up here; and
-**hifi/vllm-radlight** published the numbers this was measured against and eventually
+and the image; [**malicz**](https://github.com/malicz/vllm-gfx1201-launchers)'s launchers are how that work was picked up here; and
+[**hifi/vllm-radlight**](https://codeberg.org/hifi/vllm-radlight) published the numbers this was measured against and eventually
 passed. [Where the MXFP4 path came from](#where-the-mxfp4-path-came-from) says what each
 one contributed. To *run* it you must fetch three pieces:
 [**ggz14**](https://github.com/GGZ14/vllm-mxfp4)'s MXFP4 kernels, DFlash2 integration and
@@ -535,14 +535,14 @@ it. Same author as [BetterBench](https://github.com/GGZ14/BetterBench), the harn
 number in `benchmarks/` comes from. Markedly understated about what is a full vendor-grade
 RDNA4 stack.
 
-**2. `malicz/vllm-gfx1201-launchers` — the intermediary we actually picked this up
+**2. [`malicz/vllm-gfx1201-launchers`](https://github.com/malicz/vllm-gfx1201-launchers) — the intermediary we actually picked this up
 through.** A thin config layer over ggz14's work: it names both upstreams in its README and
 `curl`s ggz14's files from a pinned commit at build time rather than vendoring them, plus
 one original file. The arrangement in this repo was arrived at by working through theirs,
 and it is the reason the pinned-commit approach is used here at all. Credited here because
 it would otherwise be invisible — nothing in the running system carries its name.
 
-**3. `hifi/vllm-radlight` — the yardstick, not a dependency.** The published R9700 MXFP4
+**3. [`hifi/vllm-radlight`](https://codeberg.org/hifi/vllm-radlight) — the yardstick, not a dependency.** The published R9700 MXFP4
 throughput numbers this configuration was measured against and eventually passed (85.6 vs
 81.7 t/s weighted decode, 19.6 vs 17.6 steps/s — and with the vision tower **loaded**,
 which those numbers drop via `--language-model-only`). Two ROCm runtime settings here were
@@ -560,7 +560,10 @@ beat them is most of why the decode gap here closed at all.
   Quark's own exclusion never fires. That is a bug worked around, not a criticism of the
   weights.
 - **`tcclaviger`** — [`Qwen3.8-27B-DFlash2-FP8`](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8),
-  the DFlash2 draft head this path speculates with. Not trained or quantized here.
+  the DFlash2 draft head this path speculates with. Not trained or quantized here. They also
+  maintain an RDNA4-targeted vLLM fork of their own, and MXFP4-FP8 Qwen3.8-Flash weights for
+  multi-card R9700 setups — neither is used here, but both are worth knowing about if your
+  card count is not one.
 
 ### Shared, and the int4 path
 
