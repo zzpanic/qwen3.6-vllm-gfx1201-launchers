@@ -13,6 +13,7 @@ folder's README states which stack it is and what it can honestly be compared ag
 | folder | what it measures |
 | --- | --- |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
+| `deep-prefill-20260905/` | **MXFP4 W4A8.** The near-full-context sweep: BetterBench prefill and bench-live generation at 8 depths up to a real 200k tokens, plus the ladder-misalignment warning that applies to any comparison between the two harnesses |
 | `int4-20260829/` | **int4 W4A16.** The production server as shipped on that date: prefill/decode/step-rate at three prompt depths, a BetterBench pass with prefill and concurrency sweeps, and the GSM8K quality result (94.77%) |
 | `w4a16-census-20260829/` | **int4 W4A16** (the name says so — MXFP4 has no W4A16 GEMM). Runtime shape census under DFlash2, plus the isolated-kernel tile sweep that closed the last 0.61% of uncovered work |
 
