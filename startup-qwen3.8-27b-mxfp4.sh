@@ -2,7 +2,7 @@
 # startup-qwen3.8-27b-mxfp4.sh -- Qwen3.8-27B in NATIVE MXFP4 (W4A8) with an FP8 DFlash2
 # drafter, on ONE AMD Radeon AI PRO R9700 (gfx1201 / RDNA4, 32 GiB).
 #
-# This is the MXFP4 sibling of startup-qwen3.8-27b-vllm.sh (int4 W4A16) in this repo. Same
+# This is the MXFP4 sibling of startup-qwen3.8-27b-int4.sh (int4 W4A16) in this repo. Same
 # model, same card, different quantisation path and a different kernel stack. Run whichever
 # suits you; they cannot run at the same time (each takes the whole GPU).
 #

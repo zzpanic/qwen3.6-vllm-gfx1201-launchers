@@ -5,7 +5,7 @@ is a single Radeon AI PRO R9700 (gfx1201, 32 GiB), TP=1, vLLM 0.27.1 on the radi
 Qwen3.8-27B with a DFlash2 draft head.
 
 **Folders are named for the quantisation, because there are now two stacks.** `int4-*` is
-`startup-qwen3.8-27b-vllm.sh` (int4 W4A16); `mxfp4-*` and `deep-prefill-*` are
+`startup-qwen3.8-27b-int4.sh` (int4 W4A16); `mxfp4-*` and `deep-prefill-*` are
 `startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). Do **not** match them up by llama-swap
 entry name: the name `qwen3.8-27b-vllm` served int4 in August and serves MXFP4 now. Each
 folder's README states which stack it is and what it can honestly be compared against.

@@ -1,7 +1,7 @@
 # DFlash2 overlay for vLLM 0.26.0 (`vllm-radiance:0.5.8`)
 
 Ten Python files, bind-mounted read-only over the image's `vllm` package by
-`startup-qwen3.8-27b-vllm.sh` whenever `SPEC=dflash2`. Without them the image cannot run
+`startup-qwen3.8-27b-int4.sh` whenever `SPEC=dflash2`. Without them the image cannot run
 DFlash2 at all — it fails on an unknown model architecture.
 
 ## Why an overlay and not a newer image

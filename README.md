@@ -241,7 +241,7 @@ going:
 | script | status |
 | --- | --- |
 | `startup-qwen3.8-27b-mxfp4.sh` | **current.** Every measurement in `benchmarks/` dated 2026-09-05 is this one. |
-| `startup-qwen3.8-27b-vllm.sh` | **maintained fallback** (int4 W4A16). Same model, better-understood path, measurably slower. Kept because it is what to fall back to when a radiance bump breaks the MXFP4 stack — that has happened. |
+| `startup-qwen3.8-27b-int4.sh` | **maintained fallback** (int4 W4A16). Same model, better-understood path, measurably slower. Kept because it is what to fall back to when a radiance bump breaks the MXFP4 stack — that has happened. |
 | `startup-qwen3.6-27b-vllm.sh` | **historical.** Qwen3.6 is superseded by Qwen3.8 on the same architecture; kept for the reasoning and the tile table, not because you should serve it. |
 | `startup-qwen3.6-35b-vllm.sh` | **historical.** As above, plus the MoE-specific findings (why MTP is off at that size). |
 
@@ -254,7 +254,7 @@ work and still serves the 3.8, because it is keyed on GEMM shape rather than mod
 - `startup-qwen3.8-27b-mxfp4.sh` — dense 27B, **native MXFP4 W4A8**, DFlash2 ×7 with an fp8
   drafter, R4D attention, vision, 204800 context on a **pinned** KV cache. The fastest
   configuration in this repo; see "MXFP4 vs int4" below for when to prefer it.
-- `startup-qwen3.8-27b-vllm.sh` — dense 27B, int4 W4A16, **DFlash2 speculative decoding**
+- `startup-qwen3.8-27b-int4.sh` — dense 27B, int4 W4A16, **DFlash2 speculative decoding**
   on (with `SPEC=mtp` as a supported fallback), vision, 204800 context,
   `REASONING_EFFORT` knob.
 - `startup-qwen3.6-27b-vllm.sh` — *(historical)* dense 27B, int4 W4A16, MTP speculative decoding on,
@@ -336,20 +336,20 @@ is set to, what it was measured against, and the traps found along the way.
 
 ## Running the 3.8 int4 fallback
 
-This section is the **int4 W4A16** path (`startup-qwen3.8-27b-vllm.sh`). For the current
+This section is the **int4 W4A16** path (`startup-qwen3.8-27b-int4.sh`). For the current
 MXFP4 configuration see [Quick start](#quick-start) above.
 
 
 ```
 hf download devan-carlin/Qwen3.8-27B-int4-AutoRound --local-dir ./models/qwen3.8-27b-autoround
 hf download syvai/Qwen3.8-27B-DFlash2-W4A16      --local-dir ./models/qwen3.8-27b-dflash2-int4
-./startup-qwen3.8-27b-vllm.sh
+./startup-qwen3.8-27b-int4.sh
 ```
 
 The second download is the DFlash2 draft model. To run without it:
 
 ```
-SPEC=mtp MAXLEN=131072 ./startup-qwen3.8-27b-vllm.sh
+SPEC=mtp MAXLEN=131072 ./startup-qwen3.8-27b-int4.sh
 ```
 
 which is the configuration every MTP number in [BACKGROUND.md](BACKGROUND.md) was

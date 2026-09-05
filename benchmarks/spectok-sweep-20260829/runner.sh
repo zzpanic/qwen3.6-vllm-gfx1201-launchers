@@ -24,6 +24,9 @@
 set -uo pipefail
 
 OUT=${OUT:-./out}
+# NOTE (2026-09-05): this script was renamed to startup-qwen3.8-27b-int4.sh once a
+# second 27B stack existed. Left verbatim below as the record of what was actually run;
+# override LAUNCH= to re-run it today.
 LAUNCH=${LAUNCH:-./startup-qwen3.8-27b-vllm.sh}
 TOK=${MODEL_DIR:-./models/qwen3.8-27b-autoround}
 SERVED=qwen3.8-27b-vllm

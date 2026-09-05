@@ -22,7 +22,7 @@
 #       hf download devan-carlin/Qwen3.8-27B-int4-AutoRound --local-dir ./models/qwen3.8-27b-autoround
 #   - draft weights (DFlash2 speculator, the default here -- see below):
 #       hf download syvai/Qwen3.8-27B-DFlash2-W4A16 --local-dir ./models/qwen3.8-27b-dflash2-int4
-#       ./startup-qwen3.8-27b-vllm.sh
+#       ./startup-qwen3.8-27b-int4.sh
 #
 # ---------------------------------------------------------------------------------------
 # MEASURED ON THIS CARD (2026-08-22, this launcher, MAXLEN=204800, MAXSEQS=2, DFlash2 x4)
@@ -187,8 +187,8 @@
 set -euo pipefail
 
 PORT="${PORT:-8000}"
-NAME="${NAME:-qwen38-27b-vllm}"
-SERVED="${SERVED:-qwen3.8-27b-vllm}"
+NAME="${NAME:-qwen38-27b-int4}"
+SERVED="${SERVED:-qwen3.8-27b-int4}"
 MODEL_DIR="${MODEL_DIR:-./models/qwen3.8-27b-autoround}"
 QUANT="${QUANT:-auto_gptq}"    # must AGREE with the checkpoint's config.json or vLLM raises
                                # a mismatch ValueError several minutes into the load. The raw

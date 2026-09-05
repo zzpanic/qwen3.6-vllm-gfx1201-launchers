@@ -1,6 +1,6 @@
 # int4 W4A16 — the production server as shipped, 2026-08-29
 
-**This folder is the int4 path**, `startup-qwen3.8-27b-vllm.sh`. It is not the MXFP4
+**This folder is the int4 path**, `startup-qwen3.8-27b-int4.sh`. It is not the MXFP4
 configuration and its numbers must not be read beside MXFP4 ones without the caveats at
 the bottom of this file. The folder was called `live-20260829/` until 2026-09-05; it was
 renamed because "live" stopped identifying anything once a second stack existed.
@@ -8,6 +8,13 @@ renamed because "live" stopped identifying anything once a second stack existed.
 One trap the rename is there to prevent: `env.txt` records `model: qwen3.8-27b-vllm`,
 because on 2026-08-29 that llama-swap entry name served the **int4** weights. The same name
 now serves MXFP4. Match folders on the quantisation, never on the entry name.
+
+Same reason, same date: the launcher itself was renamed `startup-qwen3.8-27b-vllm.sh` ->
+`startup-qwen3.8-27b-int4.sh`, and its default served-model id `qwen3.8-27b-vllm` ->
+`qwen3.8-27b-int4`. If you were already running it, either pass `SERVED=qwen3.8-27b-vllm`
+or update the model id your client sends. The runner scripts under
+`spectok-sweep-20260829/` still name the old path -- they are a record of what was run in
+August, and carry a note saying so.
 
 
 Everything here was captured against the running llama-swap endpoint with no exclusive GPU
