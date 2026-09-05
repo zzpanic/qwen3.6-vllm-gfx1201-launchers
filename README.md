@@ -551,6 +551,27 @@ taken from it and are marked as such in the launcher: `GPU_MAX_HW_QUEUES=1` and
 is documented as not adopted. Reproducing someone else's published numbers before trying to
 beat them is most of why the decode gap here closed at all.
 
+### The wider gfx1201 ecosystem — the Launch80 Discord
+
+Nearly all serious R9700 work is happening in one place: the **Launch80 Discord**. It is
+where the projects above are developed and where several others are shared that have no
+public repo at all. If you are running this card and hit something this README does not
+cover, that community is the answer far more often than a search engine is.
+
+Beyond the three projects this repo descends from:
+
+| project | scope |
+| --- | --- |
+| [`stew675/llama-cpp-rdna-boosts`](https://github.com/stew675/llama-cpp-rdna-boosts) | llama.cpp patches for RDNA 3, 3.5 and 4 — the Vulkan side, relevant if you serve GGUF rather than vLLM |
+| [`tcclaviger`](https://huggingface.co/tcclaviger) | an RDNA4-targeted vLLM fork, plus [`Qwen3.8-Flash-Next-MXFP4-FP8`](https://huggingface.co/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8) for 4x R9700 |
+| [`Dyluhn/R9V`](https://github.com/Dyluhn/R9V) | Qwen3.8-Flash-Next on 2x R9700, with [IQ4_XS weights](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) |
+| `stilldeadcode` | vLLM patches for 2x R9700, and Deepseek v4 Flash for 1-2x — shared in the Discord, no public repo |
+
+**Card count is the thing to check first.** This repo is single-card throughout, and so is
+`hifi/vllm-radlight`. Several of the projects above target 2x or 4x, where the tuning
+questions are different ones — tensor parallelism, interconnect, and a memory budget that
+stops being the binding constraint. Do not carry a number across a card count.
+
 ### The weights, and the rest
 
 - **AMD** — [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4),
