@@ -137,7 +137,7 @@ loads the compiled graph from cache and succeeds. Nothing needs changing.
 
 [BetterBench](https://github.com/GGZ14/BetterBench) run against the running server with the
 production sampler, 4 runs per category, cold prefix cache. Full report and raw JSON in
-`benchmarks/live-20260829/`.
+`benchmarks/int4-20260829/`.
 
 Single stream, by workload category. ITL columns are tokens/sec: **1% low** is the stutter
 floor, median is the typical rate.
@@ -518,7 +518,7 @@ what this repo adds on top is measurement, configuration, and documentation of b
   (the DFlash2 draft model). Neither was quantized here; both are other people's work and
   carry their own licences on the Hub.
 - **[BetterBench](https://github.com/GGZ14/BetterBench)** (Apache-2.0) — the benchmark
-  harness behind `benchmarks/live-20260829/betterbench-full.*`. Not vendored; run against
+  harness behind `benchmarks/int4-20260829/betterbench-full.*`. Not vendored; run against
   the live endpoint, output published verbatim.
 - **[`BMorgan1296/qwen3.6-vllm-gfx1201-launchers`](https://github.com/BMorgan1296/qwen3.6-vllm-gfx1201-launchers)**
   — an independent adaptation of these launchers that got DFlash2 running on this card

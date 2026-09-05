@@ -1,14 +1,20 @@
 # Benchmarks
 
 Measured numbers from the homelab rig, with the scripts that produced them. Everything here
-is a single Radeon AI PRO R9700 (gfx1201, 32 GiB), TP=1, vLLM 0.27.1 on the radiance 0.9.3
-fork, Qwen3.8-27B int4 W4A16 + DFlash2 draft head.
+is a single Radeon AI PRO R9700 (gfx1201, 32 GiB), TP=1, vLLM 0.27.1 on the radiance fork,
+Qwen3.8-27B with a DFlash2 draft head.
+
+**Folders are named for the quantisation, because there are now two stacks.** `int4-*` is
+`startup-qwen3.8-27b-vllm.sh` (int4 W4A16); `mxfp4-*` and `deep-prefill-*` are
+`startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). Do **not** match them up by llama-swap
+entry name: the name `qwen3.8-27b-vllm` served int4 in August and serves MXFP4 now. Each
+folder's README states which stack it is and what it can honestly be compared against.
 
 | folder | what it measures |
 | --- | --- |
-| `spectok-sweep-20260829/` | speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
-| `live-20260829/` | the production server as shipped: prefill/decode/step-rate at three prompt depths, plus a BetterBench pass with prefill and concurrency sweeps |
-| `w4a16-census-20260829/` | runtime W4A16 GEMM shape census under DFlash2, plus the isolated-kernel tile sweep that closed the last 0.61% of uncovered work |
+| `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
+| `int4-20260829/` | **int4 W4A16.** The production server as shipped on that date: prefill/decode/step-rate at three prompt depths, a BetterBench pass with prefill and concurrency sweeps, and the GSM8K quality result (94.77%) |
+| `w4a16-census-20260829/` | **int4 W4A16** (the name says so — MXFP4 has no W4A16 GEMM). Runtime shape census under DFlash2, plus the isolated-kernel tile sweep that closed the last 0.61% of uncovered work |
 
 ## How to read these
 
