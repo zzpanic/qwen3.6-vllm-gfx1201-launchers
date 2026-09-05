@@ -149,3 +149,28 @@ the number this repo actually serves**, and the trade was deliberate.
 *Note also that 110/160 single-stream runs stopped at `max_tokens`. On a thinking model a
 truncated run measures the thinking phase rather than a complete answer, so read the
 reasoning/answer split table in the report as indicative.*
+
+## Quality — GSM8K
+
+`gsm8k-mxfp4-20260905.json` is the raw lm-eval output. 5-shot, thinking template, run
+through the **live server in the shipped configuration** (MXFP4 W4A8, fp8 KV, DFlash2 K=7,
+`num_concurrent=2`, temp 1.0 / top_p 0.95) rather than against the weights in isolation.
+Reproduce it with [`../run-gsm8k.sh`](../run-gsm8k.sh); it took 33 minutes and needs no
+exclusive GPU window.
+
+| | exact match | stderr |
+|---|--:|--:|
+| strict-match | **95.45%** | ±0.57 pp |
+| flexible-extract | 95.30% | ±0.58 pp |
+
+**Against int4's 94.77%, read this gap as nothing.** +0.68 pp is inside the ±1.7 pp band
+that a difference between two single unseeded runs carries, so what this supports is
+"MXFP4 W4A8 costs no measurable arithmetic quality here", not "MXFP4 is better". The two
+numbers also differ in more than the quantisation — the int4 figure is a K=4 MTP run at a
+different KV pool size — so even a large gap would not have been attributable to the weight
+format alone.
+
+It is also a temperature-1.0 number because that is what these scripts serve; greedy scores
+~97.6% on the same harness. GSM8K here is a **regression check against silent numerical
+damage**, which is exactly the failure a bad quantisation causes. It is not evidence about
+coding or agentic work — BFCL is the eval that speaks to that.

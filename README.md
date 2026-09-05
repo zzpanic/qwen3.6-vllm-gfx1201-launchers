@@ -211,14 +211,17 @@ configuration** — MXFP4 weights, fp8 KV, DFlash2 K=7, production sampler — r
 against the weights in isolation. That is the number that matters for serving, and it is
 not the number a weights-only eval reports.
 
-> **MXFP4 result: measurement in progress (2026-09-05).** The run is under way against the
-> live endpoint; this paragraph carries the figure once it completes. It is stated here as
-> pending rather than omitted so that a missing number reads as unfinished work rather than
-> as a result nobody wanted to publish.
+**The MXFP4 path scores 95.45%** (strict-match; 95.30% flexible-extract, standard error
+±0.57 pp, all 1319 problems, 2026-09-05). Raw lm-eval output is
+[`benchmarks/deep-prefill-20260905/gsm8k-mxfp4-20260905.json`](benchmarks/deep-prefill-20260905/gsm8k-mxfp4-20260905.json).
 
 **The int4 path scores 94.77%** on the same harness (93.71% with DFlash2 rather than MTP).
-Read the MXFP4 figure against that one, and only with these four caveats, which apply
-whichever way the comparison lands:
+
+**Read that gap as nothing.** +0.68 pp is well inside the ±1.7 pp band below, so the
+defensible conclusion is that **MXFP4 W4A8 costs no measurable arithmetic quality against
+int4 W4A16 on this model** — not that it is better. The four caveats apply whichever way a
+comparison like this lands, and they are why the gap is reported as indistinguishable
+rather than banked:
 
 - **It is a temperature-1.0 number**, because that is what these scripts serve. Greedy
   scores about 97.6% on the same harness, so ~5 points of the headline are the sampler, not
