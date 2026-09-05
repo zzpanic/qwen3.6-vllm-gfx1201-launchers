@@ -20,7 +20,7 @@ traps and how to read its output in its own header.
 | --- | --- | --- |
 | `run-betterbench-prefill.sh` | prefill throughput against input depth, to near-full context | ~25 min |
 | `run-gsm8k.sh` | GSM8K 5-shot — a regression check against silent numerical damage | ~76 min |
-| `run-bfcl.sh` | BFCL v4 tool-calling — the eval that matters most for agentic use | ~65 min subset, ~3 h full |
+| `run-bfcl.sh` | BFCL v4 tool-calling — the eval that matters most for agentic use | ~50 min subset, ~3 h full |
 
 All three measure the **serving path**, not the weights: fp8 KV, speculative decoding, the
 chat template and the server-default sampler are all in the measurement. That is the more
@@ -39,6 +39,7 @@ Two things worth reading before you compare any of it:
 | folder | what it measures |
 | --- | --- |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
+| `deep-prefill-20260905/bfcl-mxfp4/` | **MXFP4 W4A8.** BFCL v4 tool calling, 8 single-turn categories / 1354 problems, matched per-category against the August int4 run — and why this harness's "Overall Acc" must not be quoted for a subset |
 | `deep-prefill-20260905/` | **MXFP4 W4A8.** The near-full-context sweep: BetterBench prefill and bench-live generation at 8 depths up to a real 200k tokens, plus the ladder-misalignment warning that applies to any comparison between the two harnesses |
 | `int4-20260829/` | **int4 W4A16.** The production server as shipped on that date: prefill/decode/step-rate at three prompt depths, a BetterBench pass with prefill and concurrency sweeps, and the GSM8K quality result (94.77%) |
 | `w4a16-census-20260829/` | **int4 W4A16** (the name says so — MXFP4 has no W4A16 GEMM). Runtime shape census under DFlash2, plus the isolated-kernel tile sweep that closed the last 0.61% of uncovered work |

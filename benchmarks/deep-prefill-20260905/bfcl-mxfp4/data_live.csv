@@ -1,0 +1,2 @@
+Rank,Model,Live Overall Acc,AST Summary,Python Simple AST,Python Multiple AST,Python Parallel AST,Python Parallel Multiple AST,Irrelevance Detection,Relevance Detection
+1,Qwen3.8-27B Quark-AWQ-MXFP4 (FC, local vLLM, DFlash2 K=7),19.39%,N/A,88.37%,N/A,93.75%,79.17%,N/A,81.25%

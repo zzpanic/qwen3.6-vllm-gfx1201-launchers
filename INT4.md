@@ -142,7 +142,16 @@ figures**; the MXFP4 checkpoint's own GSM8K result is in
 |---|---|---|---|---|
 | GSM8K 5-shot (thinking), DFlash2 | **93.71%** | — | — | — |
 | GSM8K 5-shot (thinking), MTP | **94.77%** | 94.62% | 91.21% | 93.33% |
-| BFCL v4 overall (single_turn) | **25.29%** | 23.80% | 24.06% | 24.38% |
+| BFCL v4 "Overall Acc", `single_turn` scope | **25.29%** | 23.80% | 24.06% | 24.38% |
+
+**That BFCL row is a scope-diluted aggregate, not an accuracy — read it only as a ranking.**
+BFCL divides "Overall Acc" by every category in the harness, and that run covered
+`single_turn` only, so the true per-category accuracy behind 25.29% is near **90%**. All
+four columns are diluted identically, which is why the comparison between them still holds,
+but the number must not be quoted on its own. Per-category int4 figures, matched against
+MXFP4, are in
+[`benchmarks/deep-prefill-20260905/bfcl-mxfp4/`](benchmarks/deep-prefill-20260905/bfcl-mxfp4/)
+— int4 weighted **90.84%** over 1354 problems, against MXFP4's 90.84%.
 
 Single runs, no seeds, and not a like-for-like reproduction of AMD's harness — the 0.15 pp
 over Qronos is not a win, and both GSM8K figures are temperature-1.0 (greedy scores ~97.6%

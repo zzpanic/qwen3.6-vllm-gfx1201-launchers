@@ -237,8 +237,40 @@ rather than banked:
   damage — the kind a bad quantisation causes — not evidence about coding or agentic work,
   which is what this box actually does.
 
-The int4 quality table, the BFCL v4 tool-calling results and the full caveats are in
-[INT4.md](INT4.md#quality) and in [BACKGROUND.md](BACKGROUND.md#quality-in-full).
+#### Tool calling — BFCL v4
+
+The eval that actually speaks to agentic use. 8 single-turn categories, 1354 problems,
+`--temperature 0.001`, through the live endpoint. Raw scores and the full caveats in
+[`benchmarks/deep-prefill-20260905/bfcl-mxfp4/`](benchmarks/deep-prefill-20260905/bfcl-mxfp4/).
+
+| category | MXFP4 W4A8 | int4 W4A16 | n |
+|---|--:|--:|--:|
+| simple_python | 95.75% | 95.00% | 400 |
+| multiple | 95.00% | 95.50% | 200 |
+| parallel | 91.50% | 90.50% | 200 |
+| live_simple | 88.37% | 87.60% | 258 |
+| live_parallel | 93.75% | 93.75% | 16 |
+| live_parallel_multiple | 79.17% | 75.00% | 24 |
+| live_relevance | 81.25% | 75.00% | 16 |
+| irrelevance | 82.92% | 86.25% | 240 |
+| **weighted** | **90.84%** | **90.84%** | **1354** |
+
+**Equal to two decimal places**, on matched problem counts. The exactness is a coincidence;
+the direction is not — the deltas scatter both ways, and the largest sit on the smallest
+categories (16 and 24 problems, where one item is 6.3 and 4.2 points).
+
+**Quote per-category numbers, never BFCL's "Overall Acc".** That aggregate divides by every
+category in the harness, so this subset's own `data_overall.csv` reads **11.55%** purely
+because `multi_turn` and the agentic categories were not run. A subset aggregate is not
+comparable to a full run's, or to another subset.
+
+So on both quality axes measured — arithmetic and tool calling — **MXFP4 W4A8 is
+indistinguishable from int4 W4A16 on this model.** Those are the two places a bad
+quantisation shows up, and neither shows it.
+
+The int4 quality table and its own caveats are in [INT4.md](INT4.md#quality); the
+long-form version, including the AMD checkpoint comparison, is in
+[BACKGROUND.md](BACKGROUND.md#quality-in-full).
 
 ---
 

@@ -1,0 +1,2 @@
+Rank,Model,Non-Live Overall Acc,AST Summary,Simple AST,Python Simple AST,Java Simple AST,JavaScript Simple AST,Multiple AST,Parallel AST,Parallel Multiple AST,Irrelevance Detection
+1,Qwen3.8-27B Quark-AWQ-MXFP4 (FC, local vLLM, DFlash2 K=7),54.60%,N/A,N/A,95.75%,N/A,N/A,95.00%,91.50%,N/A,82.92%
