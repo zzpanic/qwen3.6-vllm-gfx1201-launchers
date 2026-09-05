@@ -6,7 +6,15 @@ using the `docker.io/stilldeadcode/vllm-radiance` image (ROCm + AITER + a few
 gfx1201-specific perf hooks) — `:0.9.3` for the 3.8 scripts, `:0.5.8` for the 3.6 ones.
 
 **Start with [Quick start](#quick-start).** The current, actively tuned configuration is
-`startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). The int4 script beside it is the
+`startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). That path is **not this repo's work** —
+it stands on three upstream pieces, and you must fetch all three to run it:
+[**ggz14**](https://github.com/GGZ14/vllm-mxfp4)'s MXFP4 kernels, DFlash2 integration and
+setup script; [**AMD**](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4)'s Quark
+MXFP4 weights; and
+[**tcclaviger**](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8)'s FP8 DFlash2
+draft head — all running inside `stilldeadcode`'s `vllm-radiance` image. What this repo
+adds is the arrangement, the tuning and the measurement. Full attribution under
+[Credit](#credit). The int4 script beside it is the
 maintained fallback; the two Qwen3.6 scripts are historical and kept for the reasoning
 rather than to be served. The status table under [Contents](#contents) says which is which.
 
@@ -504,16 +512,42 @@ Almost none of the code here was written for this repo. The launchers are shell 
 the substance — the ROCm/gfx1201 kernel work, DFlash2, vLLM itself — is other people's, and
 what this repo adds on top is measurement, configuration, and documentation of both.
 
+### The MXFP4 path (`startup-qwen3.8-27b-mxfp4.sh`) — three sources, all required
+
+- **`ggz14`** — the MXFP4 kernels themselves, the DFlash2 integration, and `setup-mxfp4.sh`.
+  [codeberg.org/ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4),
+  mirrored to [github.com/GGZ14/vllm-mxfp4](https://github.com/GGZ14/vllm-mxfp4) (the
+  Quick start clones the mirror). This is the substance of the MXFP4 path — the launcher
+  here sources `gpu-detect.sh` from that clone and mounts it as `/patches`, and dies without
+  it. Also the author of [BetterBench](https://github.com/GGZ14/BetterBench), credited
+  separately below, and the same person as `brian_launch80` in the R9700 community.
+- **AMD** — [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4),
+  the served body weights, quantized with AMD's Quark. Used as published; the only change
+  is that its MTP head is requantised to fp8 by ggz14's `fp8_mtp.py`, because that
+  checkpoint names its `mtp.*` layers as *tensor* names inside a list of *module* names, so
+  Quark's own exclusion never fires. That is a bug worked around, not a criticism of the
+  weights.
+- **`tcclaviger`** — [`Qwen3.8-27B-DFlash2-FP8`](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8),
+  the DFlash2 draft head this path speculates with. Not trained or quantized here.
+- **`hifi/vllm-radlight`** — not a dependency, but the published R9700 MXFP4 numbers this
+  configuration was measured against and eventually passed. Several ROCm runtime settings
+  here (`GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_MWAITX=1`) were taken from it and are marked as
+  such in the launcher.
+
+### Shared, and the int4 path
+
 - **`stilldeadcode`** — the [`vllm-radiance`](https://codeberg.org/StillDeadcode/vllm-radiance)
-  image, and the gfx1201 kernel work in it. Bug reports about the *image* belong on its issue
-  tracker there, not here.
+  image both paths run in, the gfx1201 kernel work in it, and
+  [`libr4d`](https://codeberg.org/StillDeadcode/libr4d), whose version the MXFP4 launcher
+  pins for **correctness** rather than speed. Bug reports about the *image* belong on its
+  issue tracker there, not here.
 - **The vLLM project** — everything under `patches/` is a derived work of vLLM,
   Apache-2.0, SPDX headers intact. None of it is original code. `patches/dflash2/` is
   upstream **PR #52816** back-ported; `patches/radiance-0.9.3/` is two of the radiance
   image's own vLLM 0.27.1 files with a marked local hunk each; `patches/rdna_hybrid_w4a16.py`
   is vLLM's own kernel with a per-shape override table added. Every file names the base it
   was copied from and comments each deviation in place.
-- **The checkpoints** — [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/devan-carlin/Qwen3.8-27B-int4-AutoRound)
+- **The int4 checkpoints** — [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/devan-carlin/Qwen3.8-27B-int4-AutoRound)
   (the served weights) and [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
   (the DFlash2 draft model). Neither was quantized here; both are other people's work and
   carry their own licences on the Hub.
