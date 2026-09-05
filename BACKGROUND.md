@@ -6,7 +6,8 @@ the underlying image is and where this repo departs from it. [README.md](README.
 executive summary; [TUNING.md](TUNING.md) is the dated tuning log; `benchmarks/` holds the
 raw numbers.
 
-**Scope: this file is the int4 W4A16 story** (`startup-qwen3.8-27b-int4.sh`). It was
+**Scope: this file is the int4 W4A16 story** (`startup-qwen3.8-27b-int4.sh`); [INT4.md](INT4.md)
+is that path's own page, and this is the long-form reasoning behind it. It was
 written when that was the only 3.8 path, and the decoder comparison, the draft-checkpoint
 selection, the quality evals and the rejected checkpoints below are all measured on it.
 Two things carry across to the MXFP4 path unchanged, because they are properties of the
