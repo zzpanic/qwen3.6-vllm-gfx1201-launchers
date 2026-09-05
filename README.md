@@ -99,7 +99,117 @@ Nothing needs editing to run: the defaults **are** the measured production confi
   the size of the largest part rather than the whole checkpoint.
 - No Resizable BAR requirement — this was developed on a board without it.
 
-## Qwen3.8-27B: what it actually does on this card
+## What this card actually does — MXFP4, the current configuration
+
+Everything in this section is `startup-qwen3.8-27b-mxfp4.sh` at its shipped defaults:
+`MAXLEN=204800`, `KV_MEM=9300000000`, `MAXSEQS=2`, DFlash2 **K=7** sampled
+probabilistically, fp8 KV, vision tower loaded. Raw files in
+[`benchmarks/deep-prefill-20260905/`](benchmarks/deep-prefill-20260905/).
+
+**Check your own boot against these four lines** (from `logs/boot-qwen3.8-27b-mxfp4.log`):
+
+```
+Setting attention block size to 1648 tokens
+max_num_scheduled_tokens is set to 2036
+GPU KV cache size: 228,737 tokens
+Maximum concurrency for 204,800 tokens per request: 1.12x
+```
+
+There is deliberately **no** `Available KV cache memory` line. An explicit
+`--kv-cache-memory` makes vLLM skip memory profiling, which is what prints it. Its absence
+is the pin working, not a truncated log.
+
+### Generation, by depth
+
+Tokenizer-calibrated depths, so the token counts are exact rather than estimates.
+
+| prompt tokens | prefill t/s | decode t/s | accepted len | **engine steps/s** |
+|--:|--:|--:|--:|--:|
+| 2,000 | 3070 | 71.3 | 4.20 | **16.99** |
+| 15,986 | 2708 | 59.3 | 3.56 | **16.69** |
+| 63,982 | 2291 | 52.5 | 3.32 | **15.78** |
+| 127,965 | 1895 | 48.7 | 3.28 | **14.82** |
+| 199,972 | 1590 | 45.6 | 3.28 | **13.90** |
+
+**Read `steps/s`, not decode t/s.** `decode t/s = steps/s × accepted len`, and accepted
+length is a draw from the speculative-acceptance lottery — it swings enough on a single
+request to invert neighbouring rows. The step rate is counted, not derived, and repeats to
+~0.1% across boots.
+
+Two things worth knowing before you size a workload:
+
+- **Generation at a real 200k runs at 82% of its 2k step rate.** A 100× longer prompt costs
+  18% of the step rate.
+- **Acceptance does not degrade with depth** — accepted length is flat at 3.28 from 64k
+  through 200k.
+
+### Prefill, by depth
+
+Taken separately at n=5 per rung (the ladder above is n=1 and its prefill column shows it).
+Peak is at ~6k, not at the shallowest rung: 1544 tokens is too small to fill the GPU.
+
+| prompt tokens | prefill t/s (median) |
+|--:|--:|
+| 1,544 | 2815 |
+| 5,948 | **2882** |
+| 23,573 | 2631 |
+| 47,085 | 2418 |
+| 94,095 | 2087 |
+| 146,978 | 1808 |
+
+**2882 → 1808 t/s across a 25× depth increase** — 63% of peak at 147k tokens. The
+1%-low-to-99%-high spread is under 0.2% from 64k up; prefill on this card is essentially
+noiseless, unlike decode.
+
+### Generation, by workload
+
+20 passes per category, temp 0.7. **Weighted combined ≈ 83.6 tok/s**, TTFT p50 ≈ 102 ms.
+
+| category | tok/update | decode t/s (med) | CV |
+|---|--:|--:|--:|
+| file_edit | 5.67 | **109.1** | 11.5% |
+| math | 5.98 | 105.2 | 5.8% |
+| code | 4.91 | 96.8 | 15.6% |
+| json | 5.15 | 95.7 | 15.2% |
+| reasoning | 3.43 | 64.5 | 28.6% |
+| chat | 3.64 | 57.6 | 22.5% |
+| prose | 2.86 | 50.2 | 8.2% |
+
+The spread is **entirely acceptance, not speed**. Update spacing is flat at 58.0–58.3 ms
+p50 across every category, so the engine steps at a constant rate and the category only
+decides how many tokens ride each step. Structured output is predictable enough for the
+drafter to land 5–6 tokens per update; prose lands 2.86 and is the floor. Check `CV` before
+trusting a single row — reasoning (28.6%) and chat (22.5%) are not stably ordered against
+each other.
+
+### Concurrency
+
+| concurrent requests | aggregate t/s | TTFT p50 | per-request decode t/s |
+|--:|--:|--:|--:|
+| 1 | 74.3 | 102 ms | 90.9 |
+| 2 | **134.5** | 163 ms | 86.0 |
+| 4 | 137.0 | 5.1 s | 86.7 |
+| 8 | 133.8 | 14.9 s | 86.0 |
+| 16 | 139.0 | 15.6 s | 88.5 |
+
+**All the aggregate throughput this configuration has is available at 2, and nothing above
+2 buys anything.** 1 → 2 is +81%; 2 → 16 is +3.3% for a 95× worse TTFT. Per-request decode
+is flat throughout, so above 2 the time goes to the queue, not the GPU.
+
+That is `MAXSEQS=2` working as configured, not a limit being hit — the right trade for a
+single-user agentic box. **If you are serving several people, this is the first thing to
+change**, and it will cost context.
+
+---
+
+## The int4 fallback: what it does
+
+> **These are int4 W4A16 numbers**, from `startup-qwen3.8-27b-int4.sh` — *not* the MXFP4
+> configuration above, and not what you get if you followed the Quick start. They are kept
+> because that script is the maintained fallback and these are the numbers it was tuned to.
+> **Do not compare them to the MXFP4 table above**: the checkpoint, the speculative depth
+> (K=4 vs 7), the KV pool and the sampling temperature all differ. A different pool size
+> alone is worth ~5% decode on this card.
 
 Qwen3.8-27B is a **retrained release of the Qwen3.6-27B architecture**, not a new one —
 same `model_type qwen3_5`, same 64 layers / 5120 hidden / 17408 intermediate / 24:4 heads /
@@ -111,7 +221,7 @@ Checkpoint: [`devan-carlin/Qwen3.8-27B-int4-AutoRound`](https://huggingface.co/d
 
 ### Throughput
 
-`MAXLEN=204800`, `MAXSEQS=2`, **DFlash2 ×4**, fp8 KV, single stream. Re-captured
+`MAXLEN=204800`, `MAXSEQS=2`, **DFlash2 ×4**, fp8 KV, single stream, **int4**. Re-captured
 2026-08-29 against the live server, after the `KV_GROUP_SIZE=auto` group-padding fix and
 the W4A16 tile gap-fill.
 
@@ -151,8 +261,12 @@ loads the compiled graph from cache and succeeds. Nothing needs changing.
 production sampler, 4 runs per category, cold prefix cache. Full report and raw JSON in
 `benchmarks/int4-20260829/`.
 
-Single stream, by workload category. ITL columns are tokens/sec: **1% low** is the stutter
-floor, median is the typical rate.
+Single stream, by workload category.
+
+> **The ITL columns below are an artifact and BetterBench 0.4.0 removed them.** Under
+> speculative decoding one stream update carries a whole accepted run, so "inter-token
+> latency" was really update spacing divided by a variable token count. They are left here
+> verbatim because this is a published record; read `decode t/s`, `TTFT` and `CV` instead.
 
 | category | TTFT p50 (ms) | prefill t/s (med) | ITL 1% low | ITL median | decode t/s (med) | CV |
 |---|--:|--:|--:|--:|--:|--:|
@@ -184,7 +298,7 @@ Prefill peaks near 8k and has lost only **12%** by 47k tokens of context. The 1%
 99%-high spread is under one tok/s at every rung — prefill on this card is essentially
 noiseless, unlike decode.
 
-Concurrency, at the shipped `MAXSEQS=2`:
+Concurrency, at the shipped `MAXSEQS=2` (int4 — the MXFP4 sweep above goes to 16):
 
 | concurrent requests | aggregate t/s | per-request decode t/s | TTFT p50 (ms) |
 |--:|--:|--:|--:|
@@ -196,7 +310,9 @@ have two streams; it is not free.
 
 ### Speculative decoding, in one paragraph
 
-The default is **DFlash2 ×4** with the int4 draft checkpoint sampled probabilistically. That
+The int4 default is **DFlash2 ×4** with the int4 draft checkpoint sampled probabilistically;
+**the MXFP4 script ships K=7** (see the retraction in TUNING.md — the K=4 "peak" was an
+artifact of a prose-weighted corpus). That
 combination decodes **1.44× faster than the target's own MTP head** (19.07 vs 14.03 engine
 steps/s at matched depth) and costs **8.2% of the KV pool**, because the draft model is
 resident. `SPEC=mtp` remains supported and drops the draft model entirely. `SPECTOK=4` is a
@@ -215,7 +331,9 @@ here. The edge grows with sampling temperature. Numbers and method are in TUNING
 ### Quality
 
 Measured against the **live server through this exact config** — fp8 KV, speculative
-decoding, thinking template — not against the weights in isolation.
+decoding, thinking template — not against the weights in isolation. **These are the int4
+figures**; the MXFP4 checkpoint's own GSM8K result is in
+[`benchmarks/deep-prefill-20260905/`](benchmarks/deep-prefill-20260905/).
 
 | | **this checkpoint** | AMD Quark-Qronos | AMD Quark-AWQ | Qwen BF16 base |
 |---|---|---|---|---|
