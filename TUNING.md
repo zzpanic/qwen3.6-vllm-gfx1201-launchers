@@ -2,12 +2,63 @@
 
 Dated notes on what was changed and why, so a default that looks arbitrary can be traced to
 the measurement that set it. Split out of the README to keep that file about *running* the
-launchers.
-
-Short dated notes on what was changed and why, so a default that looks arbitrary can be
-traced to the measurement that set it. Everything here was measured on **1x R9700**
+launchers. Everything here was measured on **1x R9700**
 (gfx1201, TP=1). Benchmarks are llama-benchy, `--pp 2048 --tg 256 --runs 3 --concurrency 1
 --no-cache`, on the second boot after any graph change (see the cold-compile trap below).
+
+### 2026-09-05 — `draft_sample_method=probabilistic`: ~+10% acceptance at zero step cost
+
+Applies to `startup-qwen3.8-27b-mxfp4.sh` (DFlash2 speculative decoding, K=7).
+
+Under speculative decoding the drafter can propose either the argmax token (`greedy`) or a
+sample from its own distribution (`probabilistic`). The acceptance test differs with it: a
+greedy one-hot draft is accepted with probability `p_target(argmax)`, while matched sampling
+uses vLLM's shared-Gumbel coupling and accepts with `sum(min(p, q))`, which is strictly
+greater than or equal. So acceptance should rise. Against that, probabilistic drafting needs
+the full draft-logits head and cannot take the int2 argmax fast path, so each step should
+cost more. The two effects pull on opposite terms of `decode = steps/s x tokens-per-update`,
+which is why this had to be isolated rather than reasoned about.
+
+Four **alternating** boots (prob / greedy / prob / greedy), measured at 4k / 16k / 50k
+prompt depth, serving at temperature 1.0:
+
+| | 4k | 16k | 50k |
+|---|---|---|---|
+| accepted tokens per update, probabilistic | 3.39 | 3.25 | 3.15 |
+| accepted tokens per update, greedy | 3.01 | 2.90 | 3.03 |
+| decode t/s delta | +12.8% | +12.1% | +3.9% |
+| `steps/s`, probabilistic vs greedy | 17.15/17.13 vs 17.13/17.13 | 16.89/16.87 vs 16.88/16.88 | 16.35/16.31 vs 16.32/16.33 |
+
+`steps/s` is flat to 0.1% across all four boots. **The step cost this was supposed to carry
+never appeared**, so the acceptance gain is free, and probabilistic is the default in the
+MXFP4 script.
+
+Quote it as "about +10% acceptance, no step cost", not as a precise figure. Probabilistic
+won 5 of the 6 within-depth pairings, which fixes the sign; with n=2 per arm it does not fix
+the magnitude — greedy returned 3.20 on one boot and 2.81 on another at the same depth.
+
+**It interacts with temperature.** A flatter target distribution makes `p_target(argmax)`
+fall faster than `sum(min(p, q))` does, so the edge is larger at temperature 1.0 (what these
+scripts serve) than at, say, 0.7. If you serve colder, expect less and re-measure.
+
+### 2026-09-05 — two instrument rules, learned the hard way on the same day
+
+Both of these cost us a wrong conclusion before they were written down. They are cheap to
+adopt and they apply to any A/B on this card, not just to the knobs above.
+
+**Pick the metric from the knob, not from habit.** `steps/s` — speculative decode steps per
+second — is acceptance-independent and repeats to about 0.1% across separate cold boots,
+which makes it a far better instrument than raw decode t/s for anything acceptance-NEUTRAL
+(attention backend, chunk size, runtime env flags). But for a knob where acceptance *is* the
+mechanism, `steps/s` is flat by construction and would have scored the winner above as a
+non-result. There, read accepted-tokens-per-update as well and let decode t/s be the net.
+
+**Two samples from one boot are one sample.** Our prefill noise band of about +-0.6% is a
+*within-boot* figure. Across boots the same 50k-depth prefill spans roughly 2.8%
+(2452-2521 tok/s measured on control runs alone). Earlier the same day a runtime flag looked
+like a reproducible +2.3% prefill win off two samples from a single boot; a second control
+boot then landed above both of them and the win evaporated. Alternate arms across boots —
+A/B/A/B — and treat a per-boot mean as the unit of measurement.
 
 ### 2026-08-29 — `BATCHTOK` default 2560 -> 3240 -> 4854, and the alignment rule
 

@@ -118,8 +118,15 @@ steps/s at matched depth) and costs **8.2% of the KV pool**, because the draft m
 resident. `SPEC=mtp` remains supported and drops the draft model entirely. `SPECTOK=4` is a
 measured **workload** choice, not a universal one: over K ∈ {4,5,6,7} aggregate decode barely
 moves, but math gains 13.9% and chat loses 8.9% going to K=7. A math- or code-heavy server
-should run K=7. Draft-checkpoint comparison, the K tables, and the retracted "K≥7 doesn't
-fit" claim are in [BACKGROUND.md](BACKGROUND.md#dflash2-versus-mtp) and TUNING.md.
+should run K=7 — the MXFP4 script does. Draft-checkpoint comparison, the K tables, and the
+retracted "K≥7 doesn't fit" claim are in
+[BACKGROUND.md](BACKGROUND.md#dflash2-versus-mtp) and TUNING.md.
+
+"Sampled probabilistically" is `draft_sample_method=probabilistic`, and it is worth keeping
+even though it looks like it should cost you something. Isolated over four alternating boots
+on 2026-09-05 it gave **about +10% accepted tokens per update for no measurable step cost**
+— `steps/s` was flat to 0.1% on every boot, so the full draft-logits head it needs is free
+here. The edge grows with sampling temperature. Numbers and method are in TUNING.md.
 
 ### Quality
 
@@ -155,6 +162,9 @@ divergence per row with the measurement behind it, is in
 
 ## Contents
 
+- `startup-qwen3.8-27b-mxfp4.sh` — dense 27B, **native MXFP4 W4A8**, DFlash2 ×7 with an fp8
+  drafter, R4D attention, vision, 204800 context on a **pinned** KV cache. The fastest
+  configuration in this repo; see "MXFP4 vs int4" below for when to prefer it.
 - `startup-qwen3.8-27b-vllm.sh` — dense 27B, int4 W4A16, **DFlash2 speculative decoding**
   on (with `SPEC=mtp` as a supported fallback), vision, 204800 context,
   `REASONING_EFFORT` knob.
@@ -162,6 +172,12 @@ divergence per row with the measurement behind it, is in
   vision (images only -- video untested, see TUNING.md), 131072 context.
 - `startup-qwen3.6-35b-vllm.sh` — MoE 35B-A3B (256 experts), int4 W4A16, MTP off
   (KV cost doesn't pay off at this size), vision, 262144 context.
+- `logs/boot-qwen3.8-27b-mxfp4.log` — the boot for `startup-qwen3.8-27b-mxfp4.sh`, captured
+  2026-09-05: `:0.9.3`, R4D attention, `max_model_len 204800`, `kv_cache_memory_bytes
+  9300000000` (the pin), `max_num_batched_tokens 2048`, DFlash2 K=7 with
+  `draft_sample_method: 'probabilistic'`, and the vision tower loaded. Worth grepping for
+  the `non-default args` line (it is the whole configuration on one line) and
+  `GPU KV cache size: 228,737 tokens`.
 - `logs/boot-qwen3.8-27b-vllm-0.9.3.log` — **the current configuration**: `:0.9.3`, R4D
   attention, `KV_GROUP_SIZE=auto`, `BATCHTOK=4854`, `GPUUTIL=0.97`, DFlash2 ×4 with the int4
   draft. Container start through `Application startup complete` plus the first inference JIT
@@ -177,7 +193,7 @@ divergence per row with the measurement behind it, is in
   CUDA graphs`, `Mean acceptance length: 3.00`.
 - `logs/boot-qwen3.8-27b-vllm.log` — the same for the **MTP** configuration, captured
   2026-08-15: `Model loading took 17.93 GiB`, `GPU KV cache size: 249,982 tokens`.
-  All three 3.8 logs were captured from the homelab llama-swap launcher rather than these
+  Those three 3.8 int4 logs were captured from the homelab llama-swap launcher rather than these
   scripts, so their `non-default args` line carries three extra metrics flags
   (`enable_prompt_tokens_details`, `enable_per_request_metrics`,
   `enable_force_include_usage`) that these scripts don't set, and client IPs are redacted to
@@ -285,6 +301,64 @@ The AutoRound `config.json` routing patch described below applies verbatim to th
 its `modules_in_block_to_quantize` list is byte-identical to Intel's — and is applied
 automatically. The 3.8 checkpoint does **not** ship the tokenizer truncation defect; that
 guard stays in place because the failure is silent, but it won't fire.
+
+## MXFP4 vs int4, and the flags that actually move this card
+
+Two of the scripts here serve the same model on the same card by different routes. Short
+version: **MXFP4 is faster, int4 is the better-understood fallback.** Both are maintained.
+
+The MXFP4 path serves `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` (with its MTP head requantised to
+fp8) through ggz14's radiance kernels in the `stilldeadcode/vllm-radiance:0.9.3` image. None
+of those kernels are ours. What this repo adds is the arrangement — and the arrangement is
+most of the difference between a stock R9700 and a tuned one.
+
+### The flags, ranked by what they are worth
+
+| flag | effect | notes |
+|---|---|---|
+| `R4D_ATTN=1` | **+1.7 / +5.6 / +24.9% prefill** at 4k / 16k / 64k; +1.3/+1.5/+2.9% decode | radiance's attention instead of `ROCM_AITER_UNIFIED_ATTN`. **The win grows with depth** — benchmark it at 2k and you will conclude it does nothing. Also yields a slightly larger KV pool. |
+| `SPEC=7` (DFlash2) | **+35.1%** weighted decode over `SPEC=4` | The old "K=4 is the peak" result was a prose-corpus artifact. Match the corpus to the axis you are being compared on. |
+| fusions: `RADIANCE_NORMQUANT_FUSION=1`, `RADIANCE_FP8_STREAM=1`, `RADIANCE_SKINNY_GEMM=1` | material, not yet isolated per-fusion | Check the boot log actually says `fuse_norm_quant: True` — ours was silently **off** for weeks. |
+| `KV_MEM=<bytes>` | 0% speed, but it is what makes a 204800 context *safe* | See below. |
+| `GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_MWAITX=1` | small, free | ROCm runtime, not radiance. Read inside the container, so they do nothing unless forwarded with `-e`. |
+| `CHUNK` alignment | **0% under R4D** | The `n*block_size` alignment rule is an AITER property. A full 2×2 against KV pool size found chunk did nothing at any size. We use 2048 for the compile transient, not for speed. |
+
+### Measured and rejected — so you don't repeat them
+
+`HSA_ENABLE_INTERRUPT=1` (flat: −0.06/−0.18/−0.31% decode steps/s; it fights `MWAITX`, which
+is the polling path) · MRv2 (−29% steps/s; `MAXSEQS=2` leaves it nothing to amortise) ·
+`COMPILE_SIZES`/`COOP_RED` (the static specializations change numerics enough to cost the
+drafter its acceptance) · `RADIANCE_FAST_DRAFT=1` (3.8 GiB of KV pool for +2.3% decode; the
+vendor's +16.6% is a TP=2 number).
+
+### The KV pin, which is the one that will bite you
+
+vLLM sizes its KV pool from the free memory it profiles at boot. A **cold** boot — empty
+`torch.compile` cache — sees ~2.3 GiB less than a warm one, because compile scratch is counted
+as permanent. So a context sized against the warm pool works for weeks and then refuses to
+start the first time the compile cache is invalidated:
+
+```
+7.8 GiB KV cache is needed, which is larger than the available KV cache memory (7.08 GiB)
+```
+
+`--kv-cache-memory` (the script's `KV_MEM`) skips profiling entirely, so the pool is identical
+cold and warm. It is safe because compile peaks *before* the pool is allocated — the two peaks
+never coexist. vLLM prints the value it would "fully utilize" on its own boot line; set yours
+just under it. **Do not size a pin by arithmetic from another `max_model_len`**: tokens/GiB is
+context-length-dependent (218 blocks/request at 131072, 308 at 204800).
+
+### Benchmarking notes that cost us real time
+
+- Read **`steps/s`**, not decode tok/s, for anything acceptance-neutral: it repeats to ~0.1%
+  across separate cold boots, while raw decode swings ±6%. For an acceptance-*sensitive* knob
+  (drafting method, `SPEC`) you need `mean_len`/accept as well, since decode = steps/s × tok/update.
+- **A bigger KV pool is ~5% SLOWER on decode** (prefill unaffected). This is why a cold boot
+  looks fast, and it silently inflated one of our A/B results by 4.7pp. Never compare a cold
+  boot against a warm one.
+- The ±0.6% prefill noise band is a **within-boot** figure. Across boots, 50k prefill spans
+  ~2.8% here. Two agreeing samples from one boot are *one* sample — re-measure the control on
+  its own boot, in the same session, or you will publish a phantom win. We nearly did.
 
 ## Which 27B checkpoint (Qwen3.6)
 
