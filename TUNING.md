@@ -6,6 +6,14 @@ launchers. Everything here was measured on **1x R9700**
 (gfx1201, TP=1). Benchmarks are llama-benchy, `--pp 2048 --tg 256 --runs 3 --concurrency 1
 --no-cache`, on the second boot after any graph change (see the cold-compile trap below).
 
+**Two stacks live in this log.** Every entry says which one it applies to in its first
+line. As a default: entries dated **2026-09-05** are the MXFP4 W4A8 path
+(`startup-qwen3.8-27b-mxfp4.sh`), and everything **dated earlier is int4 W4A16**
+(`startup-qwen3.8-27b-int4.sh`). They share a card, a runtime and a draft method, and
+share almost nothing else — do not carry a number across without re-measuring. Where an
+older entry has been overturned by MXFP4 work it carries a retraction at the top rather
+than being edited away.
+
 ### 2026-09-05 — `draft_sample_method=probabilistic`: ~+10% acceptance at zero step cost
 
 Applies to `startup-qwen3.8-27b-mxfp4.sh` (DFlash2 speculative decoding, K=7).
@@ -40,6 +48,145 @@ the magnitude — greedy returned 3.20 on one boot and 2.81 on another at the sa
 **It interacts with temperature.** A flatter target distribution makes `p_target(argmax)`
 fall faster than `sum(min(p, q))` does, so the edge is larger at temperature 1.0 (what these
 scripts serve) than at, say, 0.7. If you serve colder, expect less and re-measure.
+
+### 2026-09-05 — `MAXLEN=204800` with a pinned KV pool, and why the pin is the point
+
+Applies to `startup-qwen3.8-27b-mxfp4.sh`. The goal was 200k of usable context for agentic
+work. It could not simply be typed over `MAXLEN=131072`, and the reason is the standing
+trap on this card: **size MAXLEN against the COLD pool, not the warm one.**
+
+| boot | peak activation vLLM measured | available KV | pool |
+| --- | --: | --: | --: |
+| warm | 0.41 GiB | 8.51 GiB | 203,221 tokens |
+| cold | 2.55 GiB | 6.21 GiB | 148,508 tokens |
+
+204800 fits the warm pool and misses the cold one by ~56,000 tokens. Left unpinned, the
+entry serves happily for weeks and then **refuses to start** the first time the compile
+cache is invalidated — by a chunk change, an image bump, a fusion toggle:
+
+```
+ValueError: To serve at least one request with the model's max seq len (204800),
+7.8 GiB KV cache is needed, which is larger than the available KV cache memory (7.08 GiB).
+```
+
+**But the cold/warm gap is not real memory.** The two boots differ almost entirely in the
+*peak activation* vLLM measures during its profiling run, and that ~2.1 GiB is
+torch.compile / Triton autotune scratch. vLLM subtracts it as if it were permanent, so a
+cold boot gives back ~2.3 GiB of pool that nothing is using.
+
+The fix is `KV_MEM=9300000000` (8.66 GiB) — an explicit `--kv-cache-memory`, which
+**overrides `GPU_UTIL` and skips memory profiling entirely**. Cold and warm now get the
+same pool, so the first boot after a change stops being a separate capacity regime *and* a
+separate performance regime.
+
+*Why 8.66 GiB.* vLLM's own warm boot names both ends: `--kv-cache-memory=8704008418`
+(8.11 GiB) "to fit into requested memory" — only ~194k tokens, short of 204800 — and
+`--kv-cache-memory=9656870400` (8.99 GiB) "to fully utilize gpu memory". 8.66 sits
+0.33 GiB under the card's own stated ceiling.
+
+*Why it is safe cold*, which is the thing that actually had to be checked, since pinning
+skips the profiling that would otherwise protect you. Compile runs **before** the pool is
+allocated — the boot log order is `torch.compile`, then available-KV, then the pool, then
+graph capture — so the two peaks never coexist:
+
+```
+during compile    22.14 consumed + ~2.55 transient       = ~24.7 GiB
+after allocation  22.14 consumed + 8.66 KV + 0.26 graph  = ~31.1 GiB
+                                           card free     =  31.79 GiB
+```
+
+Verified rather than argued: the first boot of this config was itself cold (*"Compiling a
+graph for compile range (1, 2048) takes 33.66 s"*) and produced **228,737 tokens,
+concurrency 1.12x at 204,800**, 31,295 / 32,624 MB used. That boot is
+`logs/boot-qwen3.8-27b-mxfp4.log`.
+
+**The 73,728 extra tokens of context cost nothing measurable.** Against the 8.55 GiB /
+MAXLEN=131072 warm baseline (17.14 / 16.88 / 16.13 steps/s):
+
+| depth | prompt tok | prefill t/s | decode t/s | accept | mean_len | steps/s |
+| --: | --: | --: | --: | --: | --: | --: |
+| 4000 | 3153 | 2882.05 | 61.00 | 0.376 | 3.56 | **17.16** |
+| 16000 | 12490 | 2797.48 | 62.68 | 0.395 | 3.71 | **16.89** |
+| 64000 | 49875 | 2421.36 | 53.73 | 0.336 | 3.32 | **16.16** |
+
+Three traps the pin brings with it:
+
+1. **Do not run a perplexity eval against a pinned entry.** The pin bypasses the headroom
+   `GPU_UTIL` exists to reserve, and `prompt_logprobs` holds a full-width logprob tensor —
+   exactly what a pinned KV eats. Drop `KV_MEM`, or use a different entry.
+2. **The value is measured for this shape.** `MAXSEQS` moves the cudagraph capture set and
+   `CHUNK` moves the compile transient. Change either and re-measure; do not carry
+   9300000000 across.
+3. **tokens/GiB is `max_model_len`-dependent** — 218 blocks/request at 131072, 302 at
+   200000, 308 at 204800, moving realised efficiency from 23,880 to ~26,400 tokens/GiB. Do
+   not extrapolate tokens/GiB across a MAXLEN change.
+
+There is deliberately **no** `Available KV cache memory` or `Free memory on device` line in
+that boot log any more. Those are printed by the profiler, and the pin skips it. Their
+absence is the pin working, not a truncated log.
+
+### 2026-09-05 — `CHUNK=2048`, and the alignment rule does not apply here
+
+Applies to `startup-qwen3.8-27b-mxfp4.sh`. **Chunked-prefill alignment
+(`CHUNK = n*block_size + MAXSEQS*(K-1)`) is an AITER property, not a mamba property.**
+Under R4D it is worth exactly **0%**: `CHUNK=2560` schedules 2548 = 1x1648 + 900, badly
+misaligned, and measures identically to the exactly-aligned 3308 (= 2x1648 + 12) —
+-0.11 / -0.06 / +0.06% steps/s. R4D and chunk alignment do not stack.
+
+A "+4.7% for alignment under AITER" was briefly claimed here and is **withdrawn**: it was a
+pool-size confound. A full 2x2 of {2048, 2560} x {small pool, big pool} shows **no
+interaction at all** — chunk does nothing at either pool size, and pool size is worth ~5%
+decode at either chunk. Note the direction of that: **a bigger KV pool is *slower* to
+decode**, so freeing pool via a smaller chunk works against decode rather than with it.
+(This is also why a cold boot can look fast. Never compare a cold boot to a warm one on
+decode.)
+
+So chunk is genuinely free here, and 2048 falls out of secondary criteria:
+
+1. **smallest activation transient**, which is what a KV pin must leave room for on a cold
+   boot (above) — a smaller chunk widens that margin;
+2. `AR_MAX_KB = CHUNK*5120*2/1024 + 4096` scales with it, so 2048 asks the allocator for
+   24,576 KB instead of 29,696 KB;
+3. it is a power of two, the shape torch.compile and the Triton autotuner prefer.
+
+Nothing about alignment motivates it. If you are reading the boot line
+`max_num_scheduled_tokens is set to 2036`, that is `2048 - MAXSEQS*(K-1)` = 2048 - 12, and
+the reserve is `MAXSEQS*(K-1)` — **not** a constant 2. Block size moves with the backend
+*and* with `MAXSEQS`, not with K alone (1616 at K=4/seqs=2, 1648 at K=7/seqs=3, 1664 at
+K=7/seqs=2; R4D 1648 vs AITER 1664). Read it off the boot rather than carrying it over.
+
+### 2026-09-05 — concurrency is 1.12x on purpose, and the vision tower stays loaded
+
+Applies to `startup-qwen3.8-27b-mxfp4.sh`.
+
+**Two different numbers get called "concurrency".** `MAXSEQS=2` is the scheduler slot cap.
+"Maximum concurrency for 204,800 tokens per request: 1.12x" is how many **full-length**
+requests the pool holds. 1.12x with two slots means two simultaneous *full-length* requests
+will preempt — the second slot is real, but it shrinks as the first request grows. For a
+single-user agentic box that is the right trade, and it is chosen rather than tolerated.
+
+**The image tower is loaded.** The published comparison numbers for this class of setup
+drop it with `--language-model-only`; these scripts beat those numbers **with** it. It is
+capped rather than disabled — `MAXPIX=4194304`, `MMIMGMAX=2`, `MMVIDMAX=0` — and verified
+end-to-end on a live image request.
+
+### 2026-09-05 — behaviour at near-full context
+
+Applies to `startup-qwen3.8-27b-mxfp4.sh`. Full write-up and raw files in
+[`benchmarks/deep-prefill-20260905/`](benchmarks/deep-prefill-20260905/).
+
+Taken to a real 200k tokens on both harnesses, 8 rungs:
+
+- **Prefill 2882 -> 1808 t/s across a 25x depth increase** — 63% of peak at 147k tokens.
+  Peak is at ~6k, not at the shallowest rung: 1544 tokens is too small to fill the card.
+- **Generation at a real 200k runs at 82% of its 2k step rate** (13.90 vs 16.99 steps/s).
+- **Acceptance does not degrade with depth.** Mean accepted length is flat at 3.28 from 64k
+  through 200k.
+
+One warning that applies to anyone repeating this: **the two harnesses' depth ladders do not
+line up.** Both synthesise filler text and both undershoot the real tokenizer, by different
+amounts. BetterBench assumes 4 chars/token and does not check — its "200000" rung is really
+**146978** tokens. Read it on its actual prompt-tokens column, never on its target depth.
 
 ### 2026-09-05 — two instrument rules, learned the hard way on the same day
 
@@ -124,6 +271,15 @@ the lever; the block is just the expensive way to move it. Raise BATCHTOK, leave
 alone.
 
 ### 2026-08-29 — `SPECTOK` stays 4, and the reason is workload, not speed
+
+> **RETRACTED for the MXFP4 stack, 2026-09-05 — production is `SPEC=7`.** The conclusion
+> below is sound for the data it was taken on and the reasoning (choose K on your workload,
+> not on an aggregate) still holds. What was wrong was the workload: the categories here are
+> a **prose-weighted** corpus, and the box's actual duty is agentic code and reasoning. Re-run
+> against a corpus matched to that, K 4 -> 7 moved the BetterBench weighted score
+> **54.1 -> 73.1 (+35.1%)**, and the code chain is flat all the way to position 7. The K=4
+> "peak" was a corpus artifact. **Match the corpus to the axis you are being compared on.**
+> The int4 launcher still defaults to 4; the number below is what set it.
 
 Swept K in {4,5,6,7} at `MAXLEN=131072`, dflash2 speculative decoding, `MAXSEQS=2`, greedy,
 single-stream, 8 runs per category. Earlier testing here compared only 4 against 7 at

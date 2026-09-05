@@ -1,5 +1,15 @@
 # gfx1201 W4A16 Triton tile tuning
 
+> **Scope: int4 W4A16 only** — that is, `startup-qwen3.8-27b-int4.sh` and the two 3.6
+> scripts. The MXFP4 path (`startup-qwen3.8-27b-mxfp4.sh`) has **no W4A16 GEMM at all**;
+> its dense Linears go through radiance's MXFP4 kernels, so nothing in this directory is
+> reachable from it and none of these numbers apply to it. The `dflash2/` subdirectory is
+> the exception — those patches are about the draft head and are used by both.
+>
+> Note also that the image reference below is `:0.5.8`, the version this tuning was done
+> against. Current scripts pin `:0.9.3`; the kernel and its heuristic are unchanged there,
+> but the path is worth re-checking if you are reading this against a newer image.
+
 `RDNAHybridW4A16LinearKernel` (`vllm/model_executor/kernels/linear/mixed_precision/
 rdna_hybrid_w4a16.py`, part of the `stilldeadcode/vllm-radiance:0.5.8` image used by the
 startup scripts in this repo) routes int4 W4A16 dense-Linear GEMMs between a HIP "skinny"

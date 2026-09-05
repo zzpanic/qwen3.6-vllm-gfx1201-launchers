@@ -6,6 +6,16 @@ the underlying image is and where this repo departs from it. [README.md](README.
 executive summary; [TUNING.md](TUNING.md) is the dated tuning log; `benchmarks/` holds the
 raw numbers.
 
+**Scope: this file is the int4 W4A16 story** (`startup-qwen3.8-27b-int4.sh`). It was
+written when that was the only 3.8 path, and the decoder comparison, the draft-checkpoint
+selection, the quality evals and the rejected checkpoints below are all measured on it.
+Two things carry across to the MXFP4 path unchanged, because they are properties of the
+method and the model rather than of the quantisation: **DFlash2 over MTP** (MTP is not
+lossless — +15.8 sigma against the model's own logits, where DFlash2 measures clean at
++1.4), and the quality results. Everything numeric does **not** carry across. The MXFP4
+configuration is in [README.md](README.md#quick-start) and its decisions are in the
+2026-09-05 entries of [TUNING.md](TUNING.md).
+
 ## Contents
 
 - [DFlash2 versus MTP](#dflash2-versus-mtp)
