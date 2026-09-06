@@ -666,6 +666,124 @@ fi
 # mxfp4 quantization squashes NaN to a finite code. RADIANCE_MXFP4_SANITIZE (default 1) fixes it.
 # Extra vllm serve args, for bisecting (e.g. EXTRA="--enforce-eager").
 EXTRA=${EXTRA:-}
+
+# ---------------------------------------------------------------------------
+# CPU KV offload (second-tier prefix cache in system RAM).
+#
+# vLLM's --kv-offloading-size takes ABSOLUTE GiB only (config/cache.py: it is a
+# plain `float | None`) -- there is no percentage form and no "auto", so any
+# machine-relative sizing has to happen out here.
+#
+#   KV_OFFLOAD=off     no offload at all.
+#   KV_OFFLOAD=auto    size it from what this box actually has spare (default).
+#   KV_OFFLOAD=50%     percentage of TOTAL system RAM, then clamped as below.
+#   KV_OFFLOAD=11.5    absolute GiB, still clamped -- an oversized value is
+#                      lowered to what fits rather than failing the boot.
+#
+# The buffer lives in /dev/shm, and we run --ipc=host, so the tmpfs that matters
+# is the HOST's. Two hard limits, and the first one surprises people:
+#
+#   1. /dev/shm defaults to 50% of RAM. `df -h` ROUNDS IT UP -- a 23.46 GiB box
+#      reports "12G" for a tmpfs that is really 11.732 GiB. Size against
+#      statvfs, never against df, or you will ask for 12 and get a dead boot.
+#   2. The region is pre-faulted (MADV_POPULATE_WRITE) and pinned
+#      (cudaHostRegister), so it can never swap. Every byte here is a byte
+#      permanently denied to page cache and to the server's own anonymous
+#      memory. KVOFF_KEEP_FREE_GIB is the floor we refuse to eat into.
+#
+# Overshooting the tmpfs fails the START -- it does not degrade gracefully, and
+# on 0.27.1 it dies without a log line, which is a miserable thing to debug.
+# Hence the clamp is mandatory, not advisory.
+KV_OFFLOAD=${KV_OFFLOAD:-auto}
+KVOFF_MIN_GIB=${KVOFF_MIN_GIB:-4}        # below this a second tier is not worth the RAM; -> off
+KVOFF_KEEP_FREE_GIB=${KVOFF_KEEP_FREE_GIB:-3}   # page cache + headroom left for the rest of the box
+KVOFF_SHM_MARGIN_MIB=${KVOFF_SHM_MARGIN_MIB:-256} # podman locks + multiprocessing semaphores
+KVOFF_BACKEND=${KVOFF_BACKEND:-native}
+
+# A restart orphans the container but NOT its /dev/shm region. The stale mmap
+# keeps its full size, so the next boot finds the tmpfs full and cannot place
+# its own buffer. Reap regions that no live process still holds -- fuser is the
+# precise test, so we only delete what is genuinely unreferenced, and a
+# concurrently running second model keeps its buffer.
+kvoff_reap_orphans() {
+  local f
+  shopt -s nullglob
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    if command -v fuser >/dev/null 2>&1; then
+      fuser -s "$f" 2>/dev/null && continue
+    elif command -v lsof >/dev/null 2>&1; then
+      lsof -t -- "$f" >/dev/null 2>&1 && continue
+    else
+      continue   # no way to prove it is unused; leave it alone
+    fi
+    echo "[kv-offload] reaping orphaned region $(basename "$f") ($(( $(stat -c %s "$f") / 1024 / 1024 )) MiB)" >&2
+    rm -f -- "$f"
+  done
+  shopt -u nullglob
+}
+
+# Resolve KV_OFFLOAD -> GiB, clamped to both limits. Echoes "" for no offload.
+kvoff_resolve() {
+  local want="$1" shm_free_b mem_total_b mem_avail_b cur_b=0 f
+  # statvfs, not df: df rounds and would overstate the ceiling.
+  read -r shm_free_b mem_total_b mem_avail_b <<<"$(
+    python3 - <<'EOF'
+import os
+s = os.statvfs('/dev/shm')
+free = s.f_bavail * s.f_frsize
+mt = ma = 0
+for line in open('/proc/meminfo'):
+    k, v = line.split(':', 1)
+    if k == 'MemTotal':     mt = int(v.split()[0]) * 1024
+    elif k == 'MemAvailable': ma = int(v.split()[0]) * 1024
+print(free, mt, ma)
+EOF
+  )" || return 0
+
+  case "$want" in
+    off|no|none|0) return 0 ;;
+  esac
+
+  local G=$((1024*1024*1024))
+  # Ceiling 1: what the tmpfs can actually hold, less a margin for the small
+  # shm files that come and go while the server runs.
+  local shm_cap_b=$(( shm_free_b - KVOFF_SHM_MARGIN_MIB * 1024 * 1024 ))
+  # Ceiling 2: what RAM can spare without starving page cache. MemAvailable
+  # already discounts reclaimable cache, so subtract the floor we want left.
+  local ram_cap_b=$(( mem_avail_b - KVOFF_KEEP_FREE_GIB * G ))
+
+  local req_b
+  case "$want" in
+    auto)  req_b=$(( shm_cap_b < ram_cap_b ? shm_cap_b : ram_cap_b )) ;;
+    *%)    req_b=$(python3 -c "print(int($mem_total_b * float('${want%\%}') / 100))") ;;
+    *)     req_b=$(python3 -c "print(int(float('$want') * $G))") ;;
+  esac
+
+  (( req_b > shm_cap_b )) && req_b=$shm_cap_b
+  (( req_b > ram_cap_b )) && req_b=$ram_cap_b
+  (( req_b < KVOFF_MIN_GIB * G )) && return 0
+
+  # vLLM wants GiB; one decimal is plenty and keeps us under the clamp.
+  python3 -c "import math; print(f'{math.floor($req_b / $G * 10) / 10:g}')"
+}
+
+# config.yaml may already pass --kv-offloading-size through EXTRA. That is the
+# explicit, per-entry setting and it wins; adding a second copy of the flag here
+# would leave vLLM parsing a duplicate.
+if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
+  kvoff_reap_orphans
+  KVOFF_GIB="$(kvoff_resolve "$KV_OFFLOAD")"
+  if [[ -n "$KVOFF_GIB" ]]; then
+    echo "[kv-offload] KV_OFFLOAD=$KV_OFFLOAD -> --kv-offloading-size $KVOFF_GIB (backend $KVOFF_BACKEND)" >&2
+    EXTRA="$EXTRA --kv-offloading-size $KVOFF_GIB --kv-offloading-backend $KVOFF_BACKEND"
+  elif [[ "$KV_OFFLOAD" != off ]]; then
+    echo "[kv-offload] KV_OFFLOAD=$KV_OFFLOAD but too little spare RAM/shm to place a useful buffer; disabled." >&2
+  fi
+else
+  kvoff_reap_orphans
+  echo "[kv-offload] --kv-offloading-size already set in EXTRA; leaving it alone." >&2
+fi
+# ---------------------------------------------------------------------------
 # Cudagraph capture sizes; empty/none = vLLM's default list ([1,2,4] + multiples of 8).
 # Finer sizes (3,5,6,7,10,12,14) were tried 2026-08-29 to un-pad dynamic-width single streams and
 # measured NEUTRAL (181.3 vs 184.7 weighted, inside noise): the decode-band GEMMs are
@@ -1086,7 +1204,7 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 #   RADIANCE_BANNER_PLAIN=1  disables ANSI colour in the banner. Everything we read comes back
 #                            through journalctl, where the escape codes are just noise.
 # Both remain overridable per-entry from config.yaml, since these are :- defaults.
-exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host \
+exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host --ulimit memlock=-1 \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
   --security-opt seccomp=unconfined --cap-add SYS_PTRACE \
   ${ROCM_ENV[@]+"${ROCM_ENV[@]}"} \

@@ -413,6 +413,7 @@ most of the difference between a stock R9700 and a tuned one.
 | `SPEC=7` (DFlash2) | **+35.1%** weighted decode over `SPEC=4` | The old "K=4 is the peak" result was a prose-corpus artifact. Match the corpus to the axis you are being compared on. |
 | fusions: `RADIANCE_NORMQUANT_FUSION=1`, `RADIANCE_FP8_STREAM=1`, `RADIANCE_SKINNY_GEMM=1` | material, not yet isolated per-fusion | Check the boot log actually says `fuse_norm_quant: True` — ours was silently **off** for weeks. |
 | `KV_MEM=<bytes>` | 0% speed, but it is what makes a 204800 context *safe* | See below. |
+| `KV_OFFLOAD=auto` | 0% GPU cost; a second-tier prefix cache in system RAM | **On by default.** Sizes itself from spare RAM and disables itself when there is none. See below. |
 | `GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_MWAITX=1` | small, free | ROCm runtime, not radiance. Read inside the container, so they do nothing unless forwarded with `-e`. |
 | `CHUNK` alignment | **0% under R4D** | The `n*block_size` alignment rule is an AITER property. A full 2×2 against KV pool size found chunk did nothing at any size. We use 2048 for the compile transient, not for speed. |
 
@@ -423,6 +424,49 @@ is the polling path) · MRv2 (−29% steps/s; `MAXSEQS=2` leaves it nothing to a
 `COMPILE_SIZES`/`COOP_RED` (the static specializations change numerics enough to cost the
 drafter its acceptance) · `RADIANCE_FAST_DRAFT=1` (3.8 GiB of KV pool for +2.3% decode; the
 vendor's +16.6% is a TP=2 number).
+
+### CPU KV offload, and the two things that make it fail silently
+
+`KV_OFFLOAD` (default `auto`) gives vLLM a second-tier prefix cache in **system RAM**, so a
+prompt prefix that has fallen out of the GPU pool is restored over PCIe instead of being
+re-prefilled. Measured on one R9700: **11.1–11.4 GB/s** sustained both directions, against a
+prefill rate of roughly 2,800 tok/s — so a restored prefix arrives about two orders of magnitude
+cheaper than recomputing it. It costs **nothing on the GPU**: the KV pool is byte-identical with
+it on (228,737 tokens / 1.12x either way).
+
+```
+KV_OFFLOAD=auto     # default — size from spare /dev/shm and RAM
+KV_OFFLOAD=50%      # percentage of total system RAM
+KV_OFFLOAD=11.5     # absolute GiB
+KV_OFFLOAD=off
+```
+
+vLLM's own `--kv-offloading-size` is absolute GiB only — there is no percentage form and no
+`auto` — so the script computes a value and clamps it against two ceilings. Both of them fail
+in ways that are hard to diagnose, which is why the clamp exists:
+
+- **`/dev/shm` is the real limit, and `df` lies about it.** The buffer is an mmap in tmpfs, and
+  tmpfs defaults to 50% of RAM. `df -h` *rounds up*: a 23.46 GiB box reports `12G` for a tmpfs
+  that is really **11.732 GiB**. Ask for the 12 that `df` implies and the boot dies — the region
+  is pre-faulted with `MADV_POPULATE_WRITE`, so a shortfall kills the start rather than
+  degrading. The script reads `statvfs` instead and leaves a margin for the small shm files
+  (podman locks, multiprocessing semaphores) that come and go.
+- **A restart orphans the container but *not* its `/dev/shm` region.** The stale mmap keeps its
+  full size, so the next boot finds the tmpfs full and cannot place its buffer — and on 0.27.1
+  it dies with **no log line at all**, just llama-swap's generic "upstream command exited
+  prematurely". The script reaps unreferenced `vllm_offload_*.mmap` regions on start, gated on
+  `fuser`/`lsof` so a concurrently running second model keeps its own.
+
+The exec line also needs **`--ulimit memlock=-1`**. Without it `RLIMIT_MEMLOCK` is 2.93 GiB and
+`cudaHostRegister` fails *softly* — a warning, then unpinned staged copies at a fraction of the
+speed. Offload appears to work and is quietly slow. Grep the boot for it.
+
+Sizing is the part worth thinking about. The buffer is pinned and can never swap, so every byte
+is denied to page cache and to the server's own memory — the script keeps 3 GiB back and turns
+itself off below 4 GiB. And vLLM's guidance is that the CPU tier should *exceed* the GPU KV pool
+to do more than mirror it: ours at 11.5 GiB against a 9.3 GB GPU pool is only ~1.3x, which is on
+the steep part of the curve. If you have RAM to spare, this is where it goes. There is no TTL —
+eviction is capacity-driven LRU, so an idle box never loses cache, but a restart flushes all of it.
 
 ### The KV pin, which is the one that will bite you
 
