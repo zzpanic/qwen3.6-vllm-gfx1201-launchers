@@ -106,6 +106,12 @@ Qwen3.8-27B is a **retrained release of the Qwen3.6-27B architecture**, not a ne
 same `model_type qwen3_5`, same 64 layers / 5120 hidden / 17408 intermediate / 24:4 heads /
 head_dim 256 / vocab 248320, which is why tuning done on 3.6 transfers to it unchanged.
 
+**The test host is modest, and that matters for one number only.** Everything here ran on an
+**ASUS P10S WS / Intel i5-7600 (4C/4T) / 4x DDR4-2400**, with the card on **PCIe 3.0 x16**.
+Generation and prefill are GPU-bound, so those tables should reproduce on any host; the one
+figure that is genuinely host-limited is the CPU KV offload cost, discussed
+[below](#cpu-kv-offload-and-the-two-things-that-make-it-fail-silently).
+
 Everything in this section is `startup-qwen3.8-27b-mxfp4.sh` at its shipped defaults:
 `MAXLEN=204800`, `KV_MEM=9300000000`, `MAXSEQS=2`, DFlash2 **K=7** sampled
 probabilistically, fp8 KV, vision tower loaded. Raw files in
@@ -459,6 +465,35 @@ nothing is written during decode at all. Raw decode t/s moved ±8%, which is ins
 
 Prefill is the real cost, ~3.3% and consistent at every depth. The store path runs *during*
 prefill and competes for PCIe and CPU, which is exactly where a cost should land.
+
+**Read that 3.3% as an upper bound, not a typical figure.** The host here is deliberately
+modest, and offload is the one feature in this repo whose cost is set by the *host* rather than
+the card:
+
+| | this box |
+|---|---|
+| link to the GPU | **PCIe 3.0 x16** — 15.75 GB/s theoretical, ~12–13 GB/s practical |
+| CPU | **Intel i5-7600** — 4 cores, 4 threads, no SMT |
+| RAM | **4x DDR4-2400**, dual channel (~38 GB/s) |
+| board | **ASUS P10S WS** |
+
+The measured 11.1–11.4 GB/s offload rate is roughly 90% of what a Gen3 x16 link can actually
+deliver, so the transfer is running at the edge of the bus, and it is doing that while prefill
+wants the same bus. A four-thread CPU with no SMT means the offload workers and the prefill
+dispatch are contending for the same handful of cores as well. On a Gen4 or Gen5 host with more
+threads, both halves of that pressure ease and the prefill cost should be smaller than 3.3% —
+possibly much smaller. Nobody should see a *worse* number than ours on newer hardware.
+
+Note that this cuts one way only. The **benefit** side is unaffected: a cache hit skips
+computation on the GPU, which is the same GPU everywhere. So a faster host does not raise the
+break-even hit rate, it lowers it.
+
+> **If you are checking your own link speed inside a VM, don't trust it.** With the GPU passed
+> through, the guest reports the *emulated* config space, not the physical link — this box reads
+> `32.0 GT/s / x16` from `/sys/class/drm/card*/device/current_link_speed` and reports its CPU as
+> a generic "Skylake" QEMU model, while the actual hardware underneath is the Gen3 x16 / i5-7600
+> in the table above. Read the link width and speed on the **host**, or you will size this
+> feature against a number that does not exist.
 
 **That 3.3% is paid always. The benefit is paid only when prefixes repeat** — and when they do
 it is not a few percent, it is the whole prefill for that prefix. Restoring KV at 11.4 GB/s is
