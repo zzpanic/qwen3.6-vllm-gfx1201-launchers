@@ -447,6 +447,30 @@ KV_OFFLOAD=50%      # percentage of total system RAM
 KV_OFFLOAD=11.5     # absolute GiB
 ```
 
+**Cleanup runs on every start, whether or not you use offload.** A crash or a
+`systemctl restart` leaves two kinds of debris, and each breaks the *next* boot with an error
+that points nowhere near the cause:
+
+- **A `/dev/shm` region.** The container dies; its mmap does not. It keeps its full size, so
+  the next boot finds the tmpfs full and cannot place its own buffer — and vLLM dies with **no
+  log line at all**, which is a genuinely horrible thing to debug. `GC_ORPHANS` reaps regions
+  no live process holds, testing with `fuser` (falling back to `lsof`) so a concurrently
+  running second model keeps its buffer and nothing shared is deleted.
+- **A container holding VRAM** while your supervisor believes the model is stopped. The launch
+  already reclaims the name — `--replace` on podman, an explicit `rm -f` on docker, both of
+  which handle a *running* container too — so GC does not remove anything here, it **reports**.
+  A silently replaced orphan is exactly the condition worth knowing about: something died
+  without cleaning up, and if it was still running it was holding VRAM the whole time.
+
+```
+GC_ORPHANS=on       # default: reap unreferenced shm regions, report orphan containers
+GC_ORPHANS=off      # touch nothing, report nothing
+```
+
+Scope is strictly the launcher's own `$NAME` and its own `vllm_offload_*.mmap` files; it will
+not touch containers or regions it did not create. `DRY_RUN=1` is side-effect free — it prints
+what GC would remove and removes nothing.
+
 **It is off by default, and that is a deliberate choice about which half of the trade is
 unconditional.** Benchmarked against the same three rungs as everything else in this repo, with
 a *cold* cache — every block stored, nothing read back (26.0 GB out, 0 bytes in, external hit

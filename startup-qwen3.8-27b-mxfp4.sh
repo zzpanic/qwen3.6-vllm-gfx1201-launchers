@@ -709,13 +709,52 @@ KVOFF_KEEP_FREE_GIB=${KVOFF_KEEP_FREE_GIB:-3}   # page cache + headroom left for
 KVOFF_SHM_MARGIN_MIB=${KVOFF_SHM_MARGIN_MIB:-256} # podman locks + multiprocessing semaphores
 KVOFF_BACKEND=${KVOFF_BACKEND:-native}
 
-# A restart orphans the container but NOT its /dev/shm region. The stale mmap
+# --- garbage collection -----------------------------------------------------
+# Leftovers survive a restart and break the NEXT boot, in ways whose error
+# messages point nowhere near the cause. GC runs on every start, regardless of
+# KV_OFFLOAD.
+#
+#   GC_ORPHANS=on    reap unreferenced /dev/shm regions, report orphan
+#                    containers (DEFAULT).
+#   GC_ORPHANS=off   touch nothing, report nothing.
+GC_ORPHANS=${GC_ORPHANS:-on}
+# DRY_RUN must stay side-effect free: report what GC would do, delete nothing.
+[ -n "${DRY_RUN:-}" ] && GC_DRY=1 || GC_DRY=""
+gc_do() { if [ -n "$GC_DRY" ]; then echo "[gc] (dry-run, not executing) $*" >&2; else "$@"; fi; }
+
+# Leftover 1: the container. A crash or a `systemctl restart` can leave one
+# holding VRAM while the supervisor believes the model is stopped.
+#
+# This only REPORTS. The launch already reclaims the name -- podman via
+# `--replace` (set above), docker via the `rm -f` just before exec -- and both
+# handle a running container too, so a second removal path here would be one
+# more thing to disagree with the first. What the launch does NOT do is tell
+# you it happened, and a silently-replaced orphan is exactly the condition
+# worth knowing about: it means something died without cleaning up, and if it
+# was still running it was holding VRAM the whole time. Scope is strictly our
+# own $NAME -- a launcher must never touch containers it did not create.
+gc_report_orphan_container() {
+  [ "$GC_ORPHANS" = off ] && return 0
+  local st
+  st="$("$RUNTIME" ps -a --filter "name=^${NAME}$" --format '{{.Status}}' 2>/dev/null | head -1)"
+  [ -z "$st" ] && return 0
+  if [[ "$st" == Up* ]]; then
+    echo "[gc] WARNING: container $NAME is ALREADY RUNNING ($st) and will be replaced." >&2
+    echo "[gc]   If your supervisor thinks this model is stopped, that was an orphan holding VRAM." >&2
+    echo "[gc]   Check with: $RUNTIME ps ; amd-smi monitor" >&2
+  else
+    echo "[gc] stale container $NAME found ($st); the launch will reclaim the name." >&2
+  fi
+}
+
+# Leftover 2: a restart orphans the container but NOT its /dev/shm region. The stale mmap
 # keeps its full size, so the next boot finds the tmpfs full and cannot place
 # its own buffer. Reap regions that no live process still holds -- fuser is the
 # precise test, so we only delete what is genuinely unreferenced, and a
 # concurrently running second model keeps its buffer.
 kvoff_reap_orphans() {
   local f
+  [ "$GC_ORPHANS" = off ] && return 0
   shopt -s nullglob
   for f in /dev/shm/vllm_offload_*.mmap; do
     if command -v fuser >/dev/null 2>&1; then
@@ -725,8 +764,8 @@ kvoff_reap_orphans() {
     else
       continue   # no way to prove it is unused; leave it alone
     fi
-    echo "[kv-offload] reaping orphaned region $(basename "$f") ($(( $(stat -c %s "$f") / 1024 / 1024 )) MiB)" >&2
-    rm -f -- "$f"
+    echo "[gc] reaping orphaned shm region $(basename "$f") ($(( $(stat -c %s "$f") / 1024 / 1024 )) MiB)" >&2
+    gc_do rm -f -- "$f"
   done
   shopt -u nullglob
 }
@@ -770,7 +809,15 @@ EOF
 
   (( req_b > shm_cap_b )) && req_b=$shm_cap_b
   (( req_b > ram_cap_b )) && req_b=$ram_cap_b
-  (( req_b < KVOFF_MIN_GIB * G )) && return 0
+
+  # Both ceilings go NEGATIVE on a tight box (MemAvailable below KEEP_FREE, or
+  # a full tmpfs), and a negative request must mean "no offload", never a
+  # negative flag value. Guard that before the size test.
+  (( req_b <= 0 )) && return 0
+  # ...and do the minimum test in python: KVOFF_MIN_GIB is a user-supplied
+  # value, and bash arithmetic cannot compare against a fractional one -- it
+  # errors and the `&&` never fires, which used to emit a negative size.
+  python3 -c "import sys; sys.exit(0 if $req_b < float('$KVOFF_MIN_GIB') * $G else 1)" && return 0
 
   # vLLM wants GiB; one decimal is plenty and keeps us under the clamp.
   python3 -c "import math; print(f'{math.floor($req_b / $G * 10) / 10:g}')"
@@ -779,8 +826,10 @@ EOF
 # config.yaml may already pass --kv-offloading-size through EXTRA. That is the
 # explicit, per-entry setting and it wins; adding a second copy of the flag here
 # would leave vLLM parsing a duplicate.
+gc_report_orphan_container
+kvoff_reap_orphans
+
 if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
-  kvoff_reap_orphans
   KVOFF_GIB="$(kvoff_resolve "$KV_OFFLOAD")"
   if [[ -n "$KVOFF_GIB" ]]; then
     echo "[kv-offload] KV_OFFLOAD=$KV_OFFLOAD -> --kv-offloading-size $KVOFF_GIB (backend $KVOFF_BACKEND)" >&2
@@ -789,7 +838,6 @@ if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
     echo "[kv-offload] KV_OFFLOAD=$KV_OFFLOAD but too little spare RAM/shm to place a useful buffer; disabled." >&2
   fi
 else
-  kvoff_reap_orphans
   echo "[kv-offload] --kv-offloading-size already set in EXTRA; leaving it alone." >&2
 fi
 # ---------------------------------------------------------------------------
