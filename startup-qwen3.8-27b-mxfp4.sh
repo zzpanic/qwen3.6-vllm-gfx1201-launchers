@@ -674,8 +674,8 @@ EXTRA=${EXTRA:-}
 # plain `float | None`) -- there is no percentage form and no "auto", so any
 # machine-relative sizing has to happen out here.
 #
-#   KV_OFFLOAD=off     no offload at all.
-#   KV_OFFLOAD=auto    size it from what this box actually has spare (default).
+#   KV_OFFLOAD=off     no offload at all (DEFAULT).
+#   KV_OFFLOAD=auto    size it from what this box actually has spare.
 #   KV_OFFLOAD=50%     percentage of TOTAL system RAM, then clamped as below.
 #   KV_OFFLOAD=11.5    absolute GiB, still clamped -- an oversized value is
 #                      lowered to what fits rather than failing the boot.
@@ -694,7 +694,16 @@ EXTRA=${EXTRA:-}
 # Overshooting the tmpfs fails the START -- it does not degrade gracefully, and
 # on 0.27.1 it dies without a log line, which is a miserable thing to debug.
 # Hence the clamp is mandatory, not advisory.
-KV_OFFLOAD=${KV_OFFLOAD:-auto}
+# Default OFF. Measured cost with a COLD cache is ~3.3% prefill (the store path
+# competes with prefill for PCIe and CPU); decode is untouched, -0.3..-0.7% on
+# steps/s, because offload_prompt_only defaults True so nothing is stored during
+# decode. That cost is unconditional, the benefit is not -- it only arrives once
+# prefixes actually repeat. Break-even is an external hit rate of roughly 3.3%,
+# since a hit skips essentially ALL the prefill for that prefix. A real
+# multi-agent workload measured 9.1% and still climbing, i.e. comfortably ahead;
+# a single-stream chat workload may never get there. Turn it on deliberately,
+# for a workload you know repeats prefixes.
+KV_OFFLOAD=${KV_OFFLOAD:-off}
 KVOFF_MIN_GIB=${KVOFF_MIN_GIB:-4}        # below this a second tier is not worth the RAM; -> off
 KVOFF_KEEP_FREE_GIB=${KVOFF_KEEP_FREE_GIB:-3}   # page cache + headroom left for the rest of the box
 KVOFF_SHM_MARGIN_MIB=${KVOFF_SHM_MARGIN_MIB:-256} # podman locks + multiprocessing semaphores

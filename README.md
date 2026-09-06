@@ -413,7 +413,7 @@ most of the difference between a stock R9700 and a tuned one.
 | `SPEC=7` (DFlash2) | **+35.1%** weighted decode over `SPEC=4` | The old "K=4 is the peak" result was a prose-corpus artifact. Match the corpus to the axis you are being compared on. |
 | fusions: `RADIANCE_NORMQUANT_FUSION=1`, `RADIANCE_FP8_STREAM=1`, `RADIANCE_SKINNY_GEMM=1` | material, not yet isolated per-fusion | Check the boot log actually says `fuse_norm_quant: True` — ours was silently **off** for weeks. |
 | `KV_MEM=<bytes>` | 0% speed, but it is what makes a 204800 context *safe* | See below. |
-| `KV_OFFLOAD=auto` | 0% GPU cost; a second-tier prefix cache in system RAM | **On by default.** Sizes itself from spare RAM and disables itself when there is none. See below. |
+| `KV_OFFLOAD=auto` | **−3.3% prefill** cold; 0% GPU cost; large win once prefixes repeat | **Off by default** — the cost is unconditional, the benefit needs a workload that repeats prefixes. Break-even ≈ 3.3% external hit rate. See below. |
 | `GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_MWAITX=1` | small, free | ROCm runtime, not radiance. Read inside the container, so they do nothing unless forwarded with `-e`. |
 | `CHUNK` alignment | **0% under R4D** | The `n*block_size` alignment rule is an AITER property. A full 2×2 against KV pool size found chunk did nothing at any size. We use 2048 for the compile transient, not for speed. |
 
@@ -427,19 +427,57 @@ vendor's +16.6% is a TP=2 number).
 
 ### CPU KV offload, and the two things that make it fail silently
 
-`KV_OFFLOAD` (default `auto`) gives vLLM a second-tier prefix cache in **system RAM**, so a
-prompt prefix that has fallen out of the GPU pool is restored over PCIe instead of being
-re-prefilled. Measured on one R9700: **11.1–11.4 GB/s** sustained both directions, against a
-prefill rate of roughly 2,800 tok/s — so a restored prefix arrives about two orders of magnitude
-cheaper than recomputing it. It costs **nothing on the GPU**: the KV pool is byte-identical with
-it on (228,737 tokens / 1.12x either way).
+`KV_OFFLOAD` gives vLLM a second-tier prefix cache in **system RAM**, so a prompt prefix that
+has fallen out of the GPU pool is restored over PCIe instead of being re-prefilled. Measured on
+one R9700: **11.1–11.4 GB/s** sustained both directions, against a prefill rate of roughly
+2,800 tok/s — so a restored prefix arrives about two orders of magnitude cheaper than
+recomputing it. It costs **nothing on the GPU**: the KV pool is byte-identical with it on
+(228,737 tokens / 1.12x either way).
 
 ```
-KV_OFFLOAD=auto     # default — size from spare /dev/shm and RAM
+KV_OFFLOAD=off      # default
+KV_OFFLOAD=auto     # size from spare /dev/shm and RAM
 KV_OFFLOAD=50%      # percentage of total system RAM
 KV_OFFLOAD=11.5     # absolute GiB
-KV_OFFLOAD=off
 ```
+
+**It is off by default, and that is a deliberate choice about which half of the trade is
+unconditional.** Benchmarked against the same three rungs as everything else in this repo, with
+a *cold* cache — every block stored, nothing read back (26.0 GB out, 0 bytes in, external hit
+rate 0.0%):
+
+| depth | steps/s off → on | Δ | prefill t/s off → on | Δ |
+|---|---|---|---|---|
+| 4000 | 17.16 → 17.07 | −0.5% | 2882 → 2790 | **−3.2%** |
+| 16000 | 16.89 → 16.84 | −0.3% | 2797 → 2695 | **−3.7%** |
+| 64000 | 16.16 → 16.05 | −0.7% | 2421 → 2345 | **−3.2%** |
+
+Decode is untouched — the steps/s deltas are a whisker outside cross-boot repeatability (~0.1%)
+and there is no mechanism for a decode cost: `offload_prompt_only` defaults to `True`, so
+nothing is written during decode at all. Raw decode t/s moved ±8%, which is inside this stack's
+±6% raw-decode noise and tracks acceptance rather than offload; don't read it as signal.
+
+Prefill is the real cost, ~3.3% and consistent at every depth. The store path runs *during*
+prefill and competes for PCIe and CPU, which is exactly where a cost should land.
+
+**That 3.3% is paid always. The benefit is paid only when prefixes repeat** — and when they do
+it is not a few percent, it is the whole prefill for that prefix. Restoring KV at 11.4 GB/s is
+~100x cheaper than recomputing it at ~2,400–2,900 tok/s, so a hit on a 50k prefix turns roughly
+20 seconds of prefill into a fraction of a second. Break-even is therefore an **external prefix
+cache hit rate of about 3.3%** — above that you are ahead, below it you are paying for nothing.
+
+Which side you land on is a property of your workload, not of this card:
+
+- **Multiple agents sharing a system prompt or a codebase context, long prompts, repeated
+  turns** — this is what it is for. A real multi-agent run here measured **9.1% and still
+  climbing** as the pool warmed, comfortably past break-even.
+- **Single-stream chat, short prompts, little repetition** — you may never reach 3.3%, and the
+  cost is all you get. Leave it off.
+
+Watch `vllm:kv_offload_total_bytes_total` and the `External prefix cache hit rate` in the engine
+log to see which one you are. Note the hit rate starts at zero after every restart — the cache
+has no persistence, and no TTL either: eviction is capacity-driven LRU, so an idle box keeps its
+cache indefinitely but a restart flushes all of it.
 
 vLLM's own `--kv-offloading-size` is absolute GiB only — there is no percentage form and no
 `auto` — so the script computes a value and clamps it against two ceilings. Both of them fail
