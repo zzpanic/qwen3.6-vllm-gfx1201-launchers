@@ -444,3 +444,12 @@ bare-metal host — is wanted, and would settle several of the open questions ab
 The house patches and documents here are the author's own work, built on and against vLLM
 and the radiance overlay; upstream code carries its own licences. Where a patch was ported
 from an upstream PR it says so, with the PR number, in the patch file itself.
+
+**Author:** zzpanic — <zzpanic@gmail.com>, [github.com/zzpanic](https://github.com/zzpanic).
+
+Reproductions on other hardware are wanted more than anything else here. If you run this
+on a different card, a different storage stack, or an NVMe device, the results are worth
+sending on whether they agree or not — a disagreement is more useful than a confirmation,
+because nothing in this repository has been reproduced anywhere but the one machine
+described above. Issues on the repository are the better route for anything others should
+see; mail is for what does not belong in public.

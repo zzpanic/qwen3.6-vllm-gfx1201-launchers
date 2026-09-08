@@ -734,6 +734,14 @@ stops being the binding constraint. Do not carry a number across a card count.
   attributed in the file. The rest of the overlay here was re-derived from the merged PR
   rather than taken from that snapshot, which predates the merge.
 
+## Author
+
+zzpanic — <zzpanic@gmail.com>, [github.com/zzpanic](https://github.com/zzpanic).
+
+Issues and pull requests on this repository are the best route; mail is for anything that
+does not belong in public. Measurements from other hardware are especially welcome — every
+number here comes from a single machine, and the launchers exist so that is checkable.
+
 ## Usage
 
 All scripts are configured entirely through environment variables (see each header) with
