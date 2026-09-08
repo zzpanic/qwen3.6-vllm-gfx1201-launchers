@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launcher for the KV-cache offload proof of concept: entry `qwen3.8-27b-kvcache`.
+# llama-swap launcher for the entry `qwen3.8-27b-kvcache`.
 #
 # ============================================================================
 # WHAT THIS IS
@@ -146,8 +146,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export HOUSE="${HOUSE:-$HERE/kv-cache/patches}"
-BASE_LAUNCHER="${BASE_LAUNCHER:-$HERE/kv-cache/launcher/serve-mxfp4-kvcache-base.sh}"
+BASE_LAUNCHER="${BASE_LAUNCHER:-$HERE/../llama-swap-ggz14-27b.sh}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"

@@ -40,6 +40,29 @@ Legend — status: `open` / `closed` (merged or superseded) / `commit` / `docs`.
 
 ---
 
+## 3a. Upstream applicability sweep (measured against the installed tree)
+
+The first two sweeps of this ground found nothing, because they judged candidates by
+**merge status** and looked only at marquee RFCs. Redone as an *applicability* test — fetch
+each PR's diff and count how many of its removed lines still exist verbatim in the installed
+tree — the picture inverted. Percentages below are that measure, per file.
+
+| PR | What it is | Applies | Ruling |
+|---|---|---|---|
+| [vLLM #54743](https://github.com/vllm-project/vllm/pull/54743) | [KV Offload] Scope offload group configs to prefix-cacheable KV cache groups | `offloading/config.py` **100%**, `offloading/scheduler.py` **80%** | **The one that matters for the stride work.** Not a fix for us as-is (all nine of our groups *are* prefix-cacheable, so it changes nothing we can feel), but it adds exactly the primitive the stride patch needs: `config.groups` becomes a *filtered* tuple and `OffloadingGroupConfig.group_idx` preserves the original index, so `GPULoadStoreSpec.group_sizes` and the offload keys stay correctly indexed after filtering. "Offload group g only every Nth chunk" then becomes a predicate on a reviewed data structure instead of an invasive rewrite. **Build on it, not beside it.** |
+| [vLLM #54327](https://github.com/vllm-project/vllm/pull/54327) | [Feature][KV Offload] Bounded capacity and LRU eviction for the filesystem tier | `tiering/fs/manager.py` **100%** (+255/−7) | **Independently deployable, and it would delete a component of this proof of concept.** The fs tier here is unbounded, which is why `kvcache-reap.sh` and its timer are a *mandatory* external dependency. This adds capacity and LRU eviction inside the tier. Test it early; if it holds, the reaper becomes legacy. |
+| [vLLM #49225](https://github.com/vllm-project/vllm/pull/49225) | [KV-offload][FS] Batching for read/write threads | manager 29%, thread_pool 65% | **Ported by hand** as `patch_kv_offload_fs_fanout.py` (manager-only, five edits). Mechanism exact, gain nil on this device — see `kv-cache-historical.md` §5. Note upstream's own 32 MiB budget would give a fanout of 2 here, so the budget was made a knob. |
+| [vLLM #55390](https://github.com/vllm-project/vllm/pull/55390) | Annotate MTP draft KV cache groups positionally on the hybrid grouping path | `kv_cache_utils.py` 11% | **Our live eagle-group bug.** Little of the diff applies (radiance has its own `_annotate_eagle_groups_deepseek_v4`), but it is small (+45/−18) and confirms the fix shape. **Port the idea, not the diff.** |
+| [vLLM #55519](https://github.com/vllm-project/vllm/pull/55519) | Don't warn that prefix reuse is disabled when the EAGLE block drop is off | `kv_cache_utils.py` 100%, scheduler 0% | Cosmetic here; applies cleanly. |
+| [vLLM #54756](https://github.com/vllm-project/vllm/pull/54756) | Register mixed page sizes in one cache group | 5% | Targets `v1/simple_kv_offload/`, absent in this tree. No. |
+| [vLLM #38261](https://github.com/vllm-project/vllm/pull/38261) | (earlier offload branch) | `offloading/scheduler.py` 10%, `cpu/spec.py` 0% | **Out of date against everyone**, not just us: it targets `kv_offload/{spec.py, mediums.py, worker/cpu_gpu.py}`, a subtree since refactored to `{base.py, config.py, cpu/, tiering/, factory.py, file_mapper.py}` — and our layout now matches upstream main exactly. Porting it forward is most of the work of the stride revision without doing what the stride revision does. (An earlier note recorded this PR as "261 files"; that was a branch-vs-main compare. It is **17 files**.) |
+
+**The lesson, stated once because it generalises:** scan upstream by **applicability against
+the installed tree**, not by merge status or issue prominence. The useful work was in small,
+open `[Bugfix][KV Offload]` PRs updated within the last week — not in the headline RFCs.
+
+---
+
 ## 4. State quantization / compression (reviewed)
 | Ref | What it is | Status | Ruling |
 |---|---|---|---|

@@ -9,6 +9,7 @@
 This order is a dependency, not a preference.
 
 BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
-delete it in favour of the upstream implementation wherever one now exists. See
-stage 1 of the roadmap in README.md. A house patch that duplicates merged
+delete it in favour of the upstream implementation wherever one now exists. That is
+stage 2 of the roadmap in README.md; PRs #54327 and #54743 already measure as directly
+applicable (see docs/kv-cache-references.md section 3a). A house patch that duplicates merged
 upstream work is a liability, not an asset.

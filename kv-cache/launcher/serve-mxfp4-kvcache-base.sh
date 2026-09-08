@@ -2,7 +2,7 @@
 # llama-swap launcher for qwen3.8-27b-ggz14.
 #
 # House copy (2026-09-05) of ggz14's serve-mxfp4.sh, repo at
-# <repo>/ggz14-mxfp4 (codeberg.org/ggz14/radiance-vllm-mxfp4, v0.11.0,
+# kv-cache/../radiance-vllm-mxfp4 (codeberg.org/ggz14/radiance-vllm-mxfp4, v0.11.0,
 # image stilldeadcode/vllm-radiance:0.9.3). Serves Qwen3.8-27B in native MXFP4
 # (4-bit) with the FP8 DFlash2 drafter on this box's single R9700 (TP=1, auto-detected
 # by the gpu-detect.sh sourced below).
@@ -14,7 +14,7 @@
 #     and is the single --served-model-name (upstream ships Qwen3.8 Qwen3.6 Qwen3.8-MXFP4)
 #   * MODELS defaults to $HOME/models-mxfp4 (where this box's checkpoints live)
 #   * adds --rm, so a killed launcher cannot orphan its container (the house rule)
-#   * REPO (new knob, defaults to <repo>/ggz14-mxfp4) locates the repo's own files
+#   * REPO (new knob, defaults to radiance-vllm-mxfp4 beside kv-cache/) locates the repo's own files
 #     (gpu-detect.sh, r4d_radiance_extras.patch, the chat template, the /patches mount),
 #     which upstream resolves relative to the script itself
 # Everything else -- the knob defaults, the patch prelude, the env list, the entrypoint
@@ -123,13 +123,13 @@ die() { echo "[serve-mxfp4] ERROR: $1" >&2; shift; for l in "$@"; do echo "  $l"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # This file lives outside the repo it was copied from, so the repo's own files (gpu-detect.sh,
 # the r4d patch, the chat template, the /patches mount) are resolved from REPO instead.
-REPO="$(realpath -m "${REPO:-<repo>/ggz14-mxfp4}")"
+REPO="$(realpath -m "${REPO:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/../../radiance-vllm-mxfp4}")"
 # HOUSE is our own code that runs against ggz14's tree but is NOT part of it: the offload
 # boundary patch and the KV tier bench. It used to live loose inside $REPO, which is an
 # upstream clone ignored by ~/ai's .gitignore -- so those files were tracked by nothing and a
 # `git clean` in that checkout would have deleted them with no copy anywhere. They now live in
 # a tracked directory and ride their own mount; $REPO stays pristine.
-HOUSE="$(realpath -m "${HOUSE:-<repo>/kv-cache}")"
+HOUSE="$(realpath -m "${HOUSE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/../patches}")"
 [ -d "$HOUSE" ] || die "HOUSE=$HOUSE does not exist (house patches + KV bench live there)"
 # Hardware detection: how many usable AMD GPUs there are, which HIP indices they are, what TP
 # fits them and the model's head counts, and whether a KV pin has been measured for them. Sets
@@ -936,7 +936,7 @@ else
      The region is pre-faulted, so this would fail the START with no log line.
      Fix ONE of:
        * mount -o remount,size=28G /dev/shm   (and add it to /etc/fstab --
-         see <repo>/etc-fstab-snippets/kvcache.fstab; the kernel default is
+         see kv-cache/ops/etc-fstab-snippets/kvcache.fstab; the kernel default is
          50% of RAM, which is why more RAM alone does not lift this)
        * lower --kv-offloading-size in the config.yaml entry
      Note df will disagree with this check: it rounds the tmpfs UP."

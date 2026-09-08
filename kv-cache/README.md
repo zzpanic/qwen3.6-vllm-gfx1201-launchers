@@ -98,7 +98,7 @@ layers are already stored 1-in-8. There is no density work left to do here — a
 knowing before anyone spends a week on compression.
 
 Seven house patches make it work; they are in [`patches/`](patches/) with their apply
-order, and [[`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md)](docs/kv-cache-current-implementation.md)
+order, and [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md)
 explains what each one does and which environment variable gates it.
 
 ---
@@ -127,7 +127,7 @@ saves only 15%.
 
 > **This is one small-sample run and is labelled as such.** One machine, one workload, one
 > pass, by the author, nothing held out or reproduced.
-> [[`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md)](docs/kv-cache-results-preliminary.md) carries it in
+> [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md) carries it in
 > full — including **§4, the figures in it that do not yet reconcile** with each other or
 > with the measured storage density. They are flagged there rather than quietly corrected.
 
@@ -179,13 +179,32 @@ the prompt self-caching and the "cold" arm is not cold. Getting the cold arm gen
 cold is the hard part of this stage and the reason it comes first: every claim below it is
 unfalsifiable until it exists.
 
+Two specific jobs belong here, both already scoped by earlier work:
+
+- **Confirm or kill the busy-wait.** The strongest open lead in the repository is that the
+  deferral loop is a busy-wait costing ~1.9 ms an iteration — ~19 s of spinning for 103 ms
+  of real disk I/O. It is fitted to three points and **not yet confirmed against
+  scheduler-step counters**. If it holds, it explains why a request that is 92% served from
+  cache still loses to a cold recompute, and it is a bigger prize than any tuning below.
+- **Fix the correctness check.** The current one passes on a five-character `ACK` response
+  and therefore proves nothing about tens of thousands of tokens of replayed KV. It needs a
+  prompt demanding a long, content-dependent answer before a pass means anything.
+
+[`kv-cache-historical.md`](docs/kv-cache-historical.md) §7 lists every other instrument
+defect found the hard way. Read it before designing the harness, not after.
+
 **2. Continue the review of existing work, and produce an implementation plan.**
-[[`kv-cache-references.md`](docs/kv-cache-references.md)](docs/kv-cache-references.md) is the review so far — every PR,
+[`kv-cache-references.md`](docs/kv-cache-references.md) is the review so far — every PR,
 paper and blog already assessed, each with a ruling. Continue it, then write the plan.
 Concretely, this includes reconciling the seven house patches against current
 vLLM/radiance HEAD and **deleting each one in favour of the upstream implementation
 wherever one exists**: at least one already has an upstream counterpart (the eagle-groups
-fix is PR #55390; the fs fanout was ported from PR #49225). *Avoid reimplementation* — a
+fix is PR #55390; the fs fanout was ported from PR #49225). Two open PRs already measure as
+directly applicable and should be handled first: **#54327** adds bounded capacity and LRU
+eviction to the fs tier at **100% applicability** — it would retire the mandatory external
+reaper — and **#54743** adds the filtered-group primitive the stride work should be built
+*on* rather than beside. The measured applicability table is
+[`kv-cache-references.md`](docs/kv-cache-references.md) §3a. *Avoid reimplementation* — a
 house patch duplicating merged upstream work is a liability, not an asset: one more thing
 to rebase, and it will silently diverge. Score upstream work by **applicability, not by
 merge status**; an unmerged PR that fits is worth more than a merged one that does not.
@@ -200,7 +219,7 @@ quality options. The strongest candidate is the **exactness fix**: replaying the
 one-block gap from the stride checkpoint, which turns the mamba stride from an
 approximation into an exact reconstruction. It is designed and unbuilt, and it is the
 single well-described gap to the full method — see
-[[`kv-cache-future-work.md`](docs/kv-cache-future-work.md)](docs/kv-cache-future-work.md).
+[`kv-cache-future-work.md`](docs/kv-cache-future-work.md).
 
 **4. Refactoring.**
 These patches were written one at a time, each to answer a specific question, and it
@@ -245,9 +264,12 @@ cd qwen3.6-vllm-gfx1201-launchers/kv-cache
 | [`docs/kv-cache-handover.md`](docs/kv-cache-handover.md) | the full state of play and the resume path |
 | [`docs/kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | **before writing anything** — the hard "never do X" list |
 | [`docs/kv-cache-references.md`](docs/kv-cache-references.md) | every PR, paper and experiment already reviewed, each with a ruling |
+| [`docs/kv-cache-historical.md`](docs/kv-cache-historical.md) | the experimental record — including the claims that were **retracted**, and why. Read it before re-running an experiment that looks obvious |
+| [`patches/README.md`](patches/README.md) | what the seven patches need in order to run, which two are fatal on failure, and the env gate on each |
 
 A prompt that works: *"Read kv-cache/README.md, then docs/kv-cache-handover.md and
-docs/kv-cache-known-issues.md. This is a proof of concept with known correctness errors,
+docs/kv-cache-known-issues.md, and skim docs/kv-cache-historical.md for what has already
+been tried and retracted. This is a proof of concept with known correctness errors,
 and the roadmap in the README is in the author's intended order. Start at stage 1: audit
 what cache metrics the existing patches already expose, and propose a reproducible harness
 that measures per-tier hit share and prefill avoided with a genuinely cold arm — read
@@ -258,8 +280,8 @@ throat-clearing — until the metrics harness exists, nothing you change afterwa
 shown to have helped. Three good first tasks, in increasing size:
 
 - **Small, self-contained:** normalise the patch gating variables so that unset always
-  means upstream behaviour, and document the apply order in code rather than in the
-  launcher.
+  means upstream behaviour, and move the apply order and its dependencies into code rather
+  than leaving them stated in `patches/README.md` and the launcher's comments.
 - **Medium, and the actual starting point:** the reproducible cache-metrics harness of
   stage 1 — with a *genuinely* cold arm. Read [`bench/`](bench/)'s README first; the
   content-vs-prefix-hash trap is documented there and it is what makes this non-trivial.
@@ -289,6 +311,7 @@ Read in this order. Every document is written to be actionable without opening t
 |---|---|
 | **[`kv-cache-handover.md`](docs/kv-cache-handover.md)** | **Read first.** The map, the current state, and the resume path. |
 | [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md) | **Preliminary results.** One small-sample run on a real mixed workload: 70% of prompt tokens served from cache. Includes §4, the figures in it that do not yet reconcile. |
+| [`kv-cache-historical.md`](docs/kv-cache-historical.md) | **The experimental record.** Every hypothesis, measurement, correction and retraction, in order — so you do not re-run a settled experiment or build on a withdrawn claim. |
 | [`kv-cache-operations.md`](docs/kv-cache-operations.md) | The runbook: turn the disk tier off, resize `/dev/shm`, resize the KV tier. Each with commands, verification and undo. |
 | [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the seven patches with gates and order, the two-layer GC, the serve invocation. |
 | [`kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | Every problem, gotcha and limitation as Symptom / Root cause / Impact / Status, by severity, plus the hard "never do X" list. |
@@ -329,7 +352,10 @@ the BetterBench pollution above.
   rate, with no error anywhere.
 - **The fs tier never deletes.** `tiering/fs/manager.py` has no capacity, quota or TTL
   parameter and exposes no eviction hook. **An external reaper is mandatory**
-  (`kvcache-reap.sh` + its systemd timer). Without it the filesystem fills.
+  (`kvcache-reap.sh` + its systemd timer). Without it the filesystem fills. **There is an
+  upstream fix for this and it applies at 100%** — PR #54327 adds bounded capacity and LRU
+  eviction to that exact file. Testing it is one of the first jobs on the list; if it holds,
+  the reaper becomes legacy.
 - **Never delete a young block.** The reaper's `MIN_AGE=90min` floor is a safety property:
   reaping an in-flight block kills EngineCore (see the limitations above).
 - **`O_DIRECT` in both directions.** Spare RAM cannot act as a read cache in front of the
@@ -337,20 +363,66 @@ the BetterBench pollution above.
 
 ---
 
-## Environment this was built and measured on
+## The development machine — and why it shaped every choice
 
-Everything here is single-machine, single-configuration.
+Everything here is single-machine, single-configuration, and the machine is a modest one.
+That is not an apology: **most of the design decisions in this repository are downstream of
+these constraints**, and they only make sense if you can see them.
 
 | | |
 |---|---|
-| GPU | AMD Radeon AI PRO R9700, gfx1201 / RDNA4, 32 GB, TP=1 |
+| Host CPU | Intel Core i5-7600 — **4 cores, 4 threads**, no SMT |
+| Host RAM | 64 GB DDR4-2400 (4 × 16 GB) |
+| Motherboard | ASUS P10S WS — **PCIe 3.0 x16** to the GPU |
+| GPU | AMD Radeon AI PRO R9700, gfx1201 / RDNA4, 32 GB, TP=1, **passed through to the guest** |
+| Guest | VM with **40 GiB RAM** (39.17 GiB usable) and the GPU on passthrough |
+| Cache filesystem | a zvol on a **TrueNAS raidz array of 4 × 4 TB drives**, presented to the guest as `virtio_blk` |
 | Model | Qwen3.8-27B MXFP4 weights + FP8 KV, 16 full-attention + 48 Gated-DeltaNet layers |
 | Serving | vLLM 0.27.1 + radiance 0.9.3 overlay, R4D attention, DFlash2 spec decoding |
-| Host | Hyper-V guest, 39.17 GiB RAM, 4C4T; cache device is a virtio_blk zvol |
 
-The host being a VM matters more than it looks: it is why there is no memory hotplug, why
-the cache device has no real PCIe identity, and why any host-limited property must never
-be sized from inside the guest.
+### What each constraint decided
+
+**Four cores, four threads.** The engine, the O_DIRECT reader threads, the reaper timer and
+the client all share four hardware threads with no SMT. This is why a **busy-wait** in the
+deferral loop is not a minor inefficiency here: ~1.9 ms per deferral × 10,000 deferrals is
+~19 seconds of spinning for 103 ms of actual disk I/O (see
+[`kv-cache-historical.md`](docs/kv-cache-historical.md) §3.3). On a 32-thread host the same
+loop would be cheaper and might never have been noticed — which is a reason to trust the
+finding, not to discount it.
+
+**40 GiB in the guest, and the tier is pinned.** The CPU tier is **pre-faulted and mlocked**,
+so it can never be swapped or reclaimed under pressure. Of 39.17 GiB, vLLM's own non-tier
+footprint — weights staging, Python heap, HIP host allocations, page cache — measures about
+**7 GiB and spikes during prefill**. That is the whole reason the operations runbook
+recommends a 28 GiB tier rather than the 30 GiB the arithmetic appears to allow: the
+headroom is not spare, it is working memory. There is no memory hotplug in this guest, so
+the ceiling cannot be raised at runtime.
+
+**PCIe 3.0 x16.** ~15.75 GB/s theoretical to the card. The measured CPU→GPU promotion copy
+of **11.8 GB/s** is therefore close to the bus limit and is *not* a software problem — do
+not go looking for one. It also means the RAM tier is about as fast as it can be here, which
+is why a RAM hit is effectively free against a 45 s recompute and why the RAM tier, not the
+disk tier, is the headline of the results.
+
+**A raidz array of spinning disks behind a zvol behind virtio_blk.** This is the single most
+consequential constraint in the repository. raidz gives you roughly one disk's worth of
+random-read IOPS regardless of width, and the storage path adds a zvol and a virtio layer on
+top. The measured result is **~117 MB/s**, against a **~101 MB/s** recompute break-even —
+a **1.16×** advantage, which is why the disk tier is real but thin, and why it contributes
+7% where the RAM tier contributes 11%. **An NVMe device is roughly 19× this**, and the disk
+tier's whole economic case changes on that hardware. If you have NVMe, the most interesting
+thing you can do with this repository is re-run the tier measurement and tell everyone what
+happened.
+
+**GPU passthrough into a VM.** The cache device has no real PCIe identity from the guest's
+point of view, so there is no peer to DMA with even in principle — one of the three
+independent reasons there is no disk→VRAM path here. It is also why **any host-limited
+property must never be sized from inside the guest**: the guest misreports the CPU model and
+the PCIe link speed, and believing it will send you down a false trail.
+
+**Nothing here has been reproduced on other hardware,** and every conclusion should be
+assumed hardware-specific until it is. Different hardware — more cores, more RAM, NVMe, a
+bare-metal host — is wanted, and would settle several of the open questions above outright.
 
 ---
 

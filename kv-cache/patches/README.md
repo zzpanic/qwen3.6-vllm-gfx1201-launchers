@@ -1,0 +1,105 @@
+# The seven house patches
+
+These are **not standalone scripts.** Read this before you try to run one.
+
+## What they are
+
+Anchored string surgery against an *installed* vLLM tree. Each one opens a file
+under `/opt/vllm/lib/python3.12/site-packages/vllm/...`, finds a literal anchor
+string, and replaces it. There is no `.patch` file, no `git apply`, no fuzz
+factor: if the anchor is not found byte-for-byte, the script raises.
+
+That makes them precise and makes them brittle in exactly the same way. They are
+written against **vLLM 0.27.1 + radiance 0.9.3**, the versions pinned by the
+image in `launcher/`. Against any other tree, expect them to fail loudly — which
+is the intended failure mode, not a bug.
+
+## They need `_patchlib`
+
+Every one of the seven begins:
+
+```python
+from _patchlib import apply
+```
+
+`_patchlib` is **not in this repository.** It comes from the ggz14 /
+`radiance-vllm-mxfp4` repo, which the launcher bind-mounts at `/patches`. That is
+why every invocation in `launcher/serve-mxfp4-kvcache-base.sh` looks like:
+
+```
+PYTHONPATH=/patches python3 /house/patch_offload_mixed_hit.py
+```
+
+`PYTHONPATH=/patches` is what makes the import resolve — Python puts the
+*script's* directory on `sys.path[0]`, not the working directory, and these
+scripts live in `/house`.
+
+If you want to run one outside the launcher you need three things: the target
+tree on disk, `_patchlib` importable, and `SP` pointing at the site-packages
+root the script expects. The launcher does all three for you; nothing else does.
+
+## Apply order is a dependency
+
+See `APPLY-ORDER.txt`. Two pairs are genuinely ordered:
+
+- `serve_ready_prefix` (4) anchors on lines that `lookup_outcomes` (3) inserts.
+- `mamba_stride` (6) requires `eagle_groups` (5): while every group is flagged as
+  an EAGLE/MTP draft group, `storable_chunks()` drops each group's trailing chunk
+  during decode and the store grid stops lining up with the hit window.
+
+`fs_fanout` (7) is order-independent — it is the only one that touches
+`v1/kv_offload/tiering/fs/manager.py`.
+
+## Two of them are fatal; five only warn
+
+The container block runs under `set -e`. Patches 1 and 2 have **no `|| echo`
+fallback**, so a failure there is a hard boot failure, not a warning:
+
+| # | Patch | On failure |
+|---|---|---|
+| 1 | `patch_offload_mixed_hit.py` | **FATAL** — engine does not boot |
+| 2 | `patch_kv_offload_instrumentation.py` | **FATAL** — engine does not boot |
+| 3 | `patch_kv_offload_lookup_outcomes.py` | warns; Phase A metrics absent |
+| 4 | `patch_kv_offload_serve_ready_prefix.py` | warns; upstream deferral behaviour, whatever the env var says |
+| 5 | `patch_kv_offload_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
+| 6 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
+| 7 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
+
+That split is deliberate. 1 and 2 are load-bearing — without the mixed-hit fix
+the engine asserts and dies on a mixed local+external prefix hit, and without the
+instrumentation an allocation failure is unattributable. The other five degrade
+to defined, previously-shipped behaviour.
+
+Note what the warnings mean in practice: **a patch that fails silently leaves the
+environment variables lying.** `RADIANCE_OFFLOAD_PENDING_IS_MISS=0` with patch 4
+unapplied reads as "pending-is-miss disabled" while the code has never heard of
+the flag. If you are A/B-ing, check the metric series exists before you believe a
+result — `bench/phaseb-read.sh` does exactly that.
+
+## Every behaviour change is gated
+
+No patch changes behaviour unconditionally. The gates:
+
+| Patch | Environment variable(s) |
+|---|---|
+| `offload_mixed_hit` | `RADIANCE_OFFLOAD_MIXED_HIT`, `RADIANCE_ALLOW_MIXED_HIT`, `RADIANCE_ASSERT_DUMPED` |
+| `serve_ready_prefix` | `RADIANCE_OFFLOAD_PENDING_IS_MISS`, `RADIANCE_PENDING_IS_MISS` |
+| `eagle_groups` | `RADIANCE_OFFLOAD_EAGLE_GROUPS` |
+| `mamba_stride` | `RADIANCE_MAMBA_STORE_STRIDE`, `RADIANCE_MAMBA_STRIDE`, `RADIANCE_ASSERT_DUMPED` |
+| `fs_fanout` | `RADIANCE_FS_FANOUT_MAX`, `RADIANCE_FS_FANOUT_TARGET_MB` |
+| `instrumentation`, `lookup_outcomes` | none — metrics only, no behaviour change |
+
+Patching is therefore reversible without rebuilding: unset the gate and you get
+upstream behaviour with the patch still in place.
+
+## Before you use any of these
+
+Check each against current vLLM/radiance HEAD and delete it in favour of the
+upstream implementation wherever one now exists. Two already measure as directly
+applicable to this tree — PR #54327 (`tiering/fs/manager.py`, 100%) would retire
+the external reaper entirely, and PR #54743 supplies the filtered-group primitive
+patch 5 reinvents by hand. See `../docs/kv-cache-references.md` §3a for the
+measured per-file applicability, and `../README.md` stage 2 for where this sits
+on the roadmap.
+
+A house patch that duplicates merged upstream work is a liability, not an asset.
