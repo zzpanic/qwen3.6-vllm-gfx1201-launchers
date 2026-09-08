@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic reap of the vLLM fs KV secondary tier
+Documentation=file://$HOME/vllm-kv-cache-offload-reuse.md
+
+[Timer]
+# The tier writes ~45 MB/s worst case, so 512 GB of headroom is hours, not
+# minutes -- but a 5-minute cadence keeps each reap small and its I/O idle-class
+# rather than one large stall.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

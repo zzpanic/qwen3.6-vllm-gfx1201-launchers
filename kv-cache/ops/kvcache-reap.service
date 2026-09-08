@@ -1,0 +1,10 @@
+[Unit]
+Description=Reap oldest blocks from the vLLM fs KV secondary tier
+Documentation=file://$HOME/vllm-kv-cache-offload-reuse.md
+ConditionPathIsDirectory=/kvcache/blocks
+
+[Service]
+Type=oneshot
+ExecStart=<repo>/kvcache-reap.sh
+Nice=10
+IOSchedulingClass=idle
