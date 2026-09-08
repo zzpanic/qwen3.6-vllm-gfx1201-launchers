@@ -79,10 +79,21 @@ endpoint.
   "cold (nonce)" varies only block 0 — so the body self-caches. The only defensible
   quantitative claim is the one below.
 
-### The one honest number
+### The numbers that can be stated
 
-The tier **earned its keep**: approximately **2.45M tokens served from the RAM and disk
+Two, and both come with their limits attached.
+
+**The tier earned its keep.** Approximately **2.45M tokens served from the RAM and disk
 tiers**, ≈ **26 minutes of prefill avoided** at the honest cold rate (~1,555 tok/s).
+
+**A preliminary end-to-end run** on a real mixed workload — an agentic coding session plus
+concurrent chat — served **70% of prompt tokens from cache** (52% GPU + 11% RAM + 7%
+disk), leaving 30% to recompute. **This is one small-sample run and is labelled as such**;
+see [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md), whose §4 lists the figures in it that do not yet
+reconcile with each other. The encouraging part is not the headline but a coincidence:
+its disk-tier speedup (45 s → 38 s, 1.18×) lands on the same number the component
+measurement reached by a completely different route (117 MB/s against a 101 MB/s
+break-even, 1.16×).
 
 Everything else is either a component measurement (documented with its method) or
 invalid (documented as invalid).
@@ -130,6 +141,7 @@ Read in this order. Every document is written to be actionable without opening t
 | Document | What it holds |
 |---|---|
 | **[`kv-cache-handover.md`](docs/kv-cache-handover.md)** | **Read first.** The map, the current state, and the resume path. |
+| [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md) | **Preliminary results.** One small-sample run on a real mixed workload: 70% of prompt tokens served from cache. Includes §4, the figures in it that do not yet reconcile. |
 | [`kv-cache-operations.md`](docs/kv-cache-operations.md) | The runbook: turn the disk tier off, resize `/dev/shm`, resize the KV tier. Each with commands, verification and undo. |
 | [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the seven patches with gates and order, the two-layer GC, the serve invocation. |
 | [`kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | Every problem, gotcha and limitation as Symptom / Root cause / Impact / Status, by severity, plus the hard "never do X" list. |
