@@ -9,25 +9,31 @@
 #     |                             is ours, and none of it is forked here.
 #     v
 #   startup-qwen3.8-27b-mxfp4.sh    ../startup-qwen3.8-27b-mxfp4.sh, in this repo.
-#     |                             The published MXFP4 launcher: same model, same
-#     |                             card, NO KV offload. Every knob in it carries the
-#     |                             measurement that chose it. If you want to serve
-#     |                             Qwen3.8-27B and are not working on the cache,
-#     |                             THAT is the file you want, not this one.
+#     |                             The working MXFP4 build: same model, same card,
+#     |                             NO KV offload, and every knob carrying the
+#     |                             measurement that chose it. GET THIS SERVING
+#     |                             FIRST. If it does not serve, nothing in
+#     |                             kv-cache/ will either.
 #     v
 #   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
-#                                   with the three-tier KV offload added: the GPU ->
-#                                   /dev/shm -> /kvcache staging, the seven house
-#                                   patches in ../patches/, and the RADIANCE_* gates
-#                                   that turn each of them on and off.
+#                                   plus the offload delta: the GPU -> /dev/shm ->
+#                                   /kvcache staging, the seven house patches in
+#                                   ../patches/, and the RADIANCE_* gates on them.
 #
-# The two repo launchers are deliberately near-duplicates rather than one file with a
-# flag: the cache work is a PROOF OF CONCEPT with known correctness errors (see
-# ../README.md), and it must not be possible to reach it by accident from the
-# production path. When the roadmap's stage 4 (refactoring) lands, they should merge.
+# The tuning defaults below are NOT maintained here. They are copied across from
+# startup-qwen3.8-27b-mxfp4.sh when the release is assembled, so the two engines
+# cannot drift -- and so that what you measure with the cache on is the same engine
+# you measured with it off. If you have tuned the MXFP4 launcher for your own
+# hardware, carry the same values over.
+#
+# The delta is seven items and nothing else: HOUSE resolution; the KVOFF_* knob
+# block; the /dev/shm fit check and RAM clamp; the fs-tier --kv-transfer-config
+# builder; the extra container mounts and RADIANCE_* env; the seven /house patch
+# lines in the prelude; and --kv-transfer-config on the serve line. See
+# ./README.md for the table.
 #
 # Keeping this in sync: re-copy from the upstream serve-mxfp4.sh when ggz14's repo
-# updates, then re-apply the six llama-swap edits listed below and the offload block.
+# updates, then re-apply the six llama-swap edits listed below and the offload delta.
 #
 # House copy (2026-09-05) of ggz14's serve-mxfp4.sh, repo at
 # kv-cache/../radiance-vllm-mxfp4 (codeberg.org/ggz14/radiance-vllm-mxfp4, v0.11.0,
@@ -283,7 +289,10 @@ IMAGE=${IMAGE:-stilldeadcode/vllm-radiance:0.9.3}
 NAME=${NAME:-qwen38-27b-ggz14}
 SERVED=${SERVED:-qwen3.8-27b-ggz14}
 PORT=${PORT:-8080}
-CHUNK=${CHUNK:-8192}
+HSA_ENABLE_MWAITX=${HSA_ENABLE_MWAITX:-1}
+GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
+MAXSEQS=${MAXSEQS:-2}
+CHUNK=${CHUNK:-2048}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -379,15 +388,15 @@ CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-093$CACHE_SUF}
 # profile run's peak. The int4 checkpoint was capped to 4194304 that day; this one never was.
 # NO LMONLY KNOB HERE, DELIBERATELY. pat wants the vision tower loaded (2026-09-05) and it is
 # only 0.858 GiB of the 18.04 GiB checkpoint. These knobs are how it stays loaded SAFELY.
-MAXPIX=${MAXPIX:-}          # empty = leave processor_config.json alone. Non-empty = cap images
+MAXPIX=${MAXPIX:-4194304}          # empty = leave processor_config.json alone. Non-empty = cap images
                             # at this many PIXELS via the idempotent repair further down.
                             # Visual tokens = pixels/1024 (16px patch x 2x2 merge), so
                             # 4194304 = 4096 tokens, the int4 entry's value.
-MMIMGMAX=${MMIMGMAX:-}      # empty = pass no --limit-mm-per-prompt. Non-empty = max images per
+MMIMGMAX=${MMIMGMAX:-2}      # empty = pass no --limit-mm-per-prompt. Non-empty = max images per
                             # request (vLLM 400s above it). The ViT activation spike scales
                             # with the NUMBER of images in one request, not just their pixels,
                             # so this is the second line of defence after MAXPIX.
-MMVIDMAX=${MMVIDMAX:-}      # empty = image key only. Set to 0 on vLLM >= 0.27.1: profile_run()
+MMVIDMAX=${MMVIDMAX:-0}      # empty = image key only. Set to 0 on vLLM >= 0.27.1: profile_run()
                             # picks the modality with the most tokens for its dummy encoder run
                             # and this checkpoint's video longest_edge is 25165824 against the
                             # image's 16777216. Capping video out keeps the profile on images.
@@ -423,9 +432,9 @@ if [ -n "${HSA_ENABLE_INTERRUPT:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_INTERRUPT=
 # memory AFTER its own HIP context and torch init exist, so it sees 31980 MiB. 0.99 asks for
 # 31.54 GiB and fails at startup. 0.98 gives 857,399 KV tokens against 840,019 at 0.97 and
 # survives a full 260k-prefill sweep with no OOM.
-GPU_UTIL=${GPU_UTIL:-0.98}
+GPU_UTIL=${GPU_UTIL:-0.97}
 # KV cache size. Resolved further down, once the batch shape it depends on is known.
-KV_MEM=${KV_MEM:-auto}
+KV_MEM=${KV_MEM:-9300000000}
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
 #             speculative position, so RADIANCE_DYNAMIC_DRAFT can stop the loop early.
@@ -510,7 +519,7 @@ if [ "$SPEC_METHOD" = dflash ]; then RADIANCE_DRAFT_RERANK=${RADIANCE_DRAFT_RERA
 if [ "$SPEC_METHOD" = dflash ]; then RADIANCE_VERIFY_HEAD=${RADIANCE_VERIFY_HEAD:-1}; fi
 # Context length. Only lower it for diagnostics -- the FLA GDN fallback allocates against this,
 # not against the chunk size, and OOMs at 262144.
-MAXLEN=${MAXLEN:-262144}
+MAXLEN=${MAXLEN:-204800}
 # Chat template. It is mounted into the container by path, so it must exist ON THE HOST: this was
 # hardcoded to a file under ~/.cache/huggingface that only ever existed on the box it was written
 # on, which made a fresh clone fail at startup with a missing-file error from vllm rather than
@@ -1065,7 +1074,7 @@ fi
 # stays for capture experiments; the default stays stock. SPEC=8 + dynamic width was measured in
 # the same session: single-stream 184.9 (even), conc-8 405-427 vs 444-461 (LOSES -- cold-start
 # batches run full width into the M=72>64 kernel cliff before the EMAs settle). 7 stays.
-CAPTURE_SIZES=${CAPTURE_SIZES:-none}
+CAPTURE_SIZES=${CAPTURE_SIZES:-[1,2,4,8,16]}
 # Compilation-config entries accumulate into ONE flag: two --compilation-config instances would
 # not merge (argparse keeps the last).
 CC_ITEMS=""
@@ -1373,7 +1382,7 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # The edge is temperature-dependent (a flatter target makes p_target(argmax) fall faster
   # than sum(min(p,q))), so it is LARGER at our temperature 1.0 than at the 0.7 served until
   # 2026-09-05. Full write-up: bench-history/draft-sample-isolation-20260905/notes.md.
-  DRAFT_SAMPLE=${DRAFT_SAMPLE:-greedy}
+DRAFT_SAMPLE=${DRAFT_SAMPLE:-probabilistic}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
 else
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$ATTN\",\"disable_padded_drafter_batch\":$UNPAD}"

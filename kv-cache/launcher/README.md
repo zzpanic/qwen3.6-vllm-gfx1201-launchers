@@ -7,26 +7,47 @@ inline, and then execs a base launcher that actually serves the model.
 
 `serve-mxfp4-kvcache-base.sh` in this directory is that base launcher.
 
-## Why there are two base launchers in this repository
+## Start from the MXFP4 build that already works
 
-**This is the first thing to reconcile, and it is deliberate that you can see it.**
+**If you have `startup-qwen3.8-27b-mxfp4.sh` serving, that is the structure to
+build on — and this launcher already is it.**
 
-The repository root already ships `startup-qwen3.8-27b-mxfp4.sh`. That script is
-an **earlier generation**: it has the CPU offload tier only. It has no disk tier,
-none of the seven house patches, and none of the eviction-policy, stride,
-eagle-group or pending-is-miss knobs the KV-cache work depends on. Point the
-wrapper at it and the wrapper's environment is silently ignored — you get a CPU
-tier and nothing else, with no error to tell you so.
+The repository root ships `startup-qwen3.8-27b-mxfp4.sh`: the plain MXFP4 entry,
+no disk tier, none of the seven house patches, and every knob in it carrying the
+measurement that chose it. Get that serving first. It is the shorter path to a
+working engine, and if it does not serve, nothing in `kv-cache/` will either.
 
-`serve-mxfp4-kvcache-base.sh` is the later house copy that carries the full
-machinery. The wrapper defaults to it for that reason, and only for that reason.
+`serve-mxfp4-kvcache-base.sh` in this directory is **that same launcher plus a
+named delta**. Its tuning defaults are not hand-maintained here — they are copied
+across from `startup-qwen3.8-27b-mxfp4.sh` when the release is assembled, so the
+two cannot drift. If you have tuned the MXFP4 launcher for your own hardware,
+carry the same values over; they are the values everything in this repository was
+measured on.
 
-The two scripts are otherwise substantially the same file and **should be merged**
-— shipping both is a wart, not a design. Doing that merge is **stage 4
-(refactoring)** of the roadmap in the top-level README, and it is deliberately not
-earlier: until the metrics harness of stage 1 exists, a merge cannot be shown to
-have preserved behaviour. It is left visible rather than papered over because a
-silent version skew here is exactly the kind of thing that costs someone a day.
+The delta, in full — this is the entire difference between a working MXFP4
+instance and the cache work:
+
+| # | Addition | Where |
+|---|---|---|
+| 1 | `HOUSE` resolution + existence check | beside `REPO` |
+| 2 | the `KVOFF_DISK*` / `KVOFF_*` knob block | with the other knobs |
+| 3 | `/dev/shm` fit check and the RAM clamp for an explicit tier size | the offload sizing block |
+| 4 | the fs-tier `--kv-transfer-config` JSON builder | after the sizing block |
+| 5 | `-v $KVOFF_DISK`, `-v $HOUSE`, `PYTHONHASHSEED`, six `RADIANCE_*` gates | the container invocation |
+| 6 | seven `PYTHONPATH=/patches python3 /house/patch_*.py` lines | the patch prelude |
+| 7 | `${KVOFF_TIER_ARG:+--kv-transfer-config ...}` | the `vllm serve` arguments |
+
+Nothing else differs. If you want to add the cache to a launcher of your own,
+those seven items are the whole job.
+
+## Why they are still two files
+
+Shipping both is a wart, not a design, and they should be merged. That merge is
+**stage 4 (refactoring)** of the roadmap in the top-level README, and deliberately
+not earlier: until the stage-1 metrics harness exists, a merge cannot be shown to
+have preserved behaviour. Until then the split has one virtue — the cache work is
+a PROOF OF CONCEPT with known correctness errors, and it should not be reachable
+by accident from the production path.
 
 ## Where both of them come from
 
@@ -35,8 +56,7 @@ Neither script is a fork of anyone's kernels. Both descend from **ggz14's
 `stilldeadcode/vllm-radiance:0.9.3`), which owns the MXFP4 GEMM, the R4D attention
 path and the DFlash2 drafter integration. What this repository contributes is the
 *arrangement* — which knobs, at which values, on this card — and, in the KV-cache
-case, the offload tiers and the seven patches in `../patches/`. The lineage is
-restated at the top of `serve-mxfp4-kvcache-base.sh` itself.
+case, the offload tiers and the seven patches in `../patches/`.
 
 ## Porting to another machine
 

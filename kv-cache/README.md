@@ -275,7 +275,16 @@ what cache metrics the existing patches already expose, and propose a reproducib
 that measures per-tier hit share and prefill avoided with a genuinely cold arm — read
 bench/README.md first for why 'cold' is the hard part. Do not write code in this pass."*
 
-**3. Pick a stage from [Future work](#future-work).** Stage 1 is not optional
+**3. Get the plain MXFP4 build serving first.** `startup-qwen3.8-27b-mxfp4.sh` at
+the repository root is the same model on the same card with **no cache work at all**,
+and every knob in it carries the measurement that chose it. It is the shorter path to
+a working engine, and if it does not serve, nothing here will either. The cache
+launcher is that same structure plus a seven-item delta — and its tuning defaults are
+copied from it when the release is built, so the two cannot drift. Base your own work
+on that structure: `kv-cache/launcher/README.md` lists the delta in full, and it is
+the whole job if you want to add the cache to a launcher of your own.
+
+**4. Pick a stage from [Future work](#future-work).** Stage 1 is not optional
 throat-clearing — until the metrics harness exists, nothing you change afterwards can be
 shown to have helped. Three good first tasks, in increasing size:
 
@@ -288,12 +297,12 @@ shown to have helped. Three good first tasks, in increasing size:
 - **Large, the real prize:** the exactness fix inside stage 3. It is designed and unbuilt,
   and it is the difference between "approximate" and "correct".
 
-**4. Run it.** [`docs/kv-cache-operations.md`](docs/kv-cache-operations.md) is the runbook
+**5. Run it.** [`docs/kv-cache-operations.md`](docs/kv-cache-operations.md) is the runbook
 — turning the disk tier off, resizing `/dev/shm`, resizing the KV tier, each with commands,
 verification and undo. Read [Hard requirements](#hard-requirements--not-advisory) first;
 two of them fail *silently* if ignored.
 
-**5. Measure it.** [`bench/`](bench/) ships the harnesses but **no result files**,
+**6. Measure it.** [`bench/`](bench/) ships the harnesses but **no result files**,
 deliberately — single-machine numbers, some of them known polluted. Its README documents
 the content-vs-prefix-hash trap that invalidated an earlier round of measurement, which is
 the mistake most likely to waste your first day.
