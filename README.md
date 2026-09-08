@@ -297,7 +297,14 @@ below is the part that stays here: it is about choosing between them.
 `startup-qwen3.8-27b-kvcache.sh` and the [`kv-cache/`](kv-cache/) directory are a
 **three-tier KV-cache offload** for this stack: GPU prefix cache → a pinned RAM tier in
 `/dev/shm` → a disk tier on a dedicated filesystem. On the box it was built on, the RAM
-and disk tiers served roughly **2.45M tokens**, about **26 minutes of prefill avoided**.
+and disk tiers served roughly **2.45M tokens**, about **26 minutes of prefill avoided**;
+a preliminary end-to-end run served **70% of prompt tokens from cache**.
+
+**Why it exists:** on one card, concurrency is not for sale. Two decode streams here
+produce the same total throughput as one, and a concurrent prefill taxes the other stream
+~29%, so the second slot is a *convenience* slot for short requests only. That leaves
+exactly one lever for running agents on a single card — not recomputing the prefix an
+agentic tool re-sends every turn.
 
 **It is a proof of concept and is labelled as one throughout.** It works, it is measured,
 and it has known correctness errors — the recurrent-state store is approximate by design,
@@ -308,9 +315,9 @@ roadmap out of that state, in [kv-cache/README.md](kv-cache/README.md). Read tha
 It is published at this maturity deliberately. Several people want the capability; the
 author has neither the time nor the specialist expertise to finish it alone, and a
 working starting point that says exactly where it is broken is more useful than nothing.
-**Contributions to any of the five roadmap stages are the reason it is here** — the first
-of which is reconciling the house patches against current upstream and deleting the ones
-upstream has since implemented.
+**Contributions to any of the six roadmap stages are the reason it is here** — the first
+of which is tidying the benchmark hooks into a reproducible cache-metrics harness, because
+nothing after it can be shown to have helped without it.
 
 The directory is self-contained: documentation, the seven patches with their apply order,
 the mandatory garbage collector and its systemd units, the mount snippets, and the

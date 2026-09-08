@@ -4,103 +4,67 @@
 weights, FP8 KV) served by vLLM 0.27.1 / radiance 0.9.3 on one AMD Radeon AI PRO R9700
 (gfx1201, 32 GB, TP=1).**
 
+In one sentence: on a single 32 GB card serving a 204,800-token context, **the cheapest
+prefill is the one you do not do**, and this is a working — if unfinished — implementation
+of not doing it.
+
+---
+
+## Synopsis: the problem this exists to solve
+
+One card. One model hot at a time. A 204,800-token context window, and **two concurrency
+slots**, which sounds like room for two workers and is not.
+
+**The convenience-slot rule.** Measured on this box, the second stream is not free — and
+not in the way people expect. Two decode streams produce the *same total* throughput as
+one (aggregate 48.9 tok/s at one running request, 49.4 tok/s at two): continuous batching
+buys nothing here, because DFlash2 speculative decoding at K=7 already makes a single
+stream eight rows wide per step, so the batching headroom is spent before a second client
+arrives. Worse, a *concurrent prefill* costs the decoding stream about **29%**, and the
+scheduler's chunk budget is only ~2,036 tokens, so one 65k prefill is ~32 chunks and 50–120
+seconds of taxed decode for whoever else is on the card. In one observed window there were
+38 preemptions across 83 requests and the prefix-cache hit rate fell from 88.6% to 65.1%.
+
+So the standing policy here is: **agents issue one request at a time; the second slot is
+for short convenience requests only** — a chat message, a quick lookup — never a second
+long context. The criterion is *context length*, not "human vs agent". `max_num_seqs: 2`
+is correct for that policy: 1 kills the convenience slot, 3+ invites preemption.
+
+**Which is exactly why the cache tier matters.** If you cannot buy concurrency, the only
+remaining lever for multi-agent work on one card is **not recomputing what you already
+computed**. Agentic coding tools are the ideal case and the worst case at once: every turn
+re-sends a prefix that is almost entirely identical to the last one, tens of thousands of
+tokens of it, and a 100k-token cold prefill costs ~45 s of wall clock during which the
+card belongs to nobody else. Serve that prefix from a cache and the turn starts
+immediately, the convenience slot stays usable, and two agents can share one card serially
+without either of them paying for the other's prefill.
+
+That is the whole design intent: **trade RAM and cheap disk for prefill time, so that a
+single card behaves like it has more of the one resource it cannot buy.**
+
 ---
 
 ## ⚠️ Status: PROOF OF CONCEPT
 
-Read this section before you read anything else, and before you quote any number
-from this repository.
+Read this before you quote any number from this repository.
 
-This is a **proof of concept**. It demonstrates that a three-tier KV-cache offload can
-be made to work on a GDN hybrid model on a single consumer AMD card, and it is measured
-doing so. **That is the whole of the claim.** It is not production code, it is not a
-research-grade reproduction, and it has **known correctness errors in the
-implementation**.
+This is a **proof of concept**. It demonstrates that a three-tier KV-cache offload can be
+made to work on a GDN hybrid model on a single consumer AMD card, and it is measured doing
+so. **That is the whole of the claim.** It is not production code, it is not a
+research-grade reproduction, and it has **known correctness errors in the implementation**
+— the largest of which is documented below and is approximate *by design*.
 
 It is published at this maturity **deliberately**. Several people want this capability;
 the author has neither the time nor the specialist expertise to carry it to completion
 alone, and a working-but-flawed starting point that says exactly where it is flawed is
 more useful to those people than nothing. **It is a starting point, not a product.**
-
-### What this needs before it is anything more than a proof of concept
-
-In order — each stage's output is the next stage's input.
-
-**1. Upstream reconciliation — first, and before any code is written.**
-Several of the seven house patches were written against a gap that may since have been
-closed upstream, and at least one has a known upstream counterpart already (the
-eagle-groups fix is PR #55390; the fs fanout was ported from PR #49225). Every patch
-here must be checked against current vLLM/radiance HEAD and **deleted in favour of the
-upstream implementation wherever one exists**. *Avoid reimplementation* — a house patch
-that duplicates merged upstream work is a liability, not an asset: one more thing to
-rebase, and it will silently diverge. Score upstream work by **applicability, not by
-merge status**; an unmerged PR that fits is worth more than a merged one that does not.
-
-**2. Refactoring.**
-These patches were written one at a time, each to answer a specific question, and it
-shows. They monkey-patch by string surgery. They carry an implicit dependency **order**
-documented only in the launcher. Their gating environment variables are inconsistent in
-naming and in whether `0` or `1` means "upstream behaviour". This wants to be a single
-coherent module with an explicit interface, not seven scripts in a trench coat.
-
-**3. Optimisation.**
-Nothing here has been tuned; it has only been made to work. The known ceilings are
-measured and documented — the fs tier serves at **~117 MB/s against a ~101 MB/s
-recompute break-even** (1.16×, i.e. barely worth doing); the promotion path is strictly
-staged through the CPU tier, so disk and RAM contend for the same region; there is no
-DMA path from disk to VRAM on this hardware. **Which of those are real limits and which
-are merely untuned is, in most cases, not yet established.**
-
-**4. The exactness fix.**
-The one designed-but-unbuilt piece: replaying the ≤ one-block gap from the stride
-checkpoint, which turns the mamba stride from an approximation into an exact
-reconstruction. This is the single well-described gap to the full method. See
-[`kv-cache-future-work.md`](docs/kv-cache-future-work.md).
-
-**5. Normal software engineering.**
-Code review, tests, CI, packaging, a real release. **None of it has happened.** There is
-no test suite; correctness has been established by hand, per change, against a live
-endpoint.
-
-### The three limitations that matter most
-
-- **The mamba stride (N=8) is approximate by design.** The store keeps only every Nth
-  chunk's recurrent state, and a lookup rounds **down** to the nearest kept boundary, so
-  the served state can be up to 8 chunks stale. It is a good approximation because the
-  Gated-DeltaNet gate gives the state finite effective memory — recent tokens dominate —
-  but it *is* an approximation, and it measurably raises the needle-in-a-haystack failure
-  rate. The exact fix is stage 4 above.
-- **A failed offload load kills EngineCore.** `assert transfer_result.success`, and
-  `OffloadingConnector` exposes no `get_block_ids_with_load_errors()`, so
-  `kv_load_failure_policy=recompute` is inert here. This is why the reaper's `MIN_AGE`
-  floor is a hard safety property and not a tuning knob.
-- **The BetterBench numbers for this stack are polluted and must never be cited.** vLLM
-  matches the prefix cache by block **content**, not by chained prefix, and BetterBench's
-  "cold (nonce)" varies only block 0 — so the body self-caches. The only defensible
-  quantitative claim is the one below.
-
-### The numbers that can be stated
-
-Two, and both come with their limits attached.
-
-**The tier earned its keep.** Approximately **2.45M tokens served from the RAM and disk
-tiers**, ≈ **26 minutes of prefill avoided** at the honest cold rate (~1,555 tok/s).
-
-**A preliminary end-to-end run** on a real mixed workload — an agentic coding session plus
-concurrent chat — served **70% of prompt tokens from cache** (52% GPU + 11% RAM + 7%
-disk), leaving 30% to recompute. **This is one small-sample run and is labelled as such**;
-see [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md), whose §4 lists the figures in it that do not yet
-reconcile with each other. The encouraging part is not the headline but a coincidence:
-its disk-tier speedup (45 s → 38 s, 1.18×) lands on the same number the component
-measurement reached by a completely different route (117 MB/s against a 101 MB/s
-break-even, 1.16×).
-
-Everything else is either a component measurement (documented with its method) or
-invalid (documented as invalid).
+[Future work](#future-work) is the ordered list of what it would take to make it real, and
+[Point your own coding agent at this](#point-your-own-coding-agent-at-this) is how to
+start.
 
 ---
 
-## What it actually does
+## Overview: what it actually does
 
 Three tiers, each a fallback for the one above:
 
@@ -114,23 +78,206 @@ Wired through `--kv-transfer-config` (`TieringOffloadingSpec` / `OffloadingConne
 
 **The architecture is strictly staged and this is the single most important thing to
 understand about it.** From `tiering/manager.py`: *"Primary tier is the gateway —
-secondary tiers cannot access GPU memory directly; all data flows through the CPU
-primary tier"* and *"blocks in secondary tiers must be promoted to the primary tier
-before GPU can access them"*. Consequences:
+secondary tiers cannot access GPU memory directly; all data flows through the CPU primary
+tier"* and *"blocks in secondary tiers must be promoted to the primary tier before GPU can
+access them"*. Consequences:
 
 - The disk tier **cannot** serve the GPU on its own. Turn off the CPU tier and the disk
   tier turns off with it.
 - Disk and RAM **contend for the same region**. `lookup()` returns MISS not only when a
   block is absent but also when *"primary is full and cannot accept a promotion"*.
 - There is **no DMA path** disk → VRAM. Foreclosed three ways here: no cuFile/GPUDirect/
-  DMA-BUF anywhere in the vLLM tree; the cache device is virtio_blk inside a VM, so
-  there is no real PCIe endpoint to peer with; and GPUDirect Storage is NVIDIA/cuFile
-  and does not exist for gfx1201.
+  DMA-BUF anywhere in the vLLM tree; the cache device is virtio_blk inside a VM, so there
+  is no real PCIe endpoint to peer with; and GPUDirect Storage is NVIDIA/cuFile and does
+  not exist for gfx1201.
 
 **Storage density is at the architectural floor.** 33,808 bytes/token measured, and
 attention arithmetic alone accounts for 103% of it (16 full-attention layers × 2,048
-B/token/layer, plus one MTP layer). FP8 is already one byte; GQA is already 6:1; the
-Mamba layers are already stored 1-in-8. There is no density work left to do here.
+B/token/layer, plus one MTP layer). FP8 is already one byte; GQA is already 6:1; the Mamba
+layers are already stored 1-in-8. There is no density work left to do here — a fact worth
+knowing before anyone spends a week on compression.
+
+Seven house patches make it work; they are in [`patches/`](patches/) with their apply
+order, and [[`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md)](docs/kv-cache-current-implementation.md)
+explains what each one does and which environment variable gates it.
+
+---
+
+## The benchmark
+
+Two numbers can be stated, and both come with their limits attached.
+
+**The tier earned its keep.** Approximately **2.45M tokens served from the RAM and disk
+tiers**, ≈ **26 minutes of prefill avoided** at the honest cold rate (~1,555 tok/s).
+
+**A preliminary end-to-end run** on a real mixed workload — an `opencode` session doing
+code review and testing, with concurrent chat — measured per-tier hit shares of the prompt
+tokens:
+
+| Tier | Size (GiB) | Hit ratio | Fetch latency | vs 45 s cold recompute |
+|---|---|---|---|---|
+| GPU VRAM | 9.3 | 52% | 0 (local) | — |
+| CPU RAM | 24 | 11% | 1–2 s | ~95% faster |
+| Filesystem | 215 / 511 | 7% | 38 s | 15% faster |
+| Recompute | — | 30% | 45 s | baseline |
+
+**70% of prompt tokens served from cache.** The headline is the **11% from RAM**, not the
+7% from disk: a RAM hit is essentially free against a 45 s recompute, while a disk hit
+saves only 15%.
+
+> **This is one small-sample run and is labelled as such.** One machine, one workload, one
+> pass, by the author, nothing held out or reproduced.
+> [[`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md)](docs/kv-cache-results-preliminary.md) carries it in
+> full — including **§4, the figures in it that do not yet reconcile** with each other or
+> with the measured storage density. They are flagged there rather than quietly corrected.
+
+The encouraging part is not the headline but a coincidence. The disk tier's speedup here
+(45 s → 38 s, **1.18×**) lands on the same number the component measurement reached by a
+completely different route: the fs tier reads at ~117 MB/s against a ~101 MB/s recompute
+break-even, **1.16×**. Different workload, different instrument, same answer, and nothing
+was tuned to produce it.
+
+**What must never be cited.** The BetterBench numbers for this stack are polluted. vLLM
+matches the prefix cache by block **content**, not by chained prefix, and BetterBench's
+"cold (nonce)" run varies only block 0 — so the body of the prompt self-caches and the
+"cold" arm is not cold. Everything else in these documents is either a component
+measurement (documented with its method) or invalid (documented as invalid).
+
+---
+
+## Future work
+
+The three limitations that matter most, then the order of work.
+
+- **The mamba stride (N=8) is approximate by design.** The store keeps only every Nth
+  chunk's recurrent state, and a lookup rounds **down** to the nearest kept boundary, so
+  the served state can be up to 8 chunks stale. It is a good approximation because the
+  Gated-DeltaNet gate gives the state finite effective memory — recent tokens dominate —
+  but it *is* an approximation, and it measurably raises the needle-in-a-haystack failure
+  rate.
+- **A failed offload load kills EngineCore.** `assert transfer_result.success`, and
+  `OffloadingConnector` exposes no `get_block_ids_with_load_errors()`, so
+  `kv_load_failure_policy=recompute` is inert here. This is why the reaper's `MIN_AGE`
+  floor is a hard safety property and not a tuning knob.
+- **The disk tier is barely worth doing on this hardware.** 1.16× over recompute. Whether
+  that is the device or the implementation is not yet established.
+
+### The roadmap — in the author's intended order
+
+Each stage's output is the next stage's input, and **the order is deliberate**: nothing
+after stage 1 can be judged without stage 1, and the accuracy work comes before the speed
+work because it is pointless to optimise a path that is still returning approximate state.
+
+**1. Benchmark hooks, metrics, and a reproducible harness. First.**
+Tidy up the instrumentation that already exists (the lookup-outcome and instrumentation
+patches) into a coherent metrics surface, and write a **reproducible cache-metrics script**
+in the spirit of BetterBench but aimed at the tier rather than at raw token throughput:
+hit share per tier, promotion latency, `load_bytes`, read:write ratio, and the recompute
+avoided. **It must not repeat BetterBench's mistake** — vLLM matches the prefix cache by
+block *content*, not by chained prefix, so varying a nonce in block 0 leaves the body of
+the prompt self-caching and the "cold" arm is not cold. Getting the cold arm genuinely
+cold is the hard part of this stage and the reason it comes first: every claim below it is
+unfalsifiable until it exists.
+
+**2. Continue the review of existing work, and produce an implementation plan.**
+[[`kv-cache-references.md`](docs/kv-cache-references.md)](docs/kv-cache-references.md) is the review so far — every PR,
+paper and blog already assessed, each with a ruling. Continue it, then write the plan.
+Concretely, this includes reconciling the seven house patches against current
+vLLM/radiance HEAD and **deleting each one in favour of the upstream implementation
+wherever one exists**: at least one already has an upstream counterpart (the eagle-groups
+fix is PR #55390; the fs fanout was ported from PR #49225). *Avoid reimplementation* — a
+house patch duplicating merged upstream work is a liability, not an asset: one more thing
+to rebase, and it will silently diverge. Score upstream work by **applicability, not by
+merge status**; an unmerged PR that fits is worth more than a merged one that does not.
+
+**3. Tunable accuracy, and a proof of concept of the most promising quality options.**
+Correctness here is not binary — it is a dial, and right now the dial is welded in one
+position. Expose the accuracy/cost trade-offs as **configuration toggles** rather than
+constants (the mamba stride `N` being the obvious first one; the store threshold and the
+pending-is-miss behaviour are others), so that a deployment can choose its point on the
+curve and a benchmark can sweep it. Then build a proof of concept of the most promising
+quality options. The strongest candidate is the **exactness fix**: replaying the ≤
+one-block gap from the stride checkpoint, which turns the mamba stride from an
+approximation into an exact reconstruction. It is designed and unbuilt, and it is the
+single well-described gap to the full method — see
+[[`kv-cache-future-work.md`](docs/kv-cache-future-work.md)](docs/kv-cache-future-work.md).
+
+**4. Refactoring.**
+These patches were written one at a time, each to answer a specific question, and it
+shows. They monkey-patch by string surgery. They carry an implicit dependency **order**
+documented only in the launcher. Their gating environment variables are inconsistent in
+naming and in whether `0` or `1` means "upstream behaviour". This wants to be a single
+coherent module with an explicit interface, not seven scripts in a trench coat. It lands
+here rather than earlier because stages 2 and 3 decide how much of it survives to be
+refactored.
+
+**5. Speed optimisation.**
+Nothing here has been tuned; it has only been made to work. The known ceilings are
+measured and documented — the fs tier's 1.16×; the strictly staged promotion path, so disk
+and RAM contend for the same region; no DMA path from disk to VRAM on this hardware.
+**Which of those are real limits and which are merely untuned is, in most cases, not yet
+established** — and stage 1 is what settles it.
+
+**6. Normal software engineering.**
+Code review, tests, CI, packaging, a real release. **None of it has happened.** There is no
+test suite; correctness has been established by hand, per change, against a live endpoint.
+
+---
+
+## Point your own coding agent at this
+
+This repository is written to be handed to an agent, not just read. The documents are
+deliberately long and state their own reasoning and their own doubts, because that is what
+an agent needs in order to not repeat work that has already been done and discarded.
+
+**1. Get it.**
+
+```bash
+git clone https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers
+cd qwen3.6-vllm-gfx1201-launchers/kv-cache
+```
+
+**2. Prime the agent.** Give it, in this order:
+
+| Read | Why |
+|---|---|
+| this `README.md` | the claim, its limits, and the shape of the work |
+| [`docs/kv-cache-handover.md`](docs/kv-cache-handover.md) | the full state of play and the resume path |
+| [`docs/kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | **before writing anything** — the hard "never do X" list |
+| [`docs/kv-cache-references.md`](docs/kv-cache-references.md) | every PR, paper and experiment already reviewed, each with a ruling |
+
+A prompt that works: *"Read kv-cache/README.md, then docs/kv-cache-handover.md and
+docs/kv-cache-known-issues.md. This is a proof of concept with known correctness errors,
+and the roadmap in the README is in the author's intended order. Start at stage 1: audit
+what cache metrics the existing patches already expose, and propose a reproducible harness
+that measures per-tier hit share and prefill avoided with a genuinely cold arm — read
+bench/README.md first for why 'cold' is the hard part. Do not write code in this pass."*
+
+**3. Pick a stage from [Future work](#future-work).** Stage 1 is not optional
+throat-clearing — until the metrics harness exists, nothing you change afterwards can be
+shown to have helped. Three good first tasks, in increasing size:
+
+- **Small, self-contained:** normalise the patch gating variables so that unset always
+  means upstream behaviour, and document the apply order in code rather than in the
+  launcher.
+- **Medium, and the actual starting point:** the reproducible cache-metrics harness of
+  stage 1 — with a *genuinely* cold arm. Read [`bench/`](bench/)'s README first; the
+  content-vs-prefix-hash trap is documented there and it is what makes this non-trivial.
+- **Large, the real prize:** the exactness fix inside stage 3. It is designed and unbuilt,
+  and it is the difference between "approximate" and "correct".
+
+**4. Run it.** [`docs/kv-cache-operations.md`](docs/kv-cache-operations.md) is the runbook
+— turning the disk tier off, resizing `/dev/shm`, resizing the KV tier, each with commands,
+verification and undo. Read [Hard requirements](#hard-requirements--not-advisory) first;
+two of them fail *silently* if ignored.
+
+**5. Measure it.** [`bench/`](bench/) ships the harnesses but **no result files**,
+deliberately — single-machine numbers, some of them known polluted. Its README documents
+the content-vs-prefix-hash trap that invalidated an earlier round of measurement, which is
+the mistake most likely to waste your first day.
+
+Different hardware is welcome and wanted. Nothing here has been reproduced on another
+machine, and the conclusions should be assumed hardware-specific until they are.
 
 ---
 
@@ -166,8 +313,8 @@ model, kernels, drafter or vLLM invocation is duplicated.
 
 It runs on its own container (`qwen38-27b-kvcache`) and its own on-disk block tree
 (`blocks-kvcache`), so a KV-cache experiment can never quietly pollute the production
-entry's cache or its numbers. That isolation is not paranoia — it is the direct lesson
-of the BetterBench pollution above.
+entry's cache or its numbers. That isolation is not paranoia — it is the direct lesson of
+the BetterBench pollution above.
 
 **It takes the whole GPU.** It and the production entry cannot be loaded together.
 
@@ -176,15 +323,15 @@ of the BetterBench pollution above.
 ## Hard requirements — not advisory
 
 - **`PYTHONHASHSEED` must be pinned** (the launcher pins it to `0`). Block filenames are
-  content hashes chained from `NONE_HASH`, which is seeded from `os.urandom(32)` when
-  the variable is unset. Leave it unset and every restart hashes the same tokens to
+  content hashes chained from `NONE_HASH`, which is seeded from `os.urandom(32)` when the
+  variable is unset. Leave it unset and every restart hashes the same tokens to
   *different* filenames, orphaning the entire on-disk cache — silently, at a 100% miss
   rate, with no error anywhere.
 - **The fs tier never deletes.** `tiering/fs/manager.py` has no capacity, quota or TTL
   parameter and exposes no eviction hook. **An external reaper is mandatory**
   (`kvcache-reap.sh` + its systemd timer). Without it the filesystem fills.
-- **Never delete a young block.** The reaper's `MIN_AGE=90min` floor is a safety
-  property: reaping an in-flight block kills EngineCore (see the limitations above).
+- **Never delete a young block.** The reaper's `MIN_AGE=90min` floor is a safety property:
+  reaping an in-flight block kills EngineCore (see the limitations above).
 - **`O_DIRECT` in both directions.** Spare RAM cannot act as a read cache in front of the
   fs tier. The only productive home for spare RAM is the primary tier.
 
@@ -192,8 +339,7 @@ of the BetterBench pollution above.
 
 ## Environment this was built and measured on
 
-Everything here is single-machine, single-configuration. Nothing has been reproduced on
-other hardware, and the conclusions should be assumed hardware-specific until they are.
+Everything here is single-machine, single-configuration.
 
 | | |
 |---|---|
@@ -210,6 +356,6 @@ be sized from inside the guest.
 
 ## Licence and attribution
 
-The house patches and documents here are the author's own work, built on and against
-vLLM and the radiance overlay; upstream code carries its own licences. Where a patch was
-ported from an upstream PR it says so, with the PR number, in the patch file itself.
+The house patches and documents here are the author's own work, built on and against vLLM
+and the radiance overlay; upstream code carries its own licences. Where a patch was ported
+from an upstream PR it says so, with the PR number, in the patch file itself.

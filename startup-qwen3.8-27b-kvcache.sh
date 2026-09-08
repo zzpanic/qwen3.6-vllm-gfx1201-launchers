@@ -43,39 +43,60 @@
 # WHAT THIS NEEDS BEFORE IT IS ANYTHING MORE THAN A PROOF OF CONCEPT
 # (in order -- each stage's output is the next stage's input):
 #
-#   1. UPSTREAM RECONCILIATION -- FIRST, AND BEFORE ANY CODE IS WRITTEN.
-#      Several of the seven house patches were written against a gap that may
-#      since have been closed upstream, and at least one has a known upstream
-#      counterpart already (the eagle-groups fix, PR #55390; the fs fanout was
-#      ported from PR #49225). Every patch here must be checked against current
-#      vLLM/radiance HEAD and DELETED in favour of the upstream implementation
-#      wherever one exists. AVOID REIMPLEMENTATION -- a house patch that
-#      duplicates merged upstream work is a liability, not an asset: it is one
-#      more thing to rebase, and it will silently diverge. Score the upstream
+#   1. BENCHMARK HOOKS, METRICS AND A REPRODUCIBLE HARNESS. FIRST.
+#      Tidy the instrumentation that already exists (the lookup-outcome and
+#      instrumentation patches) into a coherent metrics surface, and write a
+#      REPRODUCIBLE cache-metrics script in the spirit of BetterBench but aimed
+#      at the tier rather than raw throughput: per-tier hit share, promotion
+#      latency, load_bytes, read:write ratio, prefill avoided. It must NOT
+#      repeat BetterBench's mistake -- vLLM matches the prefix cache by block
+#      CONTENT, not by chained prefix, so varying a nonce in block 0 leaves the
+#      body self-caching and the "cold" arm is not cold. Making the cold arm
+#      genuinely cold is the hard part, and the reason this stage is first:
+#      every claim below it is unfalsifiable until it exists.
+#
+#   2. CONTINUE THE REVIEW OF EXISTING WORK, AND WRITE AN IMPLEMENTATION PLAN.
+#      kv-cache-references.md is the review so far -- every PR, paper and blog
+#      assessed, each with a ruling. Continue it, then plan. This includes
+#      reconciling the seven house patches against current vLLM/radiance HEAD
+#      and DELETING each in favour of the upstream implementation wherever one
+#      exists (the eagle-groups fix has a counterpart in PR #55390; the fs
+#      fanout was ported from PR #49225). AVOID REIMPLEMENTATION -- a house
+#      patch that duplicates merged upstream work is a liability, not an asset:
+#      one more thing to rebase, and it will silently diverge. Score upstream
 #      work by APPLICABILITY, not by merge status; an unmerged PR that fits is
 #      worth more than a merged one that does not.
 #
-#   2. REFACTORING. These patches were written one at a time, each to answer a
+#   3. TUNABLE ACCURACY, AND A PoC OF THE MOST PROMISING QUALITY OPTIONS.
+#      Correctness here is a dial, not a boolean, and the dial is currently
+#      welded. Expose the accuracy/cost trade-offs as CONFIG TOGGLES rather
+#      than constants -- the mamba stride N first, then the store threshold and
+#      the pending-is-miss behaviour -- so a deployment can pick its point on
+#      the curve and a benchmark can sweep it. Then prototype the most
+#      promising quality option. The strongest candidate is THE EXACTNESS FIX:
+#      replay the <= one-block gap from the stride checkpoint, turning the
+#      stride from an approximation into an exact reconstruction. Designed but
+#      not built; the single well-described gap to the full method.
+#
+#   4. REFACTORING. These patches were written one at a time, each to answer a
 #      specific question, and it shows: they monkey-patch by string surgery,
 #      they carry an implicit dependency ORDER that is documented only in the
 #      launcher, and the gating env vars are inconsistent in naming and in
 #      whether 0 or 1 means "upstream". This wants to be a single coherent
 #      module with an explicit interface, not seven scripts in a trench coat.
+#      It lands here, not earlier, because stages 2 and 3 decide how much of it
+#      survives to be refactored at all.
 #
-#   3. OPTIMISATION. Nothing here has been tuned; it has only been made to
-#      work. The known ceilings are all measured and all documented -- the fs
-#      tier serves at ~117 MB/s against a ~101 MB/s recompute break-even (1.16x,
-#      i.e. barely worth doing), the promotion path is strictly staged through
-#      the CPU tier so disk and RAM contend for the same region, and there is no
-#      DMA path from disk to VRAM on this hardware. Which of those are real
-#      limits and which are just untuned is, in most cases, not yet established.
+#   5. SPEED OPTIMISATION. Nothing here has been tuned; it has only been made
+#      to work. The known ceilings are all measured and all documented -- the
+#      fs tier serves at ~117 MB/s against a ~101 MB/s recompute break-even
+#      (1.16x, i.e. barely worth doing), the promotion path is strictly staged
+#      through the CPU tier so disk and RAM contend for the same region, and
+#      there is no DMA path from disk to VRAM on this hardware. Which of those
+#      are real limits and which are just untuned is, in most cases, not yet
+#      established -- and stage 1 is what settles it.
 #
-#   4. THE EXACTNESS FIX. The one designed-but-unbuilt piece: replaying the
-#      <= one-block gap from the stride checkpoint, which turns the stride from
-#      an approximation into an exact reconstruction. See future-work; this is
-#      the single well-described gap to the full method.
-#
-#   5. NORMAL SOFTWARE ENGINEERING. Code review, tests, CI, packaging, a real
+#   6. NORMAL SOFTWARE ENGINEERING. Code review, tests, CI, packaging, a real
 #      release. None of it has happened. There is no test suite; correctness has
 #      been established by hand, per-change, against a live endpoint.
 #
