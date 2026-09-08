@@ -241,6 +241,40 @@ established** — and stage 1 is what settles it.
 Code review, tests, CI, packaging, a real release. **None of it has happened.** There is no
 test suite; correctness has been established by hand, per change, against a live endpoint.
 
+### Where this is meant to end up — upstream, and general
+
+The target of all six stages is **upstream vLLM**, not a fork that lives here permanently.
+That is a constraint on how the work is done, not a wish about where it might land:
+
+- **The model is the vehicle, not the point.** Everything here is measured on
+  Qwen3.8-27B-MXFP4 because that is what this machine serves, and one day that checkpoint
+  will be old hat. The parts worth keeping are the ones that outlive it: a tier that stores
+  and serves KV, a stride that checkpoints recurrent state, a promotion path between tiers.
+  Where a mechanism genuinely *is* architecture-specific — the mamba stride is, it exists
+  only because Gated-DeltaNet has a recurrent state to checkpoint at all — it should be
+  selected from the model's own declared layout (which KV groups are attention, which are
+  recurrent), never from the model's name. The eagle-groups patch is the cautionary case in
+  miniature: it exists because vLLM's own draft-group annotator is hard-gated to one model
+  family, and every other model silently got the wrong answer.
+- **Hyper-specialisation is an explicit non-goal.** It is possible to chase the last few
+  percent by tuning to one checkpoint on one card until nothing else loads. That is
+  deliberately not what this is for. vLLM is a general serving runtime and should remain
+  one; a change that buys this model 5% and costs another model its ability to start is a
+  bad trade at any margin.
+- **Not breaking existing capability is a requirement of every stage,** including the ones
+  that look like housekeeping. It is why every behaviour-changing patch here is behind an
+  environment gate whose unset state is upstream behaviour, and why the seven patches are
+  to be *deleted* in favour of upstream implementations wherever one exists rather than
+  maintained alongside them. Stage 6's tests and CI are not tidiness for its own sake; they
+  are the price of admission for anything that asks other people to run it.
+
+None of this is aimed at the specialised forks. The gfx1201 work this repository stands on
+— radiance, libr4d, the MXFP4 build — is what makes this card usable at all, and the
+multi-GPU tensor-parallel work in that cluster is genuinely impressive engineering. It is
+simply a different aim: those forks exist to make one architecture excellent on hardware
+the runtime otherwise ignores, and this wants to end up in the runtime everybody already
+has.
+
 ---
 
 ## Point your own coding agent at this
