@@ -2,6 +2,23 @@
 
 > **Read this first.** It orients you on the whole project, where we are, and how to resume. The detailed knowledge is split across the sibling docs in §10 — this file is the map + the current-state summary, so you do not have to re-derive context. Every section below is a pointer with enough inline fact to act without opening the target.
 
+> **A note for readers of the release.** This is a *working* document — it was
+> written for the author's own resumption, not for publication, and it is shipped
+> unedited because its inline facts are worth more than its tidiness. Two
+> consequences. **First: §5 and §6 are a snapshot of where the author was paused
+> when this was packaged, not the project's roadmap.** The roadmap is the six
+> stages in [`../README.md`](../README.md), in the author's stated order, and
+> stage 1 (the metrics harness) is the authoritative next step. Where §6 and the
+> README disagree, the README wins. **Second: two of §5's open items are now
+> settled** — the polluted BetterBench numbers (§5.3) were dropped rather than
+> published, which is why `bench/` ships harnesses and no result files, and the
+> best-effort build (§5.2) went ahead, which is what this repository is.
+>
+> Paths: this document was written against a flat working tree and says
+> `<repo>/kv-cache/`. In the release the docs are in `docs/`, the patches in
+> `patches/`, the harnesses in `bench/`. [`../MANIFEST.md`](../MANIFEST.md)
+> translates every one of them.
+
 ---
 
 ## 0. TL;DR (orient in 30 seconds)
@@ -96,7 +113,7 @@ We are building and documenting a **two-tier (three-tier) KV-cache offload** for
 
 ---
 
-## 10. The map of the docs (all in `<repo>/kv-cache/`)
+## 10. The map of the docs (the working tree is flat; in the release these are `docs/` — see ../MANIFEST.md)
 | Doc | What it has |
 |---|---|
 | **`kv-cache-handover.md`** (this file) | The map + current-state summary + resume path. **Read first.** |
