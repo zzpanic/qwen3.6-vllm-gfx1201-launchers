@@ -373,9 +373,10 @@ these constraints**, and they only make sense if you can see them.
 |---|---|
 | Host CPU | Intel Core i5-7600 — **4 cores, 4 threads**, no SMT |
 | Host RAM | 64 GB DDR4-2400 (4 × 16 GB) |
+| Host OS | TrueNAS Community Edition 25.10.4 — the NAS *is* the hypervisor |
 | Motherboard | ASUS P10S WS — **PCIe 3.0 x16** to the GPU |
 | GPU | AMD Radeon AI PRO R9700, gfx1201 / RDNA4, 32 GB, TP=1, **passed through to the guest** |
-| Guest | VM with **40 GiB RAM** (39.17 GiB usable) and the GPU on passthrough |
+| Guest | a TrueNAS VM (QEMU/KVM, i440FX + OVMF) with **40 GiB RAM** (39.17 GiB usable) and the GPU on passthrough |
 | Cache filesystem | a zvol on a **TrueNAS raidz array of 4 × 4 TB drives**, presented to the guest as `virtio_blk` |
 | Model | Qwen3.8-27B MXFP4 weights + FP8 KV, 16 full-attention + 48 Gated-DeltaNet layers |
 | Serving | vLLM 0.27.1 + radiance 0.9.3 overlay, R4D attention, DFlash2 spec decoding |
@@ -407,7 +408,9 @@ disk tier, is the headline of the results.
 **A raidz array of spinning disks behind a zvol behind virtio_blk.** This is the single most
 consequential constraint in the repository. raidz gives you roughly one disk's worth of
 random-read IOPS regardless of width, and the storage path adds a zvol and a virtio layer on
-top. The measured result is **~117 MB/s**, against a **~101 MB/s** recompute break-even —
+top — and the host running that storage stack is the *same* four-thread box, because TrueNAS
+is the hypervisor, so ZFS checksumming, ARC and raidz parity are spending the same cores the
+engine is. The measured result is **~117 MB/s**, against a **~101 MB/s** recompute break-even —
 a **1.16×** advantage, which is why the disk tier is real but thin, and why it contributes
 7% where the RAM tier contributes 11%. **An NVMe device is roughly 19× this**, and the disk
 tier's whole economic case changes on that hardware. If you have NVMe, the most interesting
