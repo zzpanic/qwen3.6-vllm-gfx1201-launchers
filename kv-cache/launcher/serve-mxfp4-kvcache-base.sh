@@ -1,6 +1,34 @@
 #!/bin/bash
 # llama-swap launcher for qwen3.8-27b-ggz14.
 #
+# PROVENANCE -- THREE LAUNCHERS, ONE LINEAGE
+#
+#   ggz14's serve-mxfp4.sh          codeberg.org/ggz14/radiance-vllm-mxfp4 (v0.11.0)
+#     |                             the upstream script. Owns the MXFP4 GEMM, R4D
+#     |                             attention and DFlash2 integration -- none of that
+#     |                             is ours, and none of it is forked here.
+#     v
+#   startup-qwen3.8-27b-mxfp4.sh    ../startup-qwen3.8-27b-mxfp4.sh, in this repo.
+#     |                             The published MXFP4 launcher: same model, same
+#     |                             card, NO KV offload. Every knob in it carries the
+#     |                             measurement that chose it. If you want to serve
+#     |                             Qwen3.8-27B and are not working on the cache,
+#     |                             THAT is the file you want, not this one.
+#     v
+#   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
+#                                   with the three-tier KV offload added: the GPU ->
+#                                   /dev/shm -> /kvcache staging, the seven house
+#                                   patches in ../patches/, and the RADIANCE_* gates
+#                                   that turn each of them on and off.
+#
+# The two repo launchers are deliberately near-duplicates rather than one file with a
+# flag: the cache work is a PROOF OF CONCEPT with known correctness errors (see
+# ../README.md), and it must not be possible to reach it by accident from the
+# production path. When the roadmap's stage 4 (refactoring) lands, they should merge.
+#
+# Keeping this in sync: re-copy from the upstream serve-mxfp4.sh when ggz14's repo
+# updates, then re-apply the six llama-swap edits listed below and the offload block.
+#
 # House copy (2026-09-05) of ggz14's serve-mxfp4.sh, repo at
 # kv-cache/../radiance-vllm-mxfp4 (codeberg.org/ggz14/radiance-vllm-mxfp4, v0.11.0,
 # image stilldeadcode/vllm-radiance:0.9.3). Serves Qwen3.8-27B in native MXFP4
@@ -19,10 +47,10 @@
 #     which upstream resolves relative to the script itself
 # Everything else -- the knob defaults, the patch prelude, the env list, the entrypoint
 # exec, the vllm serve arguments -- is byte-identical to upstream. Re-copy this file from
-# ggz14-mxfp4/serve-mxfp4.sh when the repo updates, then re-apply these six edits.
+# the upstream serve-mxfp4.sh when the repo updates, then re-apply these six edits.
 #
-#   llama-swap-ggz14-27b.sh --port <N>   start the server (launched by llama-swap)
-#   llama-swap-ggz14-27b.sh -h           every knob, its default and what it does
+#   serve-mxfp4-kvcache-base.sh --port <N>   start the server (launched by llama-swap)
+#   serve-mxfp4-kvcache-base.sh -h           every knob, its default and what it does
 #
 # It needs two checkpoints under $MODELS, both produced by setup-mxfp4.sh:
 #   Qwen3.8-27B-MXFP4-mtpfp8   AMD's amd/Qwen3.8-27B-Quark-AWQ-MXFP4 with the MTP head requantized
@@ -61,14 +89,14 @@ set -euo pipefail
 # ---------------------------------------------------------------- usage / arguments
 usage() {
   cat <<'USAGE'
- llama-swap-ggz14-27b.sh -- native MXFP4 Qwen3.8-27B on AMD RDNA4 (gfx1201)
+ serve-mxfp4-kvcache-base.sh -- native MXFP4 Qwen3.8-27B on AMD RDNA4 (gfx1201)
 
 GPU count, tensor-parallel size and KV cache size are all detected; nothing below has to be
 edited to run on a host with a different number of cards.
 
-  llama-swap-ggz14-27b.sh --port <N>   serve on http://<host>:<N>/v1 (llama-swap's contract;
+  serve-mxfp4-kvcache-base.sh --port <N>   serve on http://<host>:<N>/v1 (llama-swap's contract;
                                        the container uses host networking and binds <N> directly)
-  llama-swap-ggz14-27b.sh [ARGS]       any extra arguments are passed through to `vllm serve`
+  serve-mxfp4-kvcache-base.sh [ARGS]       any extra arguments are passed through to `vllm serve`
 
 Everything is an environment variable; these are the ones worth knowing.
 

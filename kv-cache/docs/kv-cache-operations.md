@@ -17,6 +17,7 @@
 | Thing | Value | Where it is set |
 |---|---|---|
 | Guest `MemTotal` | **39.17 GiB** | TrueNAS VM allocation (40 GiB configured) |
+| Guest OS | **Ubuntu 24.04.4 LTS**, kernel 6.8 | every command in this runbook is run in the guest |
 | `/dev/shm` limit | **28.00 GiB** | `/etc/fstab` line 23 |
 | KV tier requested | **24 GiB** | `<your llama-swap config.yaml>`, `EXTRA=--kv-offloading-size 24` |
 | KV tier **actually allocated** | **23.99 GiB** | `/dev/shm/vllm_offload_*.mmap` |

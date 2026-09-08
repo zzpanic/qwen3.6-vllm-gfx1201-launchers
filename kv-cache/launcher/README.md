@@ -22,10 +22,21 @@ tier and nothing else, with no error to tell you so.
 machinery. The wrapper defaults to it for that reason, and only for that reason.
 
 The two scripts are otherwise substantially the same file and **should be merged**
-— shipping both is a wart, not a design. Doing that merge is stage 1 (upstream
-reconciliation) of the roadmap in the top-level README. It is left visible rather
-than papered over because a silent version skew here is exactly the kind of thing
-that costs someone a day.
+— shipping both is a wart, not a design. Doing that merge is **stage 4
+(refactoring)** of the roadmap in the top-level README, and it is deliberately not
+earlier: until the metrics harness of stage 1 exists, a merge cannot be shown to
+have preserved behaviour. It is left visible rather than papered over because a
+silent version skew here is exactly the kind of thing that costs someone a day.
+
+## Where both of them come from
+
+Neither script is a fork of anyone's kernels. Both descend from **ggz14's
+`serve-mxfp4.sh`** (`codeberg.org/ggz14/radiance-vllm-mxfp4`, v0.11.0, image
+`stilldeadcode/vllm-radiance:0.9.3`), which owns the MXFP4 GEMM, the R4D attention
+path and the DFlash2 drafter integration. What this repository contributes is the
+*arrangement* — which knobs, at which values, on this card — and, in the KV-cache
+case, the offload tiers and the seven patches in `../patches/`. The lineage is
+restated at the top of `serve-mxfp4-kvcache-base.sh` itself.
 
 ## Porting to another machine
 

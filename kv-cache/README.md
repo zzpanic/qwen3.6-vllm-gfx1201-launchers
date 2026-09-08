@@ -377,6 +377,7 @@ these constraints**, and they only make sense if you can see them.
 | Motherboard | ASUS P10S WS — **PCIe 3.0 x16** to the GPU |
 | GPU | AMD Radeon AI PRO R9700, gfx1201 / RDNA4, 32 GB, TP=1, **passed through to the guest** |
 | Guest | a TrueNAS VM (QEMU/KVM, i440FX + OVMF) with **40 GiB RAM** (39.17 GiB usable) and the GPU on passthrough |
+| Guest OS | Ubuntu 24.04.4 LTS, kernel 6.8 — everything in this repository runs *inside* the guest |
 | Cache filesystem | a zvol on a **TrueNAS raidz array of 4 × 4 TB drives**, presented to the guest as `virtio_blk` |
 | Model | Qwen3.8-27B MXFP4 weights + FP8 KV, 16 full-attention + 48 Gated-DeltaNet layers |
 | Serving | vLLM 0.27.1 + radiance 0.9.3 overlay, R4D attention, DFlash2 spec decoding |
