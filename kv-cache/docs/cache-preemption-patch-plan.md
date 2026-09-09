@@ -1550,6 +1550,38 @@ chunk.
   mixed hit is bit-identical to a cold recompute, the R3.11 check, re-run on a request that
   hits both tiers.
 
+### R3.15.6 How it gets tested — `check-r315-boot.sh` then `mixedbench.py`
+
+The patches are applied at container start from the host directory mounted at `/house`, so
+a reload picks the fix up with no rebuild — and a stale mount, a failed hunk or a launcher
+that skipped a step all look identical from outside. `check-r315-boot.sh` closes that gap
+first: it reads the RUNNING engine's `scheduler.py` through `/proc/<pid>/root` and confirms
+both hunks are physically present, plus the 9-group geometry, `RADIANCE_OFFLOAD_MIXED_HIT=1`,
+and that nothing has fired yet this boot. It was validated against the unfixed engine before
+being trusted — both hunk checks correctly reported MISSING, which caught two false passes:
+"full-attention group" matches four *stock* upstream comments, and "offload boundary" matches
+the patch-status line `OK  offload boundary diagnostics`. Both markers are now anchored on
+text that exists only in the patched file.
+
+`equivbench.py` cannot test this fix. Its `fs` phase evicts the entire cache, so the probe
+that follows has `num_computed_tokens = 0` — a pure external hit, which never reaches the
+divergent-hit path. `mixedbench.py` builds the mixed case on purpose, using upstream's own
+reverse-order block free (the tail of a prompt leaves the GPU before its head, to preserve
+shared prefixes):
+
+    coldA   fresh cache_salt        -> recompute, reference answer
+    coldB   fresh cache_salt        -> recompute, identical text: the noise floor
+    warm    coldB's salt again      -> full GPU hit, then drain so the tier holds it too
+    evict   novel traffic, stepwise -> eats the free queue front-first, so the prompt's TAIL
+    mixed   coldB's salt again      -> head from GPU, tail from the tier
+
+The eviction volume is found, not predicted — it depends on what was in the pool before the
+run — so the sweep probes after each step and stops at the first request showing GPU hits and
+external hits together. It exits non-zero unless a mixed hit was actually built, the engine
+survived it, and the tokens matched both recomputes; "no mixed hit built" is reported as a
+failure rather than a pass, because a fix that quietly stopped serving mixed hits would
+otherwise look clean.
+
 # Revision 2 — 2026-09-07 (review of rev 1 against the live server)
 
 **Everything below the next `---` is rev 1, preserved for its reasoning. Where rev 1 and this section disagree, this section wins.**

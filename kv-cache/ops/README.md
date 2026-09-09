@@ -15,6 +15,17 @@ external reaper the filesystem fills until it is full.
 that is in flight kills EngineCore outright — there is no load-failure recovery
 path in this connector. Never lower it; never hand-delete a young block.
 
+## After every reload: check the patches actually took
+
+    ./check-r315-boot.sh
+
+Read-only, about a second. The patches are applied at container start from the
+mounted source directory, so a stale mount, a failed hunk or a launcher that
+skipped a step all look identical from outside — the engine boots either way and
+then fails hours later under real traffic, which is how the R3.15 bug was found.
+The script reads the RUNNING engine's files through `/proc/<pid>/root`, not the
+copies on the host, because those are the ones that can disagree.
+
 ## The mounts
 
 `etc-fstab-snippets/` holds the `/dev/shm` and cache-filesystem lines, with the

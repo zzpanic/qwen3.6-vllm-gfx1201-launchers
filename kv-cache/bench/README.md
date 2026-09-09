@@ -3,7 +3,16 @@
 Shipped for the **method**, not for any number they once produced. Results are
 deliberately not included: they are single-machine, and some are known polluted.
 
-`tierbench.py` is the one to start with. It measures one long prefix in four
+`equivbench.py` and `mixedbench.py` are the two that check *correctness* rather
+than speed, and they are not interchangeable. `equivbench.py` evicts every tier
+and asks whether a pure external hit gives the same answer as a recompute.
+`mixedbench.py` deliberately leaves the head of the prompt in the GPU cache and
+evicts only its tail, so the request hits BOTH tiers at once — the case where
+vLLM reports a per-group prefix hit that diverges across KV groups, and the case
+that produced a fatal assertion before the fix in `docs/` R3.15. A run that
+never reaches the `MIXED` phase has tested nothing, and says so in its verdict.
+
+`tierbench.py` is the one to start with for speed. It measures one long prefix in four
 known cache states — cold / GPU / CPU / fs — sizing each eviction from the tier
 capacities it reads out of the engine's boot log, and **refusing to report a
 phase whose tier state did not come out as intended**. That refusal is the entire
