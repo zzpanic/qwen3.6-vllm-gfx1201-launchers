@@ -80,8 +80,9 @@
 #
 #   4. REFACTORING. These patches were written one at a time, each to answer a
 #      specific question, and it shows: they monkey-patch by string surgery,
-#      they carry an implicit dependency ORDER that is documented only in the
-#      launcher, and the gating env vars are inconsistent in naming and in
+#      they carry an implicit dependency ORDER that is stated in prose (the
+#      launcher's comments and patches/README.md) rather than enforced in code,
+#      and the gating env vars are inconsistent in naming and in
 #      whether 0 or 1 means "upstream". This wants to be a single coherent
 #      module with an explicit interface, not seven scripts in a trench coat.
 #      It lands here, not earlier, because stages 2 and 3 decide how much of it

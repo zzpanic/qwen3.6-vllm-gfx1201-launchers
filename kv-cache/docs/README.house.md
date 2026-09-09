@@ -10,7 +10,7 @@ them with no copy anywhere. They now live here and ride their own bind mount.
 | file | what it is |
 |---|---|
 | `cache-preemption-patch-plan.md` | The plan for the "retain, don't recompute" work. Read **Revision 2** first — it supersedes parts of the original and reorders the build. |
-| `patch_offload_mixed_hit.py` | Stops `OffloadingConnector` killing the engine on a mixed local+external prefix hit. Applied at every boot. |
+| `patch_offload_mixed_hit.py` | Makes `OffloadingConnector` safe when a KV group's prefix hit lags the request's. Fixes two defects: a boundary assertion that only holds for full-attention groups, and a lookup that confirms a narrower chunk range than the load reads. Applied at every boot. |
 | `tierbench.py` | Deterministic KV tier attribution bench. Also the acceptance test for the R2.9.2 instrumentation. |
 
 ## How the patch is wired in

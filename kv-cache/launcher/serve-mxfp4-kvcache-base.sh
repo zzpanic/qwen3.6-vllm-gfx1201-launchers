@@ -736,13 +736,14 @@ KVOFF_DISK_MNT=/kvcache                                   # path INSIDE the cont
 KVOFF_DISK_RTHREADS=${KVOFF_DISK_RTHREADS:-8}             # vLLM default is 16
 KVOFF_DISK_WTHREADS=${KVOFF_DISK_WTHREADS:-4}             # vLLM default is 16; 4C4T box
 KVOFF_HASHSEED=${KVOFF_HASHSEED:-0}
-# RADIANCE_OFFLOAD_MIXED_HIT: 1 = upstream behaviour, 0 = patch_offload_mixed_hit.py's
-# guard is active (external hits declined for requests that also hit the GPU prefix
-# cache). DEFAULT IS 1 -- deliberately the crashing behaviour. On 2026-09-06 the L3 tier
-# was reading back at 70.4% external hit rate and the guard would have thrown away an
-# unknown, possibly large share of that, so we run upstream until the patch's one-shot
-# diagnostic dump identifies the offending group. Flip to 0 to trade hit rate for a
-# crash-free engine.
+# RADIANCE_OFFLOAD_MIXED_HIT: 1 = serve mixed local+external hits, 0 = decline every
+# external hit on a request that also hit the GPU prefix cache. DEFAULT IS 1, and as of
+# 2026-09-10 that is no longer the crashing behaviour: the one-shot dump named the group
+# (always [8], the MTP/DFlash2 draft group, a SlidingWindowSpec) and
+# patch_offload_mixed_hit.py now fixes the two real defects instead of dodging them --
+# a boundary assertion that only holds for full-attention groups, and a lookup that
+# confirmed a narrower chunk range than the load actually reads. Flip to 0 only as a kill
+# switch; it costs external hits and buys nothing the fix does not already give.
 KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
 # RADIANCE_OFFLOAD_PENDING_IS_MISS: 1 = a lookup that meets a chunk whose store has not
 # landed yet takes the ready prefix it has already found; 0 = upstream, which defers the

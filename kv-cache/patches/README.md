@@ -65,10 +65,17 @@ fallback**, so a failure there is a hard boot failure, not a warning:
 | 6 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
 | 7 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
 
-That split is deliberate. 1 and 2 are load-bearing — without the mixed-hit fix
-the engine asserts and dies on a mixed local+external prefix hit, and without the
-instrumentation an allocation failure is unattributable. The other five degrade
-to defined, previously-shipped behaviour.
+That split is deliberate. 1 and 2 are load-bearing — without patch 1 the engine
+asserts and dies the first time an external hit lands on a request that also hit
+the GPU prefix cache, and without the instrumentation an allocation failure is
+unattributable. The other five degrade to defined, previously-shipped behaviour.
+
+Patch 1 is also the one exception to "every behaviour change is gated" below. Its
+gate, `RADIANCE_OFFLOAD_MIXED_HIT=0`, selects a conservative fallback (decline the
+external hit) rather than upstream, because upstream's behaviour in this case is
+the crash. Both halves of the fix — scoping the boundary assertion to
+full-attention groups, and widening the lookup so a window group confirms the
+chunks it will actually load — are unconditional when mixed hits are served.
 
 Note what the warnings mean in practice: **a patch that fails silently leaves the
 environment variables lying.** `RADIANCE_OFFLOAD_PENDING_IS_MISS=0` with patch 4

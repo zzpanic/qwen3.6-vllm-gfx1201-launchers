@@ -1422,6 +1422,134 @@ R3.12.3 shows the fix is fewer bytes per token, not more bytes), **no attention-
 (it breaks resume correctness for a hybrid model), **no cascade scheduling work** (R3.10.2
 withdrew the premise), and **no `blocks_per_chunk` changes** (R3.12.5a).
 
+## R3.15 — The offload boundary crash: two defects, both stock (2026-09-10)
+
+**Status: fix written and dry-run applied; NOT yet run against traffic.** Supersedes the
+"replace the blanket decline with a targeted boundary guard" note in R3.10.7 and the
+"production runs upstream until the dump names the group" decision in R3.12.6. The dump
+named it.
+
+### R3.15.1 What crashed
+
+Twice, and only twice, both with `RADIANCE_OFFLOAD_MIXED_HIT=1`:
+
+    2026-09-08 07:31:44   group=8  local_tokens=24720  boundary=14  n_blocks=16
+    2026-09-10 07:57:10   group=8  local_tokens=11536  boundary=6   n_blocks=8
+
+`AssertionError` in `offloading/scheduler.py:update_state_after_alloc`, raised inside
+`Scheduler.schedule()`, fatal to EngineCore. llama-swap reloaded both times.
+
+Every field is invariant across the two: `group=8`, `tokens_per_block=1648`,
+`tokens_per_chunk=1648`, `swa_chunks=2`, `align_chunks=None`, `external_tokens=1648`
+(exactly one chunk), `local_tokens=(n_blocks-1)*1648`, `boundary=n_blocks-2`, and a block
+pattern of `n_blocks-2` nulls followed by two `(is_null=False, block_hash=None)` blocks.
+
+Group 8 is the MTP/DFlash2 draft group and it is a `SlidingWindowSpec` group —
+`sliding_window_size_in_chunks=2` can only come from `get_sliding_window_size_in_chunks`'s
+`SlidingWindowSpec` arm (mamba returns 1, full attention returns `None`).
+
+### R3.15.2 Why it happens — the chain, all of it stock 0.27.1
+
+1. `Scheduler.schedule()` calls `get_computed_blocks_for_connector()` rather than
+   `get_computed_blocks()` whenever a connector is attached and the model has mamba
+   layers. That helper **deliberately does not reconcile** the per-group hits: it calls
+   `find_longest_cache_hit_per_group()`, reports the **full-attention** group's hit as the
+   request's local hit, and returns `hit_diverged = min(per_group_hits) < num_local`. Its
+   docstring says why — "the connector transfers the remaining suffix".
+2. So `num_locally_computed_tokens` is the full-attention hit (11536 = 7 blocks) while a
+   lagging group can be resident for less. `SlidingWindowManager.find_longest_cache_hit`
+   pops one more block for the eagle drop, so group 8's own hit is 6 blocks.
+3. `hit_diverged` is only reconciled away when the connector finds **no** external tokens.
+   It found 1648, so the diverged hit stands. By design.
+4. `add_local_computed_blocks` pads group 8 with 6 nulls and adds nothing;
+   `allocate_external_computed_blocks` allocates `cdiv(13184,1648) - 6 = 2` fresh blocks at
+   indices 6 and 7. That is the dumped pattern exactly.
+5. The assertion says "every locally computed token is resident below the boundary". For a
+   lagging window group that is false — which is the entire point of step 1.
+
+The assertion is a leftover invariant from before divergent lookups existed. It is correct
+for full-attention groups, whose hit *defines* the boundary, and wrong for every group that
+is allowed to lag.
+
+### R3.15.3 The second defect — why deleting the assertion is not the fix
+
+`_lookup()` sets, for every group,
+
+    start_chunk_idx = num_computed_tokens // tokens_per_chunk
+
+and only ever confirms chunks at or above it. `update_state_after_alloc` loads from the
+group's **own** block boundary:
+
+    start_chunk_idx = num_locally_computed_gpu_blocks // blocks_per_chunk
+
+In the 2026-09-10 crash the lookup confirmed chunks 7 and 8 for group 8; the load would
+have asked for chunks 6 and 7. Chunk 6 was never confirmed present.
+`OffloadingManager.prepare_load` is documented "callers only pass keys already confirmed
+HIT by lookup() earlier this step" and enforces it:
+
+    assert block is not None, f"Block {key!r} not found in cache"
+
+So removing the assertion alone converts one EngineCore kill into another, hit whenever the
+tier has evicted the gap chunk. **Checked explicitly, because this rig has been burned by
+silent wrong output before** — it is an assert, not a silent read of stale bytes. But it is
+still a crash, and it is why the fix has to touch the lookup and not just the assertion.
+
+### R3.15.4 The fix
+
+`patch_offload_mixed_hit.py`, rewritten. Two behaviour hunks:
+
+* **hunk 3 (the real fix)** — for groups with a window (`SlidingWindowSpec`, and mamba,
+  which reports a window of 1 chunk), start the suffix scan low enough that a full window
+  ending at the top of the query range can be found:
+
+      start_chunk_idx = min(start_chunk_idx, max(0, num_chunks - required_window))
+
+  The run length (`required_window`) is untouched, so hit semantics are unchanged for any
+  group that is not lagging, and the returned index still converts to absolute chunks
+  through the same `start_chunk_idx`. What changes is that the chunks the connector will
+  load are now the chunks it confirmed. If the gap chunk is missing the run resets and the
+  request gets no external hit — a lost hit, never an unbacked load.
+
+* **hunk 4** — scope the boundary assertion to full-attention groups, keeping the one-shot
+  diagnostic dump so a genuinely new geometry still reports numbers.
+
+Hunk 2 (decline every mixed hit) is retained as a kill switch and is now **off** by
+default; `RADIANCE_OFFLOAD_MIXED_HIT` flips from default 0 to default 1.
+
+**Why letting the load proceed is safe.** The destination blocks come from
+`allocate_external_computed_blocks`: freshly allocated, refcount 1, owned by this request,
+so nothing shared is written. The range is bounded by the assertion immediately below the
+one being relaxed —
+
+    num_pending_gpu_blocks <= sliding_window_size_in_chunks * blocks_per_chunk + 1
+
+— and a window group's `get_num_skipped_tokens` guarantees the pending range is at most its
+window in chunks, which is exactly the range hunk 3 now confirms. The two bounds are the
+same bound, which is what makes this a pairing rather than two independent guesses.
+
+**Blast radius in this configuration.** With `blocks_per_chunk=1` and
+`RADIANCE_MAMBA_STORE_STRIDE=8`, the six mamba groups compute
+`min(start, max(0, num_chunks - 1))`, which is `start` — unchanged. The two full-attention
+groups are unchanged by construction. Only group 8 scans differently, and only by one
+chunk.
+
+### R3.15.5 What is NOT yet proven
+
+* No traffic has run against the fix. Dry-run only: all seven house patches apply in boot
+  order after `patch_kv_group_size.py`, and `scheduler.py` compiles.
+* No stock reproduction exists, so this cannot be filed upstream yet. Both defects are in
+  stock 0.27.1 and neither is model-specific — they need a connector, a lagging group, and
+  an external hit landing on a request that also hit the GPU prefix cache. What this box
+  supplies that upstream CI does not is traffic that actually reaches the read-back path.
+  `patch_kv_group_size.py` and `patch_kv_offload_eagle_groups.py` change *which* group lags
+  and how often, not whether the invariant holds: the eagle pop in `SlidingWindowManager`
+  and the divergent lookup in `get_computed_blocks_for_connector` are both stock.
+* Acceptance, when a window is available: (a) no `offload boundary` line in the log across
+  a run that previously produced one; (b) external prefix cache hit rate stays in the
+  3–19.7% band, i.e. the wider scan did not decline hits it used to serve; (c) a served
+  mixed hit is bit-identical to a cold recompute, the R3.11 check, re-run on a request that
+  hits both tiers.
+
 # Revision 2 — 2026-09-07 (review of rev 1 against the live server)
 
 **Everything below the next `---` is rev 1, preserved for its reasoning. Where rev 1 and this section disagree, this section wins.**

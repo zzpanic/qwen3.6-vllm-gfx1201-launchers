@@ -90,8 +90,8 @@ SCHED = OFFL / "scheduler.py"
 
 apply(
     SCHED,
-    '''_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "0") == "1"''',
-    '''_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "0") == "1"
+    '''_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "1") == "1"''',
+    '''_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "1") == "1"
 # radiance R3.14.3: treat a HIT_PENDING chunk as the end of the ready prefix rather than as
 # a reason to defer the whole request. Phase A measured 99.75% of production lookups
 # deferring on HIT_PENDING at 408:1 over RETRY, and 3 serves in 49 minutes. Set to 0 to get
