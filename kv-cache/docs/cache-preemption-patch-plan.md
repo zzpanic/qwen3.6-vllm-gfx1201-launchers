@@ -1533,22 +1533,52 @@ same bound, which is what makes this a pairing rather than two independent guess
 groups are unchanged by construction. Only group 8 scans differently, and only by one
 chunk.
 
-### R3.15.5 What is NOT yet proven
+### R3.15.5 Validation — run `a1f79c`, 2026-09-10
 
-* No traffic has run against the fix. Dry-run only: all seven house patches apply in boot
-  order after `patch_kv_group_size.py`, and `scheduler.py` compiles.
-* No stock reproduction exists, so this cannot be filed upstream yet. Both defects are in
-  stock 0.27.1 and neither is model-specific — they need a connector, a lagging group, and
-  an external hit landing on a request that also hit the GPU prefix cache. What this box
-  supplies that upstream CI does not is traffic that actually reaches the read-back path.
-  `patch_kv_group_size.py` and `patch_kv_offload_eagle_groups.py` change *which* group lags
-  and how often, not whether the invariant holds: the eagle pop in `SlidingWindowManager`
-  and the divergent lookup in `get_computed_blocks_for_connector` are both stock.
-* Acceptance, when a window is available: (a) no `offload boundary` line in the log across
-  a run that previously produced one; (b) external prefix cache hit rate stays in the
-  3–19.7% band, i.e. the wider scan did not decline hits it used to serve; (c) a served
-  mixed hit is bit-identical to a cold recompute, the R3.11 check, re-run on a request that
-  hits both tiers.
+The fix has run traffic. `check-r315-boot.sh` was all green first (pid 50230, 77 hunks
+applied / 0 failed, 9 groups, `RADIANCE_OFFLOAD_MIXED_HIT=1`, both hunks physically present
+in the running `scheduler.py`, nothing fired), then `mixedbench.py` built a mixed hit on a
+90,022-token prompt:
+
+| phase | served | cached | GPU hits | external hits | load |
+|---|---|---|---|---|---|
+| coldA | RECOMPUTE | 0 | 0 | 0 | — |
+| coldB | RECOMPUTE | 0 | 0 | 0 | — |
+| head | OFFLOAD | 26,368 | 0 | 26,368 | 1.06 GB |
+| mixed | **MIXED/CPU** | 79,104 | **28,016** | **51,088** | 1.87 GB |
+
+Acceptance, against the criteria set above:
+
+* **(a) nothing fired.** Zero `offload boundary` lines, zero unconfirmed-key assertions, zero
+  fatal EngineCore lines for the whole boot. Pid 50230 is unchanged from before the run —
+  the engine did not restart, which is the only thing the old code did in this situation.
+* **(b) the wider scan did not decline hits.** The mixed request was served from both tiers
+  at once, which is the outcome the old code could not reach at all.
+* **(c) bit-identical.** `coldA vs mixed` and `coldB vs mixed` are both
+  `tokens_identical=True, prefix=128/128, max|dlogprob| = 0.000e+00`. The noise floor was
+  established in the same run by `coldA vs coldB`, also exactly zero, so a nonzero divergence
+  would have meant something.
+
+The run also carries **positive evidence that the patched path executed**, not merely that
+nothing crashed. In the mixed phase `prefix_cache_queries_total` is 90,062 while
+`external_prefix_cache_queries_total` is 62,046 — exactly 90,062 − 28,016. The connector was
+asked only for what the GPU did not already hold, which is the divergent lookup itself.
+Contrast the `head` phase, a pure external hit, where external queries equal the entire
+prompt (29,599). The load was a single 1.87 GB transfer in 0.159 s, 11.7 GB/s: the CPU tier.
+
+**What is still not proven.** There is no *negative control*. This bench has not been run
+against an engine that has `RADIANCE_OFFLOAD_MIXED_HIT=1` but lacks the R3.15 hunks, so
+"the fix prevents the crash" rests on the mechanism in R3.15.2/R3.15.3 plus the original
+crash, not on a paired observation. Running it needs a reload with the pre-R3.15 patch file
+(`git show a48e3a7^:vllm/kv-cache/patch_offload_mixed_hit.py`) and costs a model reload.
+
+And there is still no *stock* reproduction, so this cannot be filed upstream yet. Both
+defects are in stock 0.27.1 and neither is model-specific — they need a connector, a lagging
+group, and an external hit landing on a request that also hit the GPU prefix cache. What
+this box supplies that upstream CI does not is traffic that actually reaches the read-back
+path. `patch_kv_group_size.py` and `patch_kv_offload_eagle_groups.py` change *which* group
+lags and how often, not whether the invariant holds: the eagle pop in `SlidingWindowManager`
+and the divergent lookup in `get_computed_blocks_for_connector` are both stock.
 
 ### R3.15.6 How it gets tested — `check-r315-boot.sh` then `mixedbench.py`
 
@@ -1565,22 +1595,36 @@ text that exists only in the patched file.
 
 `equivbench.py` cannot test this fix. Its `fs` phase evicts the entire cache, so the probe
 that follows has `num_computed_tokens = 0` — a pure external hit, which never reaches the
-divergent-hit path. `mixedbench.py` builds the mixed case on purpose, using upstream's own
-reverse-order block free (the tail of a prompt leaves the GPU before its head, to preserve
-shared prefixes):
+divergent-hit path. `mixedbench.py` builds the mixed case on purpose:
 
-    coldA   fresh cache_salt        -> recompute, reference answer
-    coldB   fresh cache_salt        -> recompute, identical text: the noise floor
-    warm    coldB's salt again      -> full GPU hit, then drain so the tier holds it too
-    evict   novel traffic, stepwise -> eats the free queue front-first, so the prompt's TAIL
-    mixed   coldB's salt again      -> head from GPU, tail from the tier
+    coldA     FULL, cache_salt A   -> recompute, reference answer
+    coldB     FULL, cache_salt B   -> recompute, identical text: the noise floor
+    drain                          -> FULL is now resident on the offload tier
+    evictall  ~1.25x the GPU pool  -> the GPU holds none of FULL
+    head      HEAD, cache_salt B   -> puts ONLY the first ~30k tokens back in the GPU
+    mixed     FULL, cache_salt B   -> head from the GPU, tail from the tier
 
-The eviction volume is found, not predicted — it depends on what was in the pool before the
-run — so the sweep probes after each step and stops at the first request showing GPU hits and
-external hits together. It exits non-zero unless a mixed hit was actually built, the engine
-survived it, and the tokens matched both recomputes; "no mixed hit built" is reported as a
-failure rather than a pass, because a fix that quietly stopped serving mixed hits would
-otherwise look clean.
+`HEAD` is a literal whitespace-cut text prefix of `FULL`, binary-searched against
+`POST /tokenize` to the target token count, so the GPU prefix cache matches it
+block-for-block and the `mixed` request is guaranteed to straddle the boundary.
+
+**The construction this replaced, and why.** The first version evicted the prompt's *tail*
+in steps and probed after each one, relying on upstream's reverse-order block free — the
+tail of a prompt does leave the GPU before its head, `kv_cache_manager.free()` frees via
+`reversed(...)` precisely so shared prefixes survive, and that premise was checked in the
+running source rather than assumed. It still failed (run `a1f560`): one 30,000-token step
+took the probe from a full GPU hit straight to `gpu_hits=0 ext_hits=79104`, with no mixed
+state in between. Where the eviction front stops depends on what else was in the pool when
+the run started, so the window the sweep aims at moves between runs. Aiming at a window
+whose position depends on prior pool contents is not a test, it is a coin flip. The
+two-prompt construction does not aim.
+
+`classify_mixed()` exists because `tierbench.classify()` collapses to `OFFLOAD` as soon as
+any external byte moves, which hides the exact case this bench was written to see. The bench
+exits non-zero unless a mixed hit was actually built, the engine survived it, and the tokens
+matched both recomputes; "no mixed hit built" is reported as a failure rather than a pass,
+because a fix that quietly stopped serving mixed hits would otherwise look clean — which is
+how run `a1f560` was caught instead of being read as a green run.
 
 # Revision 2 — 2026-09-07 (review of rev 1 against the live server)
 

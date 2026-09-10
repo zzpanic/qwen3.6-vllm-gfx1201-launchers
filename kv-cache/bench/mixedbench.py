@@ -26,23 +26,30 @@ So this bench builds a mixed hit on purpose and checks three things:
 
 HOW A MIXED HIT IS BUILT
 ------------------------
-vLLM frees a request's blocks in REVERSE order, so the tail of a prompt is evicted from
-the GPU before its head -- that is deliberate upstream behaviour, to preserve shared
-prefixes. This bench uses it:
+By warming a HEAD prefix into the GPU while the FULL prompt sits on the offload tier:
 
-    coldA   cache_salt A, never seen      -> full recompute, reference answer
-    coldB   cache_salt B, never seen      -> full recompute, identical text, noise floor
-    warm    cache_salt B again            -> full GPU hit; then drain, so the whole prompt
-                                             is now resident on the offload tier too
-    evict   novel traffic, in increments  -> takes the free queue front-first, which means
-                                             the junk eats the TAIL of the warm prompt
-    mixed   cache_salt B again            -> head from the GPU prefix cache, tail from the
-                                             offload tier: the case that crashed
+    coldA     FULL, cache_salt A, never seen  -> recompute, reference answer
+    coldB     FULL, cache_salt B, never seen  -> recompute, identical text, noise floor
+    drain                                     -> FULL is now resident on the tier
+    evictall  ~1.2x the GPU pool of novel     -> the GPU holds none of FULL
+              traffic
+    head      HEAD, cache_salt B              -> puts ONLY the first HEAD_TOKENS of the
+                                                 prompt back in the GPU prefix cache
+    mixed     FULL, cache_salt B              -> head from the GPU, tail from the tier
 
-The eviction volume is not predicted, it is FOUND. Each increment is followed by a full
-probe, and the first probe that shows GPU hits AND external hits/loads in the same request
-is the measurement. Predicting it would need to know how much of the pool is free, which
-depends on what ran before.
+HEAD is a literal text prefix of FULL under the same cache_salt, so their token streams
+share a prefix and vLLM's block hash chain matches for the whole of HEAD.
+
+WHY NOT PARTIAL EVICTION. The first version of this bench evicted the prompt's tail and
+kept its head, which is what vLLM's own block ordering is built to do -- blocks are freed
+via `reversed(...)` precisely so the tail is evicted first and shared prefixes survive
+(single_type_kv_cache_manager.py, `free_blocks(reversed(pop_blocks_for_free(...)))`). It
+still did not work: run a1f560 went from a full GPU hit straight to gpu_hits=0 with 79,104
+external tokens in one 30k step, with no mixed state in between. Aiming at a window whose
+position depends on what was in the pool before the run is not a test, it is a coin flip.
+The two-prompt construction does not depend on eviction order at all, and it reproduces
+the production pattern directly: a conversation head stays hot while longer continuations
+come back from disk.
 
 BOX REQUIREMENTS
 ----------------
@@ -54,7 +61,7 @@ USAGE
 -----
     ./mixedbench.py --yes                 full run
     ./mixedbench.py --dry-run             sizing only, no load
-    ./mixedbench.py --yes --prefix-tokens 60000   smaller/faster
+    ./mixedbench.py --yes --head-tokens 20000     smaller GPU-resident head
 
 Exit status is 0 only if a mixed hit was actually built, the engine survived it, and the
 tokens matched both recomputes.
@@ -73,15 +80,13 @@ import equivbench as E                                         # noqa: E402
 
 OUT_DIR = os.environ.get("MIXEDBENCH_OUT", T.OUT_DIR)
 
-# Eviction sweep. Each step pushes this many novel tokens through the server, then probes.
-# Keep it a whole multiple of tierbench.EVICT_CHUNK_TOKENS: evict() rounds DOWN to
-# int(want / EVICT_CHUNK_TOKENS) chunks, so 24000 would silently push 30000 and the
-# "evicted so far" column would be fiction.
-EVICT_STEP_TOKENS = int(os.environ.get("MIXEDBENCH_EVICT_STEP",
-                                       str(T.EVICT_CHUNK_TOKENS)))
-# Stop rather than evict forever. Past ~1.5x the GPU pool the prompt is gone entirely and
-# every further probe is a pure external hit, which is equivbench's test, not this one.
-EVICT_CAP_MULT = 1.6
+# How much of the prompt is warmed back into the GPU before the mixed probe. It only has
+# to exceed one chunk (1,648 tokens here) to make the local hit real; a third of the prompt
+# leaves an unambiguous tail for the connector to fetch.
+HEAD_TOKENS = int(os.environ.get("MIXEDBENCH_HEAD_TOKENS", "30000"))
+# The evictall phase must clear the whole pool, not most of it: any surviving block of the
+# prompt makes the head phase ambiguous about what it actually put back.
+EVICT_ALL_MULT = float(os.environ.get("MIXEDBENCH_EVICT_MULT", "1.25"))
 
 # Lines in the engine log that mean this test found a real failure, not a slow answer.
 FATAL_PATTERNS = [
@@ -91,6 +96,31 @@ FATAL_PATTERNS = [
     "EngineCore encountered a fatal error",
     "Engine core proc died",
 ]
+
+
+def head_prefix(sizer, full_text, want_tokens):
+    """A literal text prefix of `full_text` that tokenizes to about `want_tokens`.
+
+    It must be a text prefix, not separately generated text: vLLM hashes token blocks in
+    sequence, so only a shared TOKEN prefix produces a prefix-cache hit, and the cheapest
+    way to guarantee one is to cut the same string. Cut on whitespace so the boundary token
+    is not split -- an off-by-one token at the very end costs at most the final partial
+    block, which is not part of the hit either way."""
+    lo, hi = 0, len(full_text)
+    cut = min(hi, max(1, int(hi * want_tokens / max(1, sizer.count(full_text)))))
+    for _ in range(6):
+        sp = full_text.rfind(" ", 0, cut)
+        cand = full_text[: sp if sp > 0 else cut]
+        got = sizer.count(cand)
+        if abs(got - want_tokens) <= max(200, want_tokens * 0.02):
+            return cand, got
+        if got < want_tokens:
+            lo = cut
+        else:
+            hi = cut
+        cut = (lo + hi) // 2 if hi > lo else int(cut * want_tokens / max(1, got))
+        cut = max(1, min(len(full_text), cut))
+    return cand, got
 
 
 def classify_mixed(d):
@@ -164,15 +194,15 @@ def write_report(path_md, path_json, meta, phases, comps, fatal):
         L.append("```")
 
     L.append("\n## Phases\n")
-    L.append("| phase | salt | evicted so far | served | wall | cached_tokens | "
+    L.append("| phase | salt | served | wall | prompt_tokens | cached_tokens | "
              "gpu_hits | ext_hits | load MB |")
     L.append("|---|---|---|---|---|---|---|---|---|")
     for p in phases:
         r, c = p["probe"], p["counters"]
-        L.append("| %s | %s | %s | %s | %.2fs | %s | %g | %g | %.1f |"
+        L.append("| %s | %s | %s | %.2fs | %s | %s | %g | %g | %.1f |"
                  % (p["phase"], r["cache_salt"][:10],
-                    "{:,}".format(p.get("evicted_tokens", 0)),
                     p["served_by"], r["wall_s"],
+                    "{:,}".format(r["prompt_tokens"] or 0),
                     "{:,}".format(r["cached_tokens"] or 0),
                     c["gpu_hits"], c["ext_hits"], c["load_bytes"] / 1e6))
 
@@ -217,6 +247,8 @@ def main():
                     help="required: this pushes a lot of eviction traffic")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prefix-tokens", type=int, default=T.TARGET_PREFIX_TOKENS)
+    ap.add_argument("--head-tokens", type=int, default=HEAD_TOKENS,
+                    help="how much of the prompt is warmed back into the GPU")
     args = ap.parse_args()
 
     run_id = "%x" % (int(time.time()) & 0xFFFFFF)
@@ -238,10 +270,10 @@ def main():
               % (geom["source"], geom["n_groups"],
                  "{:,}".format(geom["block_file_bytes"]), geom["tokens_per_hash"]))
 
-    evict_cap = int(cap["gpu_tokens"] * EVICT_CAP_MULT)
-    T.log("plan: prompt %s tok | evict in %s-tok steps, cap %s tok | max_tokens %d"
-          % ("{:,}".format(args.prefix_tokens), "{:,}".format(EVICT_STEP_TOKENS),
-             "{:,}".format(evict_cap), E.MAX_TOKENS))
+    evict_all = int(cap["gpu_tokens"] * EVICT_ALL_MULT)
+    T.log("plan: prompt %s tok | head %s tok | evictall %s tok | max_tokens %d"
+          % ("{:,}".format(args.prefix_tokens), "{:,}".format(args.head_tokens),
+             "{:,}".format(evict_all), E.MAX_TOKENS))
 
     if args.dry_run:
         T.log("dry run: nothing sent.")
@@ -257,25 +289,24 @@ def main():
         "started_utc": started_ts, "content_salt": content_salt,
         "cache_salt_a": SALT_A, "cache_salt_b": SALT_B,
         "endpoint": base, "capacity": cap, "geometry": geom,
-        "max_tokens": E.MAX_TOKENS, "evict_step_tokens": EVICT_STEP_TOKENS,
-        "evict_cap_tokens": evict_cap, "drains": [],
+        "max_tokens": E.MAX_TOKENS, "head_tokens_requested": args.head_tokens,
+        "evict_all_tokens": evict_all, "drains": [],
     }
     phases, comps = [], []
-    evicted = 0
     rc = 0
 
-    def run(name, salt, expect_kinds, evicted_tokens=0):
+    def run(name, salt, expect_kinds, text=None, note=""):
         T.budget_check()
         T.log("PHASE %s" % name)
         m0 = T.snapshot(base)
-        r = E.ask(base, P, name, salt)
+        r = E.ask(base, text if text is not None else P, name, salt)
         m1 = T.snapshot(base)
         d = T.delta(m0, m1)
         kind, counters = classify_mixed(d)
         ok = expect_kinds is None or any(kind.startswith(k) for k in expect_kinds)
         row = {"phase": name, "expected": expect_kinds, "served_by": kind,
                "valid": ok, "probe": r, "metrics_delta": d, "counters": counters,
-               "evicted_tokens": evicted_tokens}
+               "note": note}
         phases.append(row)
         T.log("  %s: wall %.2fs served_by=%s cached=%s gpu_hits=%g ext_hits=%g "
               "load=%.1f MB%s"
@@ -289,52 +320,34 @@ def main():
         meta["prompt_tokens"] = ptok
         T.log("prompt built: %s tokens" % "{:,}".format(ptok))
 
+        H, htok = head_prefix(sizer, P, args.head_tokens)
+        meta["head_tokens"] = htok
+        T.log("head prefix built: %s tokens (%.0f%% of the prompt)"
+              % ("{:,}".format(htok), 100.0 * htok / ptok))
+
         run("coldA", SALT_A, ["RECOMPUTE"])
         run("coldB", SALT_B, ["RECOMPUTE"])
-        run("warm", SALT_B, ["GPU", "MIXED"])
 
-        # The tail must be ON the tier before it is evicted from the GPU, or the "mixed"
-        # phase degrades into a partial recompute and proves nothing.
-        meta["drains"].append(T.drain(base, "post-warm"))
+        # FULL must be ON the tier before the GPU is cleared, or the mixed phase degrades
+        # into a partial recompute and proves nothing.
+        meta["drains"].append(T.drain(base, "post-coldB"))
 
-        # The pool holds gpu_tokens; our warm prompt occupies prompt_tokens of it and was
-        # freed most recently, so everything else in there is ahead of it in the free
-        # queue. Clearing that much first puts the sweep directly on the prompt's tail
-        # instead of spending five probes evicting coldA and whatever preceded this run.
-        pre = max(0, cap["gpu_tokens"] - ptok)
-        pre = (pre // T.EVICT_CHUNK_TOKENS) * T.EVICT_CHUNK_TOKENS
-        if pre:
-            T.log("PRE-EVICT %s tok (pool %s - prompt %s), to reach the prompt's tail"
-                  % ("{:,}".format(pre), "{:,}".format(cap["gpu_tokens"]),
-                     "{:,}".format(ptok)))
-            T.evict(base, sizer, content_salt, pre, "preevict")
-            evicted += pre
-        meta["pre_evict_tokens"] = pre
+        T.log("EVICTALL %s tok -- the GPU must hold none of the prompt"
+              % "{:,}".format(evict_all))
+        T.evict(base, sizer, content_salt, evict_all, "evictall")
 
-        mixed_row = None
-        step = 0
-        while evicted < evict_cap:
-            step += 1
-            T.budget_check()
-            T.log("EVICT step %d (+%s tok, %s total)"
-                  % (step, "{:,}".format(EVICT_STEP_TOKENS), "{:,}".format(
-                      evicted + EVICT_STEP_TOKENS)))
-            T.evict(base, sizer, content_salt, EVICT_STEP_TOKENS,
-                    "evict%d" % step)
-            evicted += EVICT_STEP_TOKENS
-            row = run("probe%d" % step, SALT_B, None, evicted_tokens=evicted)
-            if row["served_by"].startswith("MIXED"):
-                row["phase"] = "mixed"
-                mixed_row = row
-                break
-            if row["served_by"] == "OFFLOAD":
-                T.log("  overshot: the GPU no longer holds any of the prompt. "
-                      "Reduce MIXEDBENCH_EVICT_STEP and rerun.")
-                break
+        # Puts back ONLY the head. Whether this is served from the tier or recomputed does
+        # not matter; what matters is that afterwards the head is GPU-resident and the tail
+        # is not.
+        run("head", SALT_B, None, text=H,
+            note="warms the first %s tokens into the GPU" % "{:,}".format(htok))
 
-        meta["mixed_built"] = mixed_row is not None
-        if mixed_row is None:
-            T.log("NO MIXED HIT BUILT -- nothing was tested. See the phase table.")
+        mixed_row = run("mixed", SALT_B, ["MIXED"],
+                        note="head from GPU, tail from the offload tier")
+        meta["mixed_built"] = mixed_row["served_by"].startswith("MIXED")
+        if not meta["mixed_built"]:
+            T.log("NO MIXED HIT BUILT (served_by=%s) -- nothing was tested."
+                  % mixed_row["served_by"])
             rc = 1
 
         by = {p["phase"]: p["probe"] for p in phases}
