@@ -64,42 +64,36 @@ prefix, while the GPU prefix cache — looking at the same prompts in the same w
 correctly refused **all** of them. The fix is confirmed live by `check-r315-boot.sh`, and
 a controlled reverse test isolating that one file reproduces the defect on demand.
 
-**What has since been attacked, and held.** After that fix the cache was not simply
-assumed to be right; the remaining ways it could be wrong were enumerated and tested one
-at a time, and each is now a closed question with its evidence and its reopen condition
-recorded in
-[`kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md):
+**What has since been attacked, and held.** The remaining ways the cache could be wrong
+were enumerated and tested one at a time:
 
 | The suspicion | Outcome |
 |---|---|
 | A disk-tier hit might not reproduce a cold recompute | **Exact.** An 85,696-token disk hit was bit-identical |
-| The mixed local+external boundary might corrupt output (three CT4 failures) | **Not a defect.** 9/9 bit-identical in an uncontended run; every original failure was co-tenancy moving a near-tie logit |
-| `cache_salt` might not reach the tier's key, letting one tenant read another's blocks | **Honoured.** The claim of an isolation defect is **refuted** — the salt chains into the offload key, and six fresh salts read zero bytes from both tiers |
-| The correctness harness itself might be incapable of failing | **It fails when it should.** A negative-control gate runs first and blocks the suite if the instrument cannot detect a divergence it was handed |
+| The mixed local+external boundary might corrupt output (three CT4 failures) | **Not a defect.** 9/9 bit-identical uncontended; every original failure was co-tenancy moving a near-tie logit |
+| `cache_salt` might not reach the tier's key, letting one tenant read another's blocks | **Honoured.** The isolation claim is **refuted** — the salt chains into the offload key |
+| The correctness harness itself might be incapable of failing | **It fails when it should.** A negative-control gate blocks the suite if the instrument cannot detect a divergence it was handed |
 
-None of that was luck: a co-tenant on the engine can *create* a spurious divergence but can
-never hide a real one, so the uncontended runs above are the valid test. That asymmetry,
-and the guard built on it, are in [`CORRECTNESS.md`](docs/CORRECTNESS.md).
+A co-tenant can *create* a spurious divergence but never hide a real one, so the uncontended
+runs above are the valid test — that asymmetry is in [`CORRECTNESS.md`](docs/CORRECTNESS.md).
+Each row's evidence, and the one condition that would reopen it, is in
+[`kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md), which also lists the
+claims this project has published and withdrawn.
 
-**What is still not validated, precisely.** The framework is **assumed correct** — enough
-to work on and to benchmark against — and it is **not yet validated correct**. The gap is
-now a short, named list rather than an open question:
-[`status-2026-09-10.md`](docs/status-2026-09-10.md) §4. The two that matter most are
-showing the *generated tokens* differ under a deliberately re-armed defect (the form
-upstream will want, and it needs two model reloads), and reproducing both defects on a
-**stock** vLLM 0.27.1 build, which blocks filing upstream. Neither is optional before an
-accuracy claim is made from this repository.
+**What is still not validated.** The framework is **assumed correct** — enough to work on
+and to benchmark against — and **not yet validated correct**. What is owed is a named list,
+[`status-2026-09-10.md`](docs/status-2026-09-10.md) §4; the two that matter most are showing
+the *generated tokens* differ under a deliberately re-armed defect, and reproducing both
+defects on a **stock** vLLM 0.27.1 build, which is what blocks filing upstream.
 
-One consequence is immediate and unchanged: **every number in this repository taken before
-2026-09-10 is uncitable** — the harness was sound, the engine under it was not. Re-measuring
-them on the fixed engine is outstanding work, not a formality.
+**Every number in this repository taken before 2026-09-10 is uncitable** — the harness was
+sound, the engine under it was not. Re-measuring them is outstanding work, not a formality.
 
-**Where the effort actually stands.** The roadmap below is ordered, and the first stage is
-half delivered: the per-tier metrics exist, are patched into the engine, and are verified
-live — `tools/tierreport.py` reads them and answers, from one scrape of your own traffic,
-whether the RAM tier is the right size, whether the disk is too slow, and whether the
-layered cache is adding value at all. The controlled A/B harness with a genuinely cold arm,
-which is the other half of that stage, does not exist yet.
+**Where the effort stands.** Roadmap stage 1 is half delivered. The per-tier metrics exist,
+are patched into the engine and are verified live — `tools/tierreport.py` turns one scrape
+of your own traffic into a verdict on whether the RAM tier is the right size, whether the
+disk is too slow, and whether the layered cache is adding value at all. The controlled A/B
+harness with a genuinely cold arm, the other half, does not exist yet.
 
 It is published at this maturity **deliberately**. Several people want this capability;
 the author has neither the time nor the specialist expertise to carry it to completion

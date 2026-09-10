@@ -72,6 +72,24 @@ table above, because each was learned by publishing a wrong number first.
 | Is a divergence seen under contention evidence of a defect? | **No — and the asymmetry matters.** Contention can only *create* a spurious divergence, never hide a real one. So an **uncontended** run is the valid test, and a *contended* PASS is stronger than an uncontended one. | Uncontended 0/10, contended 10/10, always at the same near-tie token, margin 0.125. [`CORRECTNESS.md`](CORRECTNESS.md) | — |
 | Is it enough to validate a cache-correctness fix on the fixed build? | **No. Arm the defect and show the instrument catches it.** | [`kv-cache-known-issues.md`](kv-cache-known-issues.md) §E.6 | — |
 | Can `/metrics` be assumed not to expose something? | **No — enumerate it first.** A metric assumed absent was present, and the "≤25%" figure it produced was a lower bound, not a measurement. | — | — |
+| Is the running container's state inspectable, given `podman exec` fails? | **Yes — read it through `/proc`.** `/proc/$(podman inspect <container> --format '{{.State.Pid}}')/root/...` exposes the whole container filesystem read-only from the host. | Used to pre-flight all 31 hunks of patch 8 against the **live** engine before a reload: 31/31 clean. | — (`podman exec` itself is still blocked by RLIMIT_MEMLOCK; that is [`kv-cache-known-issues.md`](kv-cache-known-issues.md) B2) |
+
+## 5. Retracted — claims this project published and then withdrew
+
+These were stated in earlier revisions of the documents in `docs/`, and are **wrong**. They
+are collected here so the narrative documents can state the current answer plainly instead
+of carrying a correction beside every sentence. If you are holding an old copy of this
+repository, or a summary written from one, check it against this table.
+
+| The claim, as published | The correction | Where it came from |
+|---|---|---|
+| *"vLLM radiance matches the prefix cache by block content, not by chained prefix"* — i.e. the GPU prefix cache was blamed for the polluted BetterBench run (A1) | **Wrong.** The GPU prefix cache chains correctly and always did. The defect was in the **offload tier's** mixed-hit lookup, which could hand `prepare_load` a key it had not confirmed. Fixed by R3.15. | `status-2026-09-09.md` §3, repeated into `kv-cache-future-work.md` §0 |
+| *"The N=8 stride is the mechanism behind A1"* | **Wrong, and a separate matter.** A1 was unconfirmed keys; the stride approximation is an independent, deliberate design limitation that R3.15 neither caused nor cured. | `kv-cache-known-issues.md` A2 |
+| *"The CPU tier holds ~508,000 tokens in 16 GiB"*, and the stride pair *"115,360 (N=1) → 276,900 (N=8)"* | **Superseded twice over.** The tier is **24 GiB** — `kv_offload_tier_capacity_bytes{tier="cpu"}` reads 25.76 GB on the live engine — and at the measured 33,808 B/token that is **~762,000 tokens**. The old token figures also rest on a Mamba-storage share retracted in §2, so they cannot simply be rescaled to the larger tier. | `kv-cache-current-implementation.md`, `kv-cache-future-work.md`, `kv-cache-handover.md` |
+| *"fs reads peak at 719.3 MB/s at 8 threads"* | **Not the rate the tier gets.** That was a threaded microbenchmark; in service the device delivers **~117 MB/s regardless of fanout**, against a ~101 MB/s recompute break-even (§3). | `kv-cache-future-work.md`, tier-latency table |
+| *"~2.45M tokens served ≈ 26 min of prefill avoided"* presented as **the valid quantitative claim** | **Uncitable**, along with every other number taken before 2026-09-10 — not because the harness was wrong but because the engine under it was serving mis-chained KV. Retained as method. Re-measurement is `status-2026-09-10.md` §4 items 2–3. | `kv-cache-future-work.md`, `kv-cache-handover.md` |
+| *"Live container state cannot be inspected"* (because `podman exec` fails) | **It can**, read-only, through `/proc/<pid>/root` — see §4. This also unblocks the `tokens_per_chunk` question, which was recorded as blocked rather than merely undone. | `kv-cache-known-issues.md` B2/C1 |
+| *"An offload hit costs ~78 s"*; *"promotion: 80 s vs 14 s"*; *"the Mamba layers are the storage waste"*; *"do not buy disks"* | All withdrawn. See §4, §4, §2 and §3 respectively. | various |
 
 ---
 
