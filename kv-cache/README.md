@@ -336,11 +336,13 @@ cd qwen3.6-vllm-gfx1201-launchers/kv-cache
 | [`docs/kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | **before writing anything** — the hard "never do X" list |
 | [`docs/kv-cache-references.md`](docs/kv-cache-references.md) | every PR, paper and experiment already reviewed, each with a ruling |
 | [`docs/kv-cache-historical.md`](docs/kv-cache-historical.md) | the experimental record — including the claims that were **retracted**, and why. Read it before re-running an experiment that looks obvious |
+| [`docs/kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md) | **the register of what is settled**, each row carrying the one condition that would reopen it. Read this before proposing work; the historical record is the reasoning behind it |
 | [`patches/README.md`](patches/README.md) | what the eight patches need in order to run, which two are fatal on failure, and the env gate on each |
 | [`tools/README.md`](tools/README.md) | the tier sizing/speed report: what it needs, how to test it with no engine, and how to read `--calibrate` honestly |
 
 A prompt that works: *"Read kv-cache/README.md, then docs/kv-cache-handover.md and
-docs/kv-cache-known-issues.md, and skim docs/kv-cache-historical.md for what has already
+docs/kv-cache-known-issues.md, check docs/kv-cache-closed-decisions.md for whether the
+question is already settled, and skim docs/kv-cache-historical.md for what has already
 been tried and retracted. This is a proof of concept with known correctness errors,
 and the roadmap in the README is in the author's intended order. Start at stage 1: audit
 what cache metrics the existing patches already expose, and propose a reproducible harness
@@ -393,6 +395,7 @@ Read in this order. Every document is written to be actionable without opening t
 | **[`kv-cache-handover.md`](docs/kv-cache-handover.md)** | **Read first.** The map, the current state, and the resume path. |
 | [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md) | **Preliminary results.** One small-sample run on a real mixed workload: 70% of prompt tokens served from cache. Includes §4, the figures in it that do not yet reconcile. |
 | [`kv-cache-historical.md`](docs/kv-cache-historical.md) | **The experimental record.** Every hypothesis, measurement, correction and retraction, in order — so you do not re-run a settled experiment or build on a withdrawn claim. |
+| [`kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md) | **The register of closed decisions.** The same closures as a scannable table rather than a narrative, with the evidence and the reopen condition for each. Consult it first; it exists so the narrative documents do not have to be read end to end to find out whether a question is already answered. |
 | [`kv-cache-operations.md`](docs/kv-cache-operations.md) | The runbook: turn the disk tier off, resize `/dev/shm`, resize the KV tier. Each with commands, verification and undo. |
 | [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the eight patches with gates and order, the two-layer GC, the serve invocation. |
 | [`kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | Every problem, gotcha and limitation as Symptom / Root cause / Impact / Status, by severity, plus the hard "never do X" list. |

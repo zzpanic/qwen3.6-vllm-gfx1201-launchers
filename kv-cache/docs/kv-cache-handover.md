@@ -80,7 +80,7 @@ We are building and documenting a **two-tier (three-tier) KV-cache offload** for
 ---
 
 ## 6. How to resume (concrete next steps, in order)
-1. **Read the docs in this order** if you need depth: `kv-cache-current-implementation.md` (what's running) → `kv-cache-known-issues.md` (what's broken/limited) → `kv-cache-future-work.md` (the plan) → `kv-cache-references.md` (links) → `status-2026-09-09.md` (the snapshot).
+1. **Read the docs in this order** if you need depth: `kv-cache-current-implementation.md` (what's running) → `kv-cache-known-issues.md` (what's broken/limited) → `kv-cache-closed-decisions.md` (what is already settled, and what would reopen it — read this before proposing anything) → `kv-cache-future-work.md` (the plan) → `kv-cache-references.md` (links) → `status-2026-09-09.md` (the snapshot).
 2. **Resolve §5.1** — pin down what "there" was (the document) and whether MXFP4/FP8 was the eval setup or a target note.
 3. **Confirm `tokens_per_chunk`** (from the model config / boot log, since `podman exec` is out) → make the reuse L concrete.
 4. **Get the go / go-not** for the best-effort build (§5.2), then **wire in the reuse suffix refresh at L = one block** (the one new piece; everything else is already live).

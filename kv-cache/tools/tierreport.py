@@ -212,6 +212,20 @@ class Scrape:
         return bool(self._series(name) or self._series(name + "_total")
                     or self._series(name + "_bucket"))
 
+    def has_prefix(self, prefix):
+        """True if ANY series starts with `prefix`.
+
+        The presence test that matters is "was the patch applied", and that
+        cannot be asked of one named series: prometheus_client registers a
+        metric lazily, on first observation, so a tier that has stored but not
+        yet been read back exposes its store-side series and none of its
+        load-side ones. Asking for a load counter there answers "the patch is
+        missing" about an engine that is running the patch, and the remedy that
+        answer implies -- apply it and restart -- would destroy the very
+        counters the report needs.
+        """
+        return any(name.startswith(prefix) for name in self.index)
+
     def label_values(self, name, label):
         out = set()
         for candidate in (name, name + "_total", name + "_bucket"):
@@ -352,6 +366,10 @@ def derive(scrape):
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "mode": "window" if scrape.base is not None else "lifetime",
         "window_seconds": scrape.window_seconds,
+        # The patch is present if ANY tier-labelled series is; whether the
+        # tiers have SERVED anything yet is a separate question, and conflating
+        # the two tells a correctly-patched operator to restart.
+        "tier_patch_present": scrape.has_prefix(TR),
         "have_tier_metrics": scrape.has(M_HIT_TOKENS) or scrape.has(M_LOAD_BYTES),
         "missing": [],
         "notes": [],
@@ -391,13 +409,21 @@ def derive(scrape):
     r["prefill_computed_tokens"] = computed_tokens
 
     if not r["have_tier_metrics"]:
-        r["missing"].append(
-            "Per-tier series absent. Apply patch_kv_offload_tier_report.py and "
-            "restart the server. Without it there is no per-tier row at all: "
-            "the engine's unlabelled load_bytes/load_time cover the CPU tier "
-            "only, so dividing them describes memcpy speed and says nothing "
-            "about the disk."
-        )
+        if r["tier_patch_present"]:
+            r["missing"].append(
+                "Per-tier instrumentation is applied, but no tier has served a "
+                "read yet, so there are no per-tier rows to show. Do NOT "
+                "restart: these counters are lifetime-cumulative and a restart "
+                "resets them. Keep serving and re-run."
+            )
+        else:
+            r["missing"].append(
+                "Per-tier series absent. Apply patch_kv_offload_tier_report.py "
+                "and restart the server. Without it there is no per-tier row at "
+                "all: the engine's unlabelled load_bytes/load_time cover the CPU "
+                "tier only, so dividing them describes memcpy speed and says "
+                "nothing about the disk."
+            )
         return r
 
     # ---- tiers -----------------------------------------------------------
@@ -671,11 +697,27 @@ def verdicts(r, calibration=None):
         })
 
     if not r.get("have_tier_metrics"):
-        add("All of them", "unknown",
-            "The per-tier metrics are not present on this server, so none of "
-            "the sizing questions can be answered. Apply "
-            "patch_kv_offload_tier_report.py and restart.",
-            "no series matching %s*" % TR)
+        if r.get("tier_patch_present"):
+            # The patch is in. The tiers simply have not served anything yet,
+            # which on a freshly restarted engine is the expected state rather
+            # than a fault: a block has to be stored before it can be read
+            # back, and the load-side series do not exist until the first read.
+            add("All of them", "unknown",
+                "The per-tier instrumentation is present, but no tier has "
+                "served a read yet, so there is nothing to size. This is the "
+                "normal state of a freshly restarted engine: the store side is "
+                "already recording, and the load side appears with the first "
+                "cache hit. Leave the server up and run this again after a day "
+                "of real traffic -- these counters are lifetime-cumulative and "
+                "a restart resets them, so restarting now would throw away the "
+                "evidence rather than produce it.",
+                "%s* present; no %s or %s yet" % (TR, M_HIT_TOKENS, M_LOAD_BYTES))
+        else:
+            add("All of them", "unknown",
+                "The per-tier metrics are not present on this server, so none "
+                "of the sizing questions can be answered. Apply "
+                "patch_kv_offload_tier_report.py and restart.",
+                "no series matching %s*" % TR)
         return out
 
     tiers = {row["tier"]: row for row in r["tiers"]}

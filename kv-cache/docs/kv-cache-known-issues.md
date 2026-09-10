@@ -92,6 +92,10 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 ---
 
 ## E. Quick reference — what to never do
+
+> These are the operationally dangerous ones — the mistakes that cost a run or a number.
+> For questions that are simply *settled*, and what would unsettle each,
+> see [`kv-cache-closed-decisions.md`](kv-cache-closed-decisions.md).
 1. **Never cite any benchmark number taken before 2026-09-10** — the engine under the harness was serving another prompt's KV (A1). The harness itself was sound.
 2. **Never assume an exact state at an arbitrary position** — the stride store is exact only at kept boundaries (A2); replay the gap to get the exact state.
 3. **Never treat DASC's 2.63×/42.6%/68.4% as ours** — uniform coarsening + quantized config + single model/HW (D1/D2/D3).

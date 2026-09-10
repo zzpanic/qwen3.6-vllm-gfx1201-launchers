@@ -307,6 +307,11 @@ unmerged PR that applies is worth more than a merged one that does not.
 
 ## 9. What was measured and then deliberately left alone
 
+> The full register, including the closures reached elsewhere in this document and the
+> condition that would reopen each one, is
+> [`kv-cache-closed-decisions.md`](kv-cache-closed-decisions.md). The list below is the
+> subset that belongs to the experimental record; the reasoning behind every row is above.
+
 - **Storage density** — at the architectural floor (§2). Closed.
 - **The disk device** — ~117 MB/s from three directions (§5). Closed; do not re-bench.
 - **`blocks_per_chunk`** — investigated, closed.
