@@ -1253,6 +1253,13 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # NB the flags themselves sit INSIDE the continued server-arg line below, with no comment
 # between them: a '#' after a trailing backslash ends the command there and would silently
 # drop --override-generation-config and --chat-template.
+# AITER JIT directory. aiter compiles its core module on import; without this
+# it lands in ephemeral site-packages and rebuilds (~15s) every boot. Point
+# it at /cache so the build persists. Versioned by image tag: aiter does not
+# validate sources, only GPU arch, so a stale .so from an older image would
+# load silently — a new tag starts fresh.
+# shellcheck disable=SC2001
+AITER_JIT_TAG="${AITER_JIT_TAG:-$(echo "$IMAGE" | sed 's|.*/||; s|[^A-Za-z0-9._-]|-|g')}"
 # STARTUP NOISE, defaults set 2026-09-05 at pat's request. Both are read by the image's
 # entrypoint, not by this script, so they only take effect if forwarded with -e below.
 #   RADIANCE_RUN_BWTEST=0    skips the GPU topology + bandwidth sweep at startup. Upstream
@@ -1335,6 +1342,8 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_BANNER_PLAIN="${RADIANCE_BANNER_PLAIN:-1}" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor -e TRITON_CACHE_DIR=/cache/triton \
   -e AITER_ROOT_DIR=/cache/aiter -e TRITON_CACHE_AUTOTUNING=1 \
+  -e AITER_JIT_DIR=/cache/aiter-jit-"$AITER_JIT_TAG" \
+  -e PYTHONPYCACHEPREFIX=/cache/pycache -e PYTHONDONTWRITEBYTECODE= \
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
   -v "$CACHE":/cache \
@@ -1371,8 +1380,19 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     cp radiance_mxfp4.py radiance_gdn.py radiance_rmsquant.py radiance_drafthead.py \
        radiance_verifyhead.py radiance_gdnmerge.py radiance_aroverlap.py radiance_topk.py \
        radiance_arnq.py "$SP"/
-    hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $(python3 -m pybind11 --includes) \
-      radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+    # Skip the hipcc rebuild when sources are unchanged: the .so is
+    # byte-identical for identical inputs, and /cache persists across boots
+    # (same pattern as R4D_CACHE above). Saves ~14s per start.
+    FP8_KEY="$(sha256sum radiance_mxfp4_fp8.hip | cut -d " " -f1)-gfx1201"
+    if [ -f "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" ]; then
+      cp "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" "$SP"/radiance_mxfp4_fp8.so
+      echo "[radiance] fp8.so from cache ($FP8_KEY)"
+    else
+      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $(python3 -m pybind11 --includes) \
+        radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+      mkdir -p "/cache/fp8so/$FP8_KEY"
+      cp "$SP"/radiance_mxfp4_fp8.so "/cache/fp8so/$FP8_KEY/"
+    fi
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
     # rebuild, the Dockerfile supports the same substitution through R4D_REPO / R4D_VERSION.
