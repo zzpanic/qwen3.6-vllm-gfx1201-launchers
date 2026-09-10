@@ -21,7 +21,7 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
   - Both arms looked at the same prompts in the same window. The GPU cache refused all of them in both. Only the tier differed. That asymmetry **is** the bug.
   - With the fix in place the prefill sweep matched an independent cold baseline within **1.3% at all eight depths**, monotonic in depth, TTFT spread **0.05–0.35%** (it had been 14–80% on the affected depths).
 - **Impact:** This was never only a benchmark-pollution issue. The engine was substituting KV belonging to a different prompt into real answers, silently. Treat any output produced before 2026-09-10 accordingly, not just any number.
-- **Status:** **Fixed** by R3.15 (`patch_offload_mixed_hit.py`, hunks 3 and 4) and confirmed live by `check-r315-boot.sh` section 5. **Not yet fully validated** — see `status-2026-09-10.md` §4. In particular the A/B that produced the 9.1 s / 20.6 s figures above was itself taken on defective code and must be re-run; until then the *size* of the historical pollution is unknown, only its direction.
+- **Status:** **Fixed** by R3.15 (`patch_offload_mixed_hit.py`, hunks 3 and 4) and confirmed live by `check-r315-boot.sh` section 5. **Not yet fully validated** — see `status-2026-09-10.md` §4, with the caveat that §4 has moved since it was written: item 4 (a negative control for the harness) is substantially satisfied by **CT5's gate** in `CORRECTNESS.md`, which blocks the whole suite unless the instrument can be shown to catch a divergence it was handed. In particular the A/B that produced the 9.1 s / 20.6 s figures above was itself taken on defective code and must be re-run; until then the *size* of the historical pollution is unknown, only its direction.
 - **Measurement trap:** a probe that replicated the harness prompt byte-for-byte "cleared" the nonce — but it was run on the **fixed** engine, where there is nothing to find. This class of bug is invisible to any probe run on patched code. **Arm the defect before concluding that a cache respects a salt.**
 
 ### A2. The N=8 stride store serves a coarser state than the exact position — CRITICAL (for exactness claims)
@@ -42,16 +42,20 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 
 ### B2. `podman exec` into the model container fails — BLOCKER
 - **Symptom:** `podman exec qwen38-27b-vllm …` fails with `crun: setrlimit RLIMIT_MEMLOCK: Operation not permitted`.
-- **Impact:** Cannot run commands inside the container to inspect live state (e.g. confirm `tokens_per_chunk`, dump the stride config).
-- **Status/workaround:** Work from **applied patches + `podman inspect`** instead. (This is also why `tokens_per_chunk` is not yet confirmed — see **C1**.)
+- **Impact:** Cannot run *commands* inside the container.
+- **Status/workaround — IMPROVED 2026-09-11.** Inspecting live state no longer needs `exec`: the container's whole filesystem is readable, read-only, through the host's `/proc`:
+  ```
+  /proc/$(podman inspect qwen38-27b-vllm --format '{{.State.Pid}}')/root/opt/vllm/lib/python3.12/site-packages/vllm/...
+  ```
+  This was used to pre-flight all 31 hunks of patch 8 against the **running** engine before a reload (31/31 clean) — something `podman inspect` alone cannot do. Applied patches + `podman inspect` + the boot log remain useful; they are no longer the only route.
 
 ---
 
 ## C. Open — unresolved questions
 
-### C1. `tokens_per_chunk` not confirmed → the reuse L is only `8 × tokens_per_chunk` — OPEN
+### C1. `tokens_per_chunk` not confirmed → the reuse L is only `8 × tokens_per_chunk` — OPEN, but no longer blocked
 - **Symptom:** The reuse refresh length is expressed as `≤ one block = 8 chunks = 8 × tokens_per_chunk tokens`, but `tokens_per_chunk` is not pinned to a concrete value.
-- **Root cause:** Cannot inspect the live config (see **B2**).
+- **Root cause:** ~~Cannot inspect the live config (see **B2**).~~ **The blocker is gone** — B2's `/proc` route reads the running engine's config directly. This is now a job nobody has done, not a job that cannot be done.
 - **Impact:** `L` is not a concrete token count yet (e.g. chunk=64 → up to ~512 tokens).
 - **Status/workaround:** Pull `tokens_per_chunk` from the running container (or the model config) to make `L` concrete.
 
@@ -100,5 +104,5 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 2. **Never assume an exact state at an arbitrary position** — the stride store is exact only at kept boundaries (A2); replay the gap to get the exact state.
 3. **Never treat DASC's 2.63×/42.6%/68.4% as ours** — uniform coarsening + quantized config + single model/HW (D1/D2/D3).
 4. **Never try to flush the cache via the API** — no endpoint exists (B1).
-5. **Never `podman exec` into `qwen38-27b-vllm`** — it fails on RLIMIT_MEMLOCK (B2); use `podman inspect` + applied patches.
+5. **Never `podman exec` into `qwen38-27b-vllm`** — it fails on RLIMIT_MEMLOCK (B2); read the live container through `/proc/<pid>/root/...` instead (B2), or use `podman inspect` + applied patches.
 6. **Never validate a cache-correctness fix on the fixed build alone** — arm the defect and show the instrument catches it (A1).

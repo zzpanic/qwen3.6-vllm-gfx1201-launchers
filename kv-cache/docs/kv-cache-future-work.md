@@ -1,13 +1,21 @@
 # KV-Cache Future Work
 
-Future-work plan for the two-tier KV offload + GDN (Gated DeltaNet) recurrent-state reuse, built on the N=8 stride store. Grounded in the DASC/DAMP investigation and the ReplaySSM analysis. See `status-2026-09-09.md` for the full investigation snapshot and `cache-preemption-patch-plan.md` for the existing patch plan.
+Future-work plan for the two-tier KV offload + GDN (Gated DeltaNet) recurrent-state reuse, built on the N=8 stride store. Grounded in the DASC/DAMP investigation and the ReplaySSM analysis. See `status-2026-09-10.md` for the current snapshot (`status-2026-09-09.md` is superseded and kept only as history) and `cache-preemption-patch-plan.md` for the existing patch plan.
+
+> ⚠️ **This document predates the 2026-09-10 correctness fix and the work that followed it.**
+> Its *plan* (§1–§4, the suffix-refresh mechanism) still stands; its *numbers* and its
+> statement of the A1 root cause do not. Corrections are marked inline below. Before acting
+> on anything here, check [`kv-cache-closed-decisions.md`](kv-cache-closed-decisions.md) for
+> whether the question has since been settled — several of these have been.
 
 ---
 
 ## 0. Where we are
 - **Two-tier offload (RAM + disk)** for KV + the linear-attention state: **built and measured.** The tier earns its keep: ~2.45M tokens served from offload ≈ **~26 min of prefill avoided** at the honest cold rate (~1,555 t/s).
 - **Stride-N=8 state store** (`RADIANCE_MAMBA_STORE_STRIDE=8`, 0.417x bytes/token): **applied.** Keep only when `(abs_chunk_idx + 1) % 8 == 0`; lookup rounds to `N×tokens_per_chunk` (i.e. the nearest kept boundary *at or before* the requested position).
-- **The BetterBench numbers are invalid (polluted)** — content-based (not chained-prefix) cache matching + the nonce only varies block 0. Do not cite them. The honest story is the "tier earned its keep" framing above.
+- **The BetterBench numbers are invalid (polluted)** — the offload tier served blocks under keys it had not confirmed. Do not cite them.
+  - **Root cause CORRECTED 2026-09-10:** this originally read *"content-based (not chained-prefix) cache matching"*, blaming the GPU prefix cache. **That was wrong** — the GPU prefix cache chains correctly and always did. The defect was in the offload tier's mixed-hit lookup (R3.15), now fixed. See `status-2026-09-10.md` §2.
+  - The "tier earned its keep" framing above is **also pre-09-10 and therefore also uncitable**; it is retained as method, not as a result.
 - **Model shape:** `qwen3.8-27b-vllm`, **MXFP4 weights (AMD Quark) + FP8 KV**, GDN hybrid (64 layers, 16 Gated-Attention + 48 Gated-DeltaNet, 3:1), AMD R9700 / gfx1201.
 - **DASC / DAMP:** DASC (arXiv 2608.30386, Meituan) = state *compression* via weight-derived, per-unit **retention-horizon selection** + **suffix refresh**; run on **unquantized BF16**. DAMP (arXiv 2608.27513, same group) = state *quantization* (mixed-precision). No clean public unmerged DASC PR found — most likely in a private/internal branch or a fork not yet publicly PR'd (paper is ~9 days old).
 
@@ -81,7 +89,7 @@ The **gap replay is exact *given* the checkpoint**; the **result's precision = t
 | Tier | Size | Tokens | Notes |
 |---|---|---|---|
 | **L1 GPU** | 32 GB VRAM, `--kv-cache-dtype fp8` | **~228,737** | store path reads 74 KB/token vs the load path's 35 KB/token |
-| **L2 RAM** (`/dev/shm`) | 16 GiB | **115,360 (N=1)** → **276,900 (N=8)** | 0.417× bytes with the stride; **1.21× GPU with stride vs 0.50× without** |
+| **L2 RAM** (`/dev/shm`) | ~~16 GiB~~ → **24 GiB today** | ~~115,360 → 276,900~~ → **~762,000** | **Both columns are stale.** The tier was resized (live: `kv_offload_tier_capacity_bytes{tier="cpu"}` = 25.76 GB), and the token figures rest on a Mamba-storage premise that was later **retracted twice** — density is 33,808 B/token at the architectural floor, so 24 GiB ≈ 762,000 tokens. Do not re-derive from the old ratio |
 | **L3 disk** (fs) | 512 GB zvol | — | store rate **44.6 MB/s** |
 
 ### Tier transition / I/O latencies
@@ -89,17 +97,17 @@ The **gap replay is exact *given* the checkpoint**; the **result's precision = t
 |---|---|---|
 | **L2 (RAM) hit** | **1–2 s** | the fast follow-up path the stride buys |
 | **L3→L2 (fs→CPU) promotion** | **64.26 s** (pre-fanout) | single-thread serial read of ~200 × 27 MB files at queue depth 1; **fixed by the fs-fanout patch** (256 MiB budget → 8 batches per promotion, 4 per store) |
-| **fs read** (512 GB zvol, O_DIRECT) | 87.6 (1 thr) / 268.9 (4 thr) / **719.3 (8 thr, peak)** / 435.6 (16 thr) MB/s | reads peak at 8 threads (I/O-bound; 16 regresses on raidz contention) |
+| **fs read** (512 GB zvol, O_DIRECT) | ~~719.3 MB/s at 8 threads~~ → **~117 MB/s, device-limited** | **Superseded.** The threaded figures were not what the tier gets in service: the device delivers ~117 MB/s regardless of fanout, against a ~101 MB/s recompute break-even — **1.16×**. That is why R3.14's fanout is a no-win, and why the storage-purchase conclusion reversed. See `kv-cache-closed-decisions.md` §3 |
 | **fs write** | **1,100 MB/s** (1 thr) | writes never the limit — the tier only stores 44.6 MB/s |
 
-### The "tier earned its keep" headline (the valid quantitative claim)
+### The "tier earned its keep" headline — ⚠️ NO LONGER CITABLE (pre-2026-09-10)
 - **~2.45M tokens** served from the RAM/disk offload tier instead of recomputed.
 - ≈ **~26 min of prefill avoided** at the honest cold rate (**1,555 t/s**). (2.45M ÷ 1,555 ≈ 1,576 s ≈ 26.3 min.)
 - Internally consistent: `prompt_tokens_total` climbed ~1.85M while ~4.7M tokens were sent; the **~2.45M gap = tokens the tier served**.
 
 ### The N=8 stride effect (the capacity lever)
-- **0.417× bytes** per 8 chunks (72 → 30 units).
-- L2 tokens: **115,360 (N=1, 0.50× GPU) → 276,900 (N=8, 1.21× GPU)**.
+- **0.417× bytes** per 8 chunks (72 → 30 units) — the ratio itself still holds.
+- ~~L2 tokens: 115,360 (N=1, 0.50× GPU) → 276,900 (N=8, 1.21× GPU).~~ **Retracted:** these were computed from a Mamba-storage share that has since been retracted twice; measured density is 33,808 B/token and the tier is 24 GiB ≈ 762,000 tokens.
 - Mamba store cost: **27 MB / group / chunk**; a long conversation = **~70 snapshots** (the GPU itself keeps 2).
 - Cost: prefix hits truncate down to an **N-chunk (13,184-token)** boundary.
 
@@ -112,7 +120,7 @@ The **gap replay is exact *given* the checkpoint**; the **result's precision = t
 |---|---|---|
 | repeating `_PARA×n` (self-caches) | 9.1 s | 3,520 |
 | unique non-repeating (true cold) | 20.6 s | 1,555 |
-- **2.3× ratio**; 2.15M GPU + 2.45M external prefix-cache hits observed during the run. Root cause: content-based (not chained-prefix) matching + the nonce only varies block 0.
+- **2.3× ratio**; 2.15M GPU + 2.45M external prefix-cache hits observed during the run. Root cause **corrected 2026-09-10**: not content-vs-chained matching in the GPU cache, but the offload tier's mixed-hit path serving unconfirmed keys (R3.15). The A/B that produced the 9.1 s / 20.6 s pair was itself taken on defective code and must be re-run — `status-2026-09-10.md` §4 item 2.
 
 ### Reference numbers (DASC / others — NOT ours, for the gap)
 - **DASC** (run on unquantized BF16): 2.63× compression, 42.6% lower TTFT, 68.4% higher input throughput.
