@@ -50,9 +50,12 @@ Read this before you quote any number from this repository.
 
 This is a **proof of concept**. It demonstrates that a three-tier KV-cache offload can be
 made to work on a GDN hybrid model on a single consumer AMD card, and it is measured doing
-so. **That is the whole of the claim.** It is not production code, it is not a
-research-grade reproduction, and it has **known correctness errors in the implementation**
-— the largest of which is documented below and is approximate *by design*.
+so. **That is the whole of the claim.** It is not production code and it is not a
+research-grade reproduction. It carries one **deliberate approximation** — the mamba N=8
+stride, described under [Future work](#future-work), which serves recurrent state up to
+eight chunks stale — and that one is by design rather than a defect. The defects that were
+found are not still open: they were fixed, and then the fixes were tested. What follows is
+the state of that work, not a disclaimer.
 
 **Correctness status, 2026-09-10.** A defect that made the offload tier serve KV
 belonging to a *different prompt* was found and fixed (R3.15). It was not a benchmark
@@ -61,12 +64,42 @@ prefix, while the GPU prefix cache — looking at the same prompts in the same w
 correctly refused **all** of them. The fix is confirmed live by `check-r315-boot.sh`, and
 a controlled reverse test isolating that one file reproduces the defect on demand.
 
-The framework is therefore treated as **assumed correct** from here — enough to work on
-and to benchmark against. It is **not yet validated correct**;
-[`status-2026-09-10.md`](docs/status-2026-09-10.md) §4 lists what remains, and none of it
-is optional before an accuracy claim is made from this repository. One consequence is
-immediate: **every number in this repository taken before 2026-09-10 is uncitable** — the
-harness was sound, the engine under it was not.
+**What has since been attacked, and held.** After that fix the cache was not simply
+assumed to be right; the remaining ways it could be wrong were enumerated and tested one
+at a time, and each is now a closed question with its evidence and its reopen condition
+recorded in
+[`kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md):
+
+| The suspicion | Outcome |
+|---|---|
+| A disk-tier hit might not reproduce a cold recompute | **Exact.** An 85,696-token disk hit was bit-identical |
+| The mixed local+external boundary might corrupt output (three CT4 failures) | **Not a defect.** 9/9 bit-identical in an uncontended run; every original failure was co-tenancy moving a near-tie logit |
+| `cache_salt` might not reach the tier's key, letting one tenant read another's blocks | **Honoured.** The claim of an isolation defect is **refuted** — the salt chains into the offload key, and six fresh salts read zero bytes from both tiers |
+| The correctness harness itself might be incapable of failing | **It fails when it should.** A negative-control gate runs first and blocks the suite if the instrument cannot detect a divergence it was handed |
+
+None of that was luck: a co-tenant on the engine can *create* a spurious divergence but can
+never hide a real one, so the uncontended runs above are the valid test. That asymmetry,
+and the guard built on it, are in [`CORRECTNESS.md`](docs/CORRECTNESS.md).
+
+**What is still not validated, precisely.** The framework is **assumed correct** — enough
+to work on and to benchmark against — and it is **not yet validated correct**. The gap is
+now a short, named list rather than an open question:
+[`status-2026-09-10.md`](docs/status-2026-09-10.md) §4. The two that matter most are
+showing the *generated tokens* differ under a deliberately re-armed defect (the form
+upstream will want, and it needs two model reloads), and reproducing both defects on a
+**stock** vLLM 0.27.1 build, which blocks filing upstream. Neither is optional before an
+accuracy claim is made from this repository.
+
+One consequence is immediate and unchanged: **every number in this repository taken before
+2026-09-10 is uncitable** — the harness was sound, the engine under it was not. Re-measuring
+them on the fixed engine is outstanding work, not a formality.
+
+**Where the effort actually stands.** The roadmap below is ordered, and the first stage is
+half delivered: the per-tier metrics exist, are patched into the engine, and are verified
+live — `tools/tierreport.py` reads them and answers, from one scrape of your own traffic,
+whether the RAM tier is the right size, whether the disk is too slow, and whether the
+layered cache is adding value at all. The controlled A/B harness with a genuinely cold arm,
+which is the other half of that stage, does not exist yet.
 
 It is published at this maturity **deliberately**. Several people want this capability;
 the author has neither the time nor the specialist expertise to carry it to completion
