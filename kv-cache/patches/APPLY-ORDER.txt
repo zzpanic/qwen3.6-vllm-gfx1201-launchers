@@ -5,8 +5,11 @@
 5  patch_kv_offload_eagle_groups.py          (upstream counterpart: PR #55390)
 6  patch_kv_offload_mamba_stride.py
 7  patch_kv_offload_fs_fanout.py             (ported from PR #49225)
+8  patch_kv_offload_tier_report.py           (needs 2; instrumentation only)
 
-This order is a dependency, not a preference.
+This order is a dependency, not a preference. 8 extends the get_stats() that 2
+creates on the fs tier, and refuses to apply if 2 has not run -- it says so
+rather than failing on a missing anchor.
 
 BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
 delete it in favour of the upstream implementation wherever one now exists. That is

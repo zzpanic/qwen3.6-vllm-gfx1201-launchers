@@ -17,7 +17,7 @@
 #     v
 #   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
 #                                   plus the offload delta: the GPU -> /dev/shm ->
-#                                   /kvcache staging, the seven house patches in
+#                                   /kvcache staging, the eight house patches in
 #                                   ../patches/, and the RADIANCE_* gates on them.
 #
 # The tuning defaults below are NOT maintained here. They are copied across from
@@ -28,7 +28,7 @@
 #
 # The delta is seven items and nothing else: HOUSE resolution; the KVOFF_* knob
 # block; the /dev/shm fit check and RAM clamp; the fs-tier --kv-transfer-config
-# builder; the extra container mounts and RADIANCE_* env; the seven /house patch
+# builder; the extra container mounts and RADIANCE_* env; the eight /house patch
 # lines in the prelude; and --kv-transfer-config on the serve line. See
 # ./README.md for the table.
 #
@@ -1620,6 +1620,21 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # behaviour, so the promotion stays slow but nothing is wrong.
     PYTHONPATH=/patches python3 /house/patch_kv_offload_fs_fanout.py \
       || echo "[radiance] WARNING: fs fanout patch did NOT apply -- every filesystem job will run on a single thread, whatever RADIANCE_FS_FANOUT_TARGET_MB says"
+    # House patch: per-tier KV offload instrumentation for the tier report. Instrumentation
+    # only, no behaviour change. Adds 19 series carrying a `tier` label -- hit blocks/tokens,
+    # load/store bytes+seconds+ops+latency, capacity/used/occupancy, and the sizing family
+    # (reads-before-evict, evictions, eviction-to-reuse, would-have-hit, stall seconds).
+    # This is what `tierreport.py` reads to answer "is my RAM the right size", "is my disk
+    # too slow" and "is the layered cache adding value" from one scrape of the operators own
+    # traffic. Everything it adds is a counter or a histogram, because the report is scraped
+    # ONCE from a long-lived server and a gauge sampled that way says nothing.
+    # Must run AFTER the instrumentation patch: the fs tier has no get_stats() in stock vLLM,
+    # and this extends the one that patch creates rather than competing with it. The patch
+    # checks that itself and says so, so a wrong order is a named error not a missing anchor.
+    # Non-fatal: on failure the tier report degrades to the unlabelled aggregates, which is
+    # exactly todays situation -- the disk stays invisible inside CPU-tier bandwidth.
+    PYTHONPATH=/patches python3 /house/patch_kv_offload_tier_report.py \
+      || echo "[radiance] WARNING: tier-report metrics did NOT apply -- tierreport.py will have no per-tier rows"
     python3 patch_topk_composite.py
     python3 patch_gdn_shared_build.py
     python3 patch_dflash_selector_topk.py

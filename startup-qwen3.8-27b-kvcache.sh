@@ -5,7 +5,7 @@
 # WHAT THIS IS
 # ============================================================================
 # This is the KV-cache work as a SEPARATE, PUBLISHABLE ENTRY. Everything the
-# three-tier offload needs -- the tier sizes, the seven house patches, the
+# three-tier offload needs -- the tier sizes, the eight house patches, the
 # eviction policy, the fs tier, the stride, the GC contract -- is pinned HERE,
 # in one file, with the reasoning inline, rather than being spread across the
 # production entry's env block in config.yaml.
@@ -58,7 +58,7 @@
 #   2. CONTINUE THE REVIEW OF EXISTING WORK, AND WRITE AN IMPLEMENTATION PLAN.
 #      kv-cache-references.md is the review so far -- every PR, paper and blog
 #      assessed, each with a ruling. Continue it, then plan. This includes
-#      reconciling the seven house patches against current vLLM/radiance HEAD
+#      reconciling the eight house patches against current vLLM/radiance HEAD
 #      and DELETING each in favour of the upstream implementation wherever one
 #      exists (the eagle-groups fix has a counterpart in PR #55390; the fs
 #      fanout was ported from PR #49225). AVOID REIMPLEMENTATION -- a house
@@ -84,7 +84,7 @@
 #      launcher's comments and patches/README.md) rather than enforced in code,
 #      and the gating env vars are inconsistent in naming and in
 #      whether 0 or 1 means "upstream". This wants to be a single coherent
-#      module with an explicit interface, not seven scripts in a trench coat.
+#      module with an explicit interface, not eight scripts in a trench coat.
 #      It lands here, not earlier, because stages 2 and 3 decide how much of it
 #      survives to be refactored at all.
 #
@@ -241,7 +241,7 @@ export KVOFF_DISK_RTHREADS="${KVOFF_DISK_RTHREADS:-8}"
 export KVOFF_DISK_WTHREADS="${KVOFF_DISK_WTHREADS:-4}"
 
 # ---------------------------------------------------------------------------
-# 4. THE HOUSE PATCHES -- the seven, and why each is on.
+# 4. THE HOUSE PATCHES -- the eight, and why each is on.
 #
 # Applied at container start, in dependency order, from this directory (bind
 # mounted at /house). The upstream clone stays pristine. Each is gated by an
@@ -299,6 +299,17 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 #     DO NOT read kv_offload_cpu_cache_usage_perc as residency. It subtracts
 #     evictable blocks, so it means "fraction pinned by in-flight transfers" and
 #     reads 0.0 at idle with hundreds of GB on the fs tier.
+
+# (h) tier report metrics -- also unconditional, also metrics-only. Adds the 19
+#     per-tier `vllm:kv_offload_tier_*` series (load/store bytes, tokens and
+#     latency histograms per tier, capacity, occupancy, reads-before-evict,
+#     eviction-to-reuse, prefill stall) that `tools/tierreport.py` reads to
+#     answer "is my RAM the right size, is my disk too slow, is this cache
+#     worth running at all". It NEEDS (f) applied first -- it wraps the same
+#     call sites -- so it is last in the apply order. Everything it emits is a
+#     counter or a histogram, never a gauge, because the report is scraped once
+#     from a long-lived server: an instantaneous level carries no information
+#     after three weeks of uptime.
 
 # ---------------------------------------------------------------------------
 # 5. THE CPU TIER EVICTION POLICY.

@@ -1,4 +1,4 @@
-# The seven house patches
+# The eight house patches
 
 These are **not standalone scripts.** Read this before you try to run one.
 
@@ -16,7 +16,7 @@ is the intended failure mode, not a bug.
 
 ## They need `_patchlib`
 
-Every one of the seven begins:
+Every one of the eight begins:
 
 ```python
 from _patchlib import apply
@@ -50,7 +50,7 @@ See `APPLY-ORDER.txt`. Two pairs are genuinely ordered:
 `fs_fanout` (7) is order-independent — it is the only one that touches
 `v1/kv_offload/tiering/fs/manager.py`.
 
-## Two of them are fatal; five only warn
+## Two of them are fatal; six only warn
 
 The container block runs under `set -e`. Patches 1 and 2 have **no `|| echo`
 fallback**, so a failure there is a hard boot failure, not a warning:
@@ -64,11 +64,12 @@ fallback**, so a failure there is a hard boot failure, not a warning:
 | 5 | `patch_kv_offload_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
 | 6 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
 | 7 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
+| 8 | `patch_kv_offload_tier_report.py` | warns; no per-tier metrics, so `tools/tierreport.py` has no rows |
 
 That split is deliberate. 1 and 2 are load-bearing — without patch 1 the engine
 asserts and dies the first time an external hit lands on a request that also hit
 the GPU prefix cache, and without the instrumentation an allocation failure is
-unattributable. The other five degrade to defined, previously-shipped behaviour.
+unattributable. The other six degrade to defined, previously-shipped behaviour.
 
 Patch 1 is also the one exception to "every behaviour change is gated" below. Its
 gate, `RADIANCE_OFFLOAD_MIXED_HIT=0`, selects a conservative fallback (decline the

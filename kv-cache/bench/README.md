@@ -12,6 +12,16 @@ vLLM reports a per-group prefix hit that diverges across KV groups, and the case
 that produced a fatal assertion before the fix in `docs/` R3.15. A run that
 never reaches the `MIXED` phase has tested nothing, and says so in its verdict.
 
+`correctbench.py` is the suite that drives the three of them together and reaches a
+single verdict on "is the cache correct?". It imports `tierbench.py`, `equivbench.py`
+and `mixedbench.py` rather than reimplementing them, runs endpoint-only with no reload,
+and tags every probe with whether anything else was on the engine at the time — because
+a co-tenant changes batch composition, which moves logits, which flips a near-tie token.
+That guard matters in one direction only: contention can *create* a spurious divergence
+but can never hide a real one, so a divergence seen under contention proves nothing while
+a clean uncontended run is a real pass. `../docs/CORRECTNESS.md` states the property under
+test, the hard rules, and the case list.
+
 `tierbench.py` is the one to start with for speed. It measures one long prefix in four
 known cache states — cold / GPU / CPU / fs — sizing each eviction from the tier
 capacities it reads out of the engine's boot log, and **refusing to report a

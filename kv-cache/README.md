@@ -111,7 +111,7 @@ B/token/layer, plus one MTP layer). FP8 is already one byte; GQA is already 6:1;
 layers are already stored 1-in-8. There is no density work left to do here — a fact worth
 knowing before anyone spends a week on compression.
 
-Seven house patches make it work; they are in [`patches/`](patches/) with their apply
+Eight house patches make it work; they are in [`patches/`](patches/) with their apply
 order, and [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md)
 explains what each one does and which environment variable gates it.
 
@@ -199,6 +199,23 @@ the prompt self-caching and the "cold" arm is not cold. Getting the cold arm gen
 cold is the hard part of this stage and the reason it comes first: every claim below it is
 unfalsifiable until it exists.
 
+**Part of this now exists.** `patches/patch_kv_offload_tier_report.py` adds 19
+`tier`-labelled series — per-tier hit blocks and tokens, load/store bytes, seconds, ops and
+latency histograms, capacity, an occupancy *distribution*, reads-before-evict,
+eviction-to-reuse, would-have-hit and prefill stall time — and
+[`tools/tierreport.py`](tools/README.md) turns one `/metrics` scrape into `results.md` +
+`results.json` with a verdict per operator question: too much RAM, too little RAM, disk too
+slow, disk actively hurting, and whether the layered cache is adding value at all. The
+design note is [`docs/tier-report-metrics-plan.md`](docs/tier-report-metrics-plan.md).
+
+It is deliberately **lifetime-cumulative and read-once**, which sidesteps the cold-arm
+problem rather than solving it: it reports what the operator's own traffic actually did, so
+there is no synthetic corpus to get wrong. Everything a *judgment* rests on is a monotonic
+counter or a histogram, never a gauge, because a gauge scraped once off a long-lived server
+says almost nothing. What is still missing from this stage is the other half — the
+controlled A/B harness with a genuinely cold arm, which is what would let a *change* be
+measured rather than a deployment described.
+
 Two specific jobs belong here, both already scoped by earlier work:
 
 - **Confirm or kill the busy-wait.** The strongest open lead in the repository is that the
@@ -216,7 +233,7 @@ defect found the hard way. Read it before designing the harness, not after.
 **2. Continue the review of existing work, and produce an implementation plan.**
 [`kv-cache-references.md`](docs/kv-cache-references.md) is the review so far — every PR,
 paper and blog already assessed, each with a ruling. Continue it, then write the plan.
-Concretely, this includes reconciling the seven house patches against current
+Concretely, this includes reconciling the eight house patches against current
 vLLM/radiance HEAD and **deleting each one in favour of the upstream implementation
 wherever one exists**: at least one already has an upstream counterpart (the eagle-groups
 fix is PR #55390; the fs fanout was ported from PR #49225). Two open PRs already measure as
@@ -246,7 +263,7 @@ These patches were written one at a time, each to answer a specific question, an
 shows. They monkey-patch by string surgery. They carry an implicit dependency **order**
 documented only in the launcher. Their gating environment variables are inconsistent in
 naming and in whether `0` or `1` means "upstream behaviour". This wants to be a single
-coherent module with an explicit interface, not seven scripts in a trench coat. It lands
+coherent module with an explicit interface, not eight scripts in a trench coat. It lands
 here rather than earlier because stages 2 and 3 decide how much of it survives to be
 refactored.
 
@@ -283,7 +300,7 @@ That is a constraint on how the work is done, not a wish about where it might la
   bad trade at any margin.
 - **Not breaking existing capability is a requirement of every stage,** including the ones
   that look like housekeeping. It is why every behaviour-changing patch here is behind an
-  environment gate whose unset state is upstream behaviour, and why the seven patches are
+  environment gate whose unset state is upstream behaviour, and why the eight patches are
   to be *deleted* in favour of upstream implementations wherever one exists rather than
   maintained alongside them. Stage 6's tests and CI are not tidiness for its own sake; they
   are the price of admission for anything that asks other people to run it.
@@ -319,7 +336,8 @@ cd qwen3.6-vllm-gfx1201-launchers/kv-cache
 | [`docs/kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | **before writing anything** — the hard "never do X" list |
 | [`docs/kv-cache-references.md`](docs/kv-cache-references.md) | every PR, paper and experiment already reviewed, each with a ruling |
 | [`docs/kv-cache-historical.md`](docs/kv-cache-historical.md) | the experimental record — including the claims that were **retracted**, and why. Read it before re-running an experiment that looks obvious |
-| [`patches/README.md`](patches/README.md) | what the seven patches need in order to run, which two are fatal on failure, and the env gate on each |
+| [`patches/README.md`](patches/README.md) | what the eight patches need in order to run, which two are fatal on failure, and the env gate on each |
+| [`tools/README.md`](tools/README.md) | the tier sizing/speed report: what it needs, how to test it with no engine, and how to read `--calibrate` honestly |
 
 A prompt that works: *"Read kv-cache/README.md, then docs/kv-cache-handover.md and
 docs/kv-cache-known-issues.md, and skim docs/kv-cache-historical.md for what has already
@@ -376,7 +394,7 @@ Read in this order. Every document is written to be actionable without opening t
 | [`kv-cache-results-preliminary.md`](docs/kv-cache-results-preliminary.md) | **Preliminary results.** One small-sample run on a real mixed workload: 70% of prompt tokens served from cache. Includes §4, the figures in it that do not yet reconcile. |
 | [`kv-cache-historical.md`](docs/kv-cache-historical.md) | **The experimental record.** Every hypothesis, measurement, correction and retraction, in order — so you do not re-run a settled experiment or build on a withdrawn claim. |
 | [`kv-cache-operations.md`](docs/kv-cache-operations.md) | The runbook: turn the disk tier off, resize `/dev/shm`, resize the KV tier. Each with commands, verification and undo. |
-| [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the seven patches with gates and order, the two-layer GC, the serve invocation. |
+| [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the eight patches with gates and order, the two-layer GC, the serve invocation. |
 | [`kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | Every problem, gotcha and limitation as Symptom / Root cause / Impact / Status, by severity, plus the hard "never do X" list. |
 | [`kv-cache-future-work.md`](docs/kv-cache-future-work.md) | The plan, the reuse-refresh mechanism and its `L` analysis, and the limitations to state up front. |
 | [`kv-cache-references.md`](docs/kv-cache-references.md) | Every PR, paper, blog and local artifact reviewed, each with a status and a ruling. |

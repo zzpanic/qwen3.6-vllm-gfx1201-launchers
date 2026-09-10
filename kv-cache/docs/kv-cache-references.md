@@ -63,6 +63,67 @@ open `[Bugfix][KV Offload]` PRs updated within the last week — not in the head
 
 ---
 
+## 3b. Scheduling, admission control, and KV-cache thrashing (the literature)
+
+Added 2026-09-10, prompted by a measured result: on this box, **the third concurrent deep-context
+agent halves effective prefill throughput and triples recompute work**, while average cache coverage
+barely moves (96% -> 93%). Full measurement in `$HOME/audit/concurrency-and-maxseqs-20260910.md`.
+
+Pat's read at the time — *"my gut tells me that this is a researched topic with good papers available
+to explain the maths and breakeven points"* — was correct. It is a named, actively-published phenomenon:
+**"KVCache thrashing"**. The offload tier is only half the problem; the other half is *admission and
+eviction order*, and that half is where the recent work is.
+
+Scored by **applicability to this deployment**, not by venue or citation count.
+
+| Ref | What it is | Status | Ruling |
+|---|---|---|---|
+| [CacheWise — arXiv 2606.16824](https://arxiv.org/abs/2606.16824) | *Understanding Workloads and Optimizing KVCache Management for Efficiently Serving LLM Coding Agents* (Tiwari, Chugh, Rickert, Peter, Mahajan, Shen; 15 Jun 2026). Real coding-assistant traces (CATraces); prefix-aware scheduling + reuse-aware eviction predicted from tool-call metadata. Implemented **in vLLM**. | **VERIFIED against the paper's full HTML text.** | **The closest match to this workload that exists, and the top read.** Formalises our pool arithmetic exactly: working set `W(t) = Σ d_i` over live sessions, eviction-free only while it fits the budget. Names our mechanism: FCFS *"expands the active KVCache working set, increasing the likelihood of evicting prefixes that will soon be needed again"*; LRU *"cannot distinguish"* a session about to resume from one that will idle. Reproduces our load curve: *"token goodput decreases with increasing load... more sessions compete for GPU memory, causing more KVCache evictions."* Gains: **1.38x–1.64x goodput from prefix-aware scheduling alone**, 2–2.6x fewer evictions, up to 3.5x faster session completion. Two things to take: (a) the term **"token goodput"** — throughput net of recompute and KV movement — which is the correct name for what our harness calls effective prefill tok/s, and (b) the scale-transfer insight: they hit this at N=30–40 sessions on datacenter hardware, we hit it at **N=3**, because the governing ratio is `W(t)`/capacity, not session count. Their conclusion applies unchanged; only the axis label differs. **Caveat on provenance:** an automated PDF summary of this paper produced four numbers (a "2.5–3x working set" sizing rule, thrashing at "8–16 sessions", "90% of hits in the most recent 30% of tokens", a "40% miss rate" break-even). **None appear in the paper.** All four were fabricated by the summariser; do not quote them. |
+| [PEEK — arXiv 2607.02525](https://arxiv.org/html/2607.02525) | Radix tree maintained over the **waiting queue**, driving cluster-aware admission plus an eviction hook that protects blocks queued requests will reuse. | Search-result summary; not read in full. | **The most directly implementable idea for us.** Our failure is precisely that eviction is blind to what is *queued*: we evict a live agent's prefix to seat a request that will itself be evicted. A queue-aware eviction hook is a smaller change than full predictive eviction and needs no tool-call metadata. **Read next after CacheWise.** |
+| [Prediction-based KV-Cache Management for Dynamic Agent Workflows — arXiv 2605.06472](https://arxiv.org/pdf/2605.06472) | Predicts reuse distance in multi-agent workflows to drive retention. | Search-result summary. | Same family as CacheWise's eviction half, framed for agent workflows rather than coding specifically. Worth reading for the prediction signal — ours would have to come from the agent harness, since we have no tool-call metadata at the server. |
+| [TokenDance — arXiv 2604.03143](https://arxiv.org/pdf/2604.03143) | Agentic serving; scheduling around tool-call gaps. | Search-result summary. | The tool-call gap **is** our eviction window — work is lost between turns while an agent holds no in-flight request. Relevant to why "let the in-flight request finish" is the right instinct. |
+| [ThunderAgent — arXiv 2602.13692](https://arxiv.org/pdf/2602.13692) | Agentic-workload serving system. | Search-result summary. | Same cluster; lower priority than the three above. |
+| [CacheWise's baseline: InferCept](https://arxiv.org/abs/2606.16824) | Interception-aware serving, used as CacheWise's comparison point. | Named in CacheWise. | Useful only as the baseline CacheWise beats; not a candidate here. |
+| [PrefixShield — arXiv 2608.01657](https://arxiv.org/abs/2608.01657) | Admission/eviction protection for shared prefixes. | Search-result summary. | Adjacent; read if PEEK's approach looks promising. |
+| [CacheRoute — arXiv 2608.19677](https://arxiv.org/html/2608.19677) | Routing requests by cache locality. | Search-result summary. | **Multi-replica.** Assumes a choice of where to send a request; we have one GPU. **No applicability** until there is a second node. |
+| [CacheSolidarity — arXiv 2603.10726](https://arxiv.org/html/2603.10726v1) | Cross-request/cross-tenant cache sharing. | Search-result summary. | Multi-tenant framing; single-user box. Low. |
+| [SAECache — arXiv 2605.18825](https://arxiv.org/pdf/2605.18825) | Semantic/approximate cache reuse. | Search-result summary. | Approximate reuse changes outputs. Given the correctness work already done here (see `CORRECTNESS.md`), this is **out of scope on accuracy grounds** unless explicitly revisited. |
+
+### Break-even and offload-economics papers
+
+Directly relevant to the standing NVMe question — the fs tier is at **1.16x** break-even
+(101 MB/s to tie recompute, device does 117), which is why nothing serves from it.
+
+| Ref | What it is | Status | Ruling |
+|---|---|---|---|
+| [CacheFlow — arXiv 2604.25080](https://arxiv.org/html/2604.25080v1) | Offload scheduling and tier economics. | Search-result summary. | Read for the break-even formalism — we derived ours empirically and should check it against a published one. |
+| [KVServe — arXiv 2605.13734](https://arxiv.org/pdf/2605.13734) | KV serving with tiered storage. | Search-result summary. | Same. |
+| [Adaptive KV Cache Reuse — arXiv 2605.24022](https://arxiv.org/pdf/2605.24022) | Adaptive reuse-vs-recompute decisions. | Search-result summary. | This is the decision our tier makes implicitly and badly (`pending-is-miss` drops 61% of found hits). Worth reading against that defect. |
+| [HERALD — arXiv 2606.21633](https://arxiv.org/pdf/2606.21633) | Hierarchical KV management. | Search-result summary. | General tiering; medium. |
+| [OrbitFlow — arXiv 2601.10729](https://arxiv.org/pdf/2601.10729) | Serving-system scheduling. | Search-result summary. | Medium. |
+| [TokenCake — arXiv 2510.18586](https://arxiv.org/pdf/2510.18586) | KV/memory partitioning. | Search-result summary. | Medium. |
+| [backend.ai — KV cache offloading](https://www.backend.ai/blog/2026-04-how-to-save-gpu-memory-in-llm-serving-kv-cache-offloading) | Vendor engineering blog on offload economics. | Read. | Carries one very useful datapoint: **128K TTFT 11 s -> 1.5 s** with a precomputed cache — on a DGX SuperPOD with 400 Gbps RDMA. Ours is **44.9 s -> 1.7 s** on a consumer card. The *cached* path is essentially the same absolute time on both; the difference is entirely in what a miss costs. That is the clearest available argument that our effort belongs on **hit rate and residency**, not on transfer speed. |
+| [vLLM — KV offloading connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) | Upstream's own writeup of the connector we run. | Read. | Background for the installed design; no new lever. |
+
+**What this literature changes about our plan:**
+
+1. **Admission control is a first-class lever we have not pulled.** Every measured intervention so far
+   has been on the offload path (stride, fanout, batching, `pending-is-miss`). CacheWise gets
+   1.38x–1.64x from **scheduling alone**, without touching the tier. Our equivalent first move is
+   `--max-num-seqs 4 -> 2`, which costs nothing to try.
+2. **The metric to report is token goodput**, not raw prefill throughput — it is the one that makes
+   thrashing visible. Fold this into the metrics spec (the author-local
+   `kv-offload-metrics-spec.md`, listed in the file table below; its shipped successor is
+   `tier-report-metrics-plan.md`).
+3. **Queue-aware eviction (PEEK) is the cheapest real improvement**, because it needs no workload
+   prediction — only visibility into the waiting queue, which the scheduler already has.
+4. **The upstream knob we would want does not exist in this build.** `max_long_partial_prefills` /
+   `max_num_partial_prefills` are absent; only `long_prefill_token_threshold` exists, and it caps
+   per-step tokens for a long request rather than limiting how many long requests are admitted. A
+   token-aware admission limit therefore needs a patch, not a config change.
+
+---
+
 ## 4. State quantization / compression (reviewed)
 | Ref | What it is | Status | Ruling |
 |---|---|---|---|
@@ -92,6 +153,10 @@ open `[Bugfix][KV Offload]` PRs updated within the last week — not in the head
 - **Meituan authors as GitHub users:** `zixujiang` (DAMP co-author) → **0 sglang PRs**; `yuan-luo` (active GDN/KDA, no DASC PR); other Meituan authors not resolvable to clean GitHub handles.
 - **sglang forks** (mamba/dasc/compression): `Clarit-AI/Engram`, `my-user-open/sglang-mamba-ssd--kernels`, `empty-quiver/sglang-turboquant`, `architehc/sglang_attentio` — none is a DASC implementation.
 - **PR keyword sweeps** (sglang + vllm): `DASC` / `decay-aware` / `ragged state` / `retention horizon` / `suffix refresh` / `omission` / `head-aware` / `recurrent-state` — **no clean DASC PR hit.**
+- **NOT a dead end (2026-09-10):** scheduling / admission-control / thrashing literature was searched
+  for the first time and is **rich** — see §3b. The search term that unlocks it is **"KV cache thrashing"**;
+  "agentic KV cache" and "coding agent serving" also work. Earlier sweeps missed it because they searched
+  the *offload* vocabulary only.
 - **Conclusion:** no public unmerged DASC PR found → most likely a **private/internal branch or a not-yet-PR'd fork** (paper is ~9 days old).
 
 ---
@@ -103,6 +168,9 @@ open `[Bugfix][KV Offload]` PRs updated within the last week — not in the head
 | `<repo>/kv-cache/cache-preemption-patch-plan.md` | The existing patch plan. |
 | `<repo>/kv-cache/status-2026-09-09.md` | Investigation snapshot (this thread). |
 | `<repo>/kv-cache/kv-cache-future-work.md` | The future-work plan (this thread). |
+| `$HOME/audit/concurrency-and-maxseqs-20260910.md` | **The measurement behind §3b**: the third deep-context agent halves effective prefill and triples recompute; pool holds 2.5 deep contexts vs `--max-num-seqs 4`; 63% of wall time is queue+prefill; mechanism is eviction+re-prefill, **not** preemption (2 lifetime). |
+| `$HOME/audit/kv-offload-metrics-spec.md` | The BetterBench-style metrics spec (four questions, seven panels, nine traps, five counters to add). Should gain **token goodput** per §3b. |
+| `$HOME/audit/kv-offload-value-CORRECTED-20260910.md` | The authoritative offload verdict; supersedes two retracted files. Carries the `prompt_per_second` metric trap. |
 | `/tmp/opencode/poc_summary.txt` | The publishable markdown report (BetterBench section known polluted). |
 | `<repo>/benchmarks/betterbench-full-20260908/` | BetterBench run output (results.json 589KB, results.html, results.md). **Data invalid (polluted).** |
 | `$HOME/eval/betterbench/` | BetterBench v0.4.0 git checkout (up-to-date; `prefill.py` = the `_PARA×n` self-caching body, `corpus.py` = `with_nonce`, `runner.py` = prompt cycling). |
