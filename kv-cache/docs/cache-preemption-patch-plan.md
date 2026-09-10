@@ -1634,6 +1634,60 @@ Rev 1's thesis — *retain, don't recompute* — is still right. What was wrong 
 
 Verified against: the live server (container `qwen38-27b-vllm`, engine PID 5899, booted 2026-09-06 21:50 — the same boot the audit and `hitrate-bench.py` ran on, so its cumulative counters still contain those runs); the vLLM 0.27.1 tree inside the container (`/proc/5899/root/opt/vllm/lib/python3.12/site-packages/vllm/`); `~/audit/stress/`; `<repo>/kvcache-reap.sh`; `/etc/fstab`.
 
+### R3.15.7 Reverse test — the fix also removes a CORRECTNESS defect (2026-09-10)
+
+R3.15.5 showed the fixed path serves a mixed hit without crashing and with bit-identical
+output. It did not show what the *unfixed* path does when it does not crash. This does.
+
+**Method.** The same BetterBench prefill sweep run twice — same box, model, corpus, eight
+depths, warmup 2 + 8 measured passes — with exactly one variable changed:
+`patch_offload_mixed_hit.py`, fixed against `a48e3a7^`. Every prompt carries a fresh 8-hex
+nonce, so **no request may legitimately hit anything**.
+
+The one configuration change made between the two historical runs
+(`KVOFF_PENDING_IS_MISS`, added to `config.yaml` on 09-09) was held at the *same* value in
+both arms and confirmed applied in the boot log — `77 patch hunks applied, 0 failed` —
+so it cannot account for the difference.
+
+**Result.** 60-second window at the deep end of the ladder:
+
+| metric | R3.15 present | R3.15 absent |
+|---|--:|--:|
+| `prefix_cache_queries_total` (GPU) | 188,192 | 188,192 |
+| `prefix_cache_hits_total` (GPU) | 0 | 0 |
+| `external_prefix_cache_hits_total` (tier) | 0 | **184,576 (98.1%)** |
+| `kv_offload_load_bytes_total` | 0 | **+6.44 GB** |
+
+The GPU prefix cache and the offload tier are looking at the same prompts in the same
+window. The GPU cache refuses every one of them in both arms — it chains correctly, and
+always did. Only the tier changes behaviour. **That asymmetry is the defect, isolated to
+one file.**
+
+**Why it is a correctness defect, not a benchmark artifact.** The nonce varies only block
+0. Blocks 1..N are byte-identical text whose KV was computed under a *different* preceding
+context. Chained block hashes exist precisely so those keys cannot match. Unfixed, the
+lookup hands `prepare_load` a key it has not confirmed (the hunk-3 defect), the tier
+matches on content, and the engine substitutes another prompt's KV into the answer —
+silently, with no assertion and no log line.
+
+**What it explains.** The prefill anomaly recorded as `A1` in the known-issues list: a
+"cold" nonce-salted sweep measuring ~2.3x faster than a true cold run, inflated only at
+the depths with enough blocks past block 0 to matter, with 14-80% pass-to-pass spread
+because how much the tier happened to hold varied per pass. With R3.15 the same sweep
+matches an independent cold baseline within 1.3% at all eight depths, monotonic in depth,
+spread 0.05-0.35%.
+
+**A trap this cost, recorded so the next person does not repeat it.** A probe replicating
+the harness prompt byte-for-byte showed a new nonce recomputing in full, and was taken as
+clearing the harness. It was run on the *fixed* engine, where there is nothing to find.
+This class of bug is invisible to any probe run on patched code. **Arm the defect before
+concluding a cache respects a salt.**
+
+**Still outstanding.** This shows the tier *serves* mis-chained KV. It does not yet show
+the *generated tokens differ* from a known-good recompute under the armed defect — the
+form of the claim upstream will want. See `status-2026-09-10.md` §4.
+
+
 ## R2.1 The 12 s read-back is synthetic. Measured, a read-back costs ~78 s.
 
 > **WITHDRAWN by Revision 3 (R3.1).** No read-back was measured here — the offload tier served zero bytes. The ~78 s was a lookup stall plus a full recompute.

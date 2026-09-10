@@ -54,6 +54,20 @@ so. **That is the whole of the claim.** It is not production code, it is not a
 research-grade reproduction, and it has **known correctness errors in the implementation**
 — the largest of which is documented below and is approximate *by design*.
 
+**Correctness status, 2026-09-10.** A defect that made the offload tier serve KV
+belonging to a *different prompt* was found and fixed (R3.15). It was not a benchmark
+problem: unfixed, the tier served **98.1%** of tokens on prompts that shared no legitimate
+prefix, while the GPU prefix cache — looking at the same prompts in the same window —
+correctly refused **all** of them. The fix is confirmed live by `check-r315-boot.sh`, and
+a controlled reverse test isolating that one file reproduces the defect on demand.
+
+The framework is therefore treated as **assumed correct** from here — enough to work on
+and to benchmark against. It is **not yet validated correct**;
+[`status-2026-09-10.md`](docs/status-2026-09-10.md) §4 lists what remains, and none of it
+is optional before an accuracy claim is made from this repository. One consequence is
+immediate: **every number in this repository taken before 2026-09-10 is uncitable** — the
+harness was sound, the engine under it was not.
+
 It is published at this maturity **deliberately**. Several people want this capability;
 the author has neither the time nor the specialist expertise to carry it to completion
 alone, and a working-but-flawed starting point that says exactly where it is flawed is
@@ -106,6 +120,12 @@ explains what each one does and which environment variable gates it.
 ## The benchmark
 
 Two numbers can be stated, and both come with their limits attached.
+
+> ⚠️ **Both were measured before the R3.15 correctness fix (2026-09-10)** and are
+> retained here as method, not as results. Some fraction of the "tokens served from the
+> tier" below were served against unconfirmed keys — that is, served *wrongly*. The
+> direction of the error is known, its size is not. These must be re-measured on the fixed
+> engine; see [`status-2026-09-10.md`](docs/status-2026-09-10.md) §4.
 
 **The tier earned its keep.** Approximately **2.45M tokens served from the RAM and disk
 tiers**, ≈ **26 minutes of prefill avoided** at the honest cold rate (~1,555 tok/s).

@@ -1,5 +1,20 @@
 # Preliminary results — improved KV caching policy
 
+> ## ⚠️ Superseded pending re-measurement — R3.15, 2026-09-10
+>
+> **Every number in this document was measured before the R3.15 correctness fix**, on an
+> engine whose offload tier was matching blocks against **unconfirmed keys**. Unfixed, the
+> tier served 98.1% of tokens on prompts that shared no legitimate prefix; the GPU prefix
+> cache, on the same prompts in the same window, correctly served 0%.
+>
+> The practical consequence for this document: an unknown fraction of every "served from
+> the tier" figure below was served *wrongly*, and the prefill timings are inflated by an
+> unknown amount. The direction of both errors is known; the size is not.
+>
+> Retained as **method**, not as results. Re-measurement on the fixed engine is item 2 and
+> item 3 of `status-2026-09-10.md` §4.
+
+
 > **Status: PRELIMINARY, SMALL SAMPLE.** One run, one machine, one workload, by the
 > author. It is published as an early indication of the shape of the result, not as a
 > benchmark. Nothing here has been repeated, held out, or independently reproduced, and

@@ -2,25 +2,32 @@
 
 Known problems, gotchas, and limitations discovered in the two-tier KV-offload + GDN stride-store + BetterBench investigation. Each entry: **Symptom / Root cause / Impact / Status or workaround.** Severity: **Critical** (blocks valid results), **Design** (inherent — must be documented), **Blocker** (environmental/tooling), **Open** (unresolved).
 
-See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, `status-2026-09-09.md` for the snapshot.
+See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, `status-2026-09-10.md` for the current snapshot (`status-2026-09-09.md` is kept as history and is superseded).
 
 ---
 
 ## A. Critical — blocks valid measurement
 
-### A1. The BetterBench run is polluted (prefix-cache hits on "cold" prompts) — CRITICAL
+### A1. The BetterBench run is polluted (prefix-cache hits on "cold" prompts) — ROOT-CAUSED and FIXED by R3.15; revalidation required
 - **Symptom:** BetterBench "cold" prefill runs were ~2.3× faster than a true cold run; the full run (all 3 phases) is **invalid**.
-- **Root cause:** vLLM radiance matches the prefix cache by block **content**, not by **chained prefix**. BetterBench's "cold (nonce)" design only varies **block 0** (`corpus.py` `with_nonce`), so the body is identical across requests → it self-caches.
-  - A/B at 32k: repeating `_PARA×n` body = **9.1s (3,520 t/s)** vs unique non-repeating = **20.6s (1,555 t/s)**.
-  - 2.15M GPU prefix-cache hits + 2.45M external (offload) hits during the run.
-  - Decode/concurrency reuse the same handful of prompts (20 runs cycling over 3–4 prompts; 48 req cycling over 29 prompts; 3 levels reusing the same 48).
-- **Impact:** Do **not** cite the BetterBench numbers. The only valid quantitative claim is the "tier earned its keep" measurement (~2.45M tokens served ≈ ~26 min prefill avoided).
-- **Status/workaround:** To get honest numbers, either (a) make the body fully unique per request (not just block 0), or (b) flush the cache between requests — which is currently impossible (see **B1**).
+- **Root cause — CORRECTED 2026-09-10.** The earlier entry blamed the GPU prefix cache: *"vLLM radiance matches the prefix cache by block content, not by chained prefix."* **That was wrong.** The GPU prefix cache chains correctly. The defect was in the **offload tier's** lookup: pre-R3.15 the mixed-hit path could hand `prepare_load` a key it had not confirmed, so the tier matched blocks whose *content* was identical while their *chained prefix* was not. The nonce varies only block 0, so blocks 1..N are byte-identical text whose KV was computed under a **different preceding context** — exactly what the chained hash exists to poison.
+  - **Controlled reverse test, one variable** (`patch_offload_mixed_hit.py`, fixed vs `a48e3a7^`; `KVOFF_PENDING_IS_MISS=0` held identical and confirmed live in both arms):
+
+    | arm | GPU prefix-cache hits | external (tier) hits |
+    |---|--:|--:|
+    | R3.15 present | 0 of 188,192 queried | 0 — new nonce recomputes in full |
+    | R3.15 absent | 0 of 188,192 queried | **184,576 of 188,192 = 98.1%**, 6.44 GB read in 60 s |
+
+  - Both arms looked at the same prompts in the same window. The GPU cache refused all of them in both. Only the tier differed. That asymmetry **is** the bug.
+  - With the fix in place the prefill sweep matched an independent cold baseline within **1.3% at all eight depths**, monotonic in depth, TTFT spread **0.05–0.35%** (it had been 14–80% on the affected depths).
+- **Impact:** This was never only a benchmark-pollution issue. The engine was substituting KV belonging to a different prompt into real answers, silently. Treat any output produced before 2026-09-10 accordingly, not just any number.
+- **Status:** **Fixed** by R3.15 (`patch_offload_mixed_hit.py`, hunks 3 and 4) and confirmed live by `check-r315-boot.sh` section 5. **Not yet fully validated** — see `status-2026-09-10.md` §4. In particular the A/B that produced the 9.1 s / 20.6 s figures above was itself taken on defective code and must be re-run; until then the *size* of the historical pollution is unknown, only its direction.
+- **Measurement trap:** a probe that replicated the harness prompt byte-for-byte "cleared" the nonce — but it was run on the **fixed** engine, where there is nothing to find. This class of bug is invisible to any probe run on patched code. **Arm the defect before concluding that a cache respects a salt.**
 
 ### A2. The N=8 stride store serves a coarser state than the exact position — CRITICAL (for exactness claims)
 - **Symptom:** A reused checkpoint is **≤ 8 chunks behind** the requested position; the served state is `S_boundary`, not the exact per-position `S_M`.
 - **Root cause:** `patch_kv_offload_mamba_stride.py` keeps only when `(abs_chunk_idx + 1) % 8 == 0`; lookup rounds **down** to `N×tokens_per_chunk`. The 7-of-8 intermediate states are discarded (never read).
-- **Impact:** The state is **inherently approximate by the stride design** — it is *less sensitive to the nonce* than an exact state. This is the mechanism behind A1. It is what makes the GDN finite-memory approximation work (the gate makes the coarsening a *good* approximation), but it means the store is not exact at arbitrary positions.
+- **Impact:** The state is **inherently approximate by the stride design** — it is *less sensitive to the nonce* than an exact state. (**Corrected 2026-09-10:** this was previously called "the mechanism behind A1". It is not — A1 was the offload tier serving unconfirmed keys, fixed by R3.15. The stride approximation is a separate, still-open design limitation.) It is what makes the GDN finite-memory approximation work (the gate makes the coarsening a *good* approximation), but it means the store is not exact at arbitrary positions.
 - **Status/workaround:** **Exact only at kept boundaries.** To get the exact state at an arbitrary position P, replay the ≤ one-block gap (see `kv-cache-future-work.md` §2.2) — which is exact *given* the checkpoint.
 
 ---
@@ -85,8 +92,9 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 ---
 
 ## E. Quick reference — what to never do
-1. **Never cite the BetterBench numbers** — they are polluted (A1).
+1. **Never cite any benchmark number taken before 2026-09-10** — the engine under the harness was serving another prompt's KV (A1). The harness itself was sound.
 2. **Never assume an exact state at an arbitrary position** — the stride store is exact only at kept boundaries (A2); replay the gap to get the exact state.
 3. **Never treat DASC's 2.63×/42.6%/68.4% as ours** — uniform coarsening + quantized config + single model/HW (D1/D2/D3).
 4. **Never try to flush the cache via the API** — no endpoint exists (B1).
 5. **Never `podman exec` into `qwen38-27b-vllm`** — it fails on RLIMIT_MEMLOCK (B2); use `podman inspect` + applied patches.
+6. **Never validate a cache-correctness fix on the fixed build alone** — arm the defect and show the instrument catches it (A1).
