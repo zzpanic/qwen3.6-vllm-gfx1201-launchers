@@ -92,8 +92,9 @@ sound, the engine under it was not. Re-measuring them is outstanding work, not a
 **Where the effort stands.** Roadmap stage 1 is half delivered. The per-tier metrics exist,
 are patched into the engine and are verified live — `tools/tierreport.py` turns one scrape
 of your own traffic into a verdict on whether the RAM tier is the right size, whether the
-disk is too slow, and whether the layered cache is adding value at all. The controlled A/B
-harness with a genuinely cold arm, the other half, does not exist yet.
+disk is too slow, and whether the layered cache is adding value at all — and, where the
+counters cannot honestly answer one of those, says so instead of answering anyway. The
+controlled A/B harness with a genuinely cold arm, the other half, does not exist yet.
 
 It is published at this maturity **deliberately**. Several people want this capability;
 the author has neither the time nor the specialist expertise to carry it to completion

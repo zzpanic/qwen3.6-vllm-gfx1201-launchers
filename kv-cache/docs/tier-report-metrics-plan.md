@@ -70,6 +70,28 @@ the column goes.
 KV density (bytes/token) does **not** need a patch or a hard-coded constant: with P2 it is
 `load_bytes{tier} ÷ load_tokens{tier}`, measured per tier, per deployment, on any model.
 
+### What "Fetch latency" and "Equivalent tok/s" actually are on a queued tier
+
+As built, the timing wrapper times each pool *task* and adds the durations up, so for a
+tier whose I/O is dispatched to workers — `fs` here, 8 read threads — `load_seconds` is
+**thread-time summed, not wall time**. Two consequences, both now stated by the tool
+rather than papered over:
+
+- **`Equivalent tok/s` is a lower bound**, understated by up to the pool width. `tierreport.py`
+  prints it with a `≥`, brackets it against the p99 batch (the transfer cannot have taken
+  less than its slowest single batch), and refuses to answer "too slow?", "actively
+  hurting?" or "where is the ceiling?" from it. `--serial-io` turns that off for a backend
+  that genuinely reads inline.
+- **Latency is a *batch* service time, not a request stall.** The column is named
+  `Batch p50` / `Batch p99` for that reason. This tier **queues deliberately rather than
+  preempting and evicting**: a batch waiting while its siblings share the device is the
+  fanout doing its job. A request waits the *promotion*, which overlaps those batches —
+  and that number is measured separately, as `prefill_stall_seconds{tier}`.
+
+The fix on the patch side is to time the whole promotion once instead of each batch. It
+needs a model reload, which resets these lifetime counters, so it is queued for the next
+natural restart.
+
 ---
 
 ## 3. The patches
@@ -210,8 +232,8 @@ The point of the exercise. Each is a threshold on a measured distribution, not a
 |---|---|---|
 | Too much RAM? | `block_reads_before_evict{cpu}` mass at 0 > ~50% | "≈N GiB of your CPU tier is never read back — shrink it" |
 | Too little RAM? | `eviction_to_reuse_seconds{cpu}` p50 < ~60 s | "you evict blocks that come back in N s — grow it" |
-| Disk too slow? | `break_even_ratio{fs}` < 1.2 | "fs delivers N tok/s vs recompute M — at best marginal; NVMe would give ≈Z×" |
-| Disk actively hurting? | `prefill_stall_seconds{fs}` > time saved by fs hits | "your disk tier is a net loss — disable it or replace the device" |
+| Disk too slow? | `break_even_ratio{fs}` < 1.2 | "fs delivers N tok/s vs recompute M — at best marginal; NVMe would give ≈Z×" — **suppressed on a queued tier**, which gets the bracket and the reason instead |
+| Disk actively hurting? | `prefill_stall_seconds{fs}` > time saved by fs hits | "your disk tier is a net loss — disable it or replace the device" — **suppressed on a queued tier**: both sides of the subtraction are thread-summed, so the stall is the only wall-clock figure |
 | Is the cache worth it? | `net` from 4.3 | "saved H hours against T minutes of store overhead over this uptime" |
 | Right shape? | mass at 0 reads **and** short eviction-to-reuse | "eviction policy problem, not a capacity problem" |
 

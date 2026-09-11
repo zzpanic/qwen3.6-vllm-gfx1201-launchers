@@ -72,6 +72,7 @@ table above, because each was learned by publishing a wrong number first.
 | Is a divergence seen under contention evidence of a defect? | **No — and the asymmetry matters.** Contention can only *create* a spurious divergence, never hide a real one. So an **uncontended** run is the valid test, and a *contended* PASS is stronger than an uncontended one. | Uncontended 0/10, contended 10/10, always at the same near-tie token, margin 0.125. [`CORRECTNESS.md`](CORRECTNESS.md) | — |
 | Is it enough to validate a cache-correctness fix on the fixed build? | **No. Arm the defect and show the instrument catches it.** | [`kv-cache-known-issues.md`](kv-cache-known-issues.md) §E.6 | — |
 | Can `/metrics` be assumed not to expose something? | **No — enumerate it first.** A metric assumed absent was present, and the "≤25%" figure it produced was a lower bound, not a measurement. | — | — |
+| Is `kv_offload_tier_load_seconds` wall time? | **No, on any tier whose I/O runs on a worker pool** (here `fs`, 8 read threads). The wrapper times each pool task and sums, so the total is thread-time and every rate derived from it is a **floor**, understated by up to the pool width. The latency histogram is likewise a *batch* service time, not a request stall — and this tier **queues deliberately rather than preempting and evicting**, so a long batch time is the trade, not a fault. The only wall-clock figure is `prefill_stall_seconds{tier}`. | `tierreport.py` now prints these rates with `≥`, brackets them against the p99 batch, and suppresses the "too slow" / "actively hurting" / "ceiling" verdicts on such a tier; `--serial-io` opts out. [`tier-report-metrics-plan.md`](tier-report-metrics-plan.md) §4 | When the patch is changed to time the whole promotion once instead of each batch — queued for the next model reload, since a reload resets these counters |
 | Is the running container's state inspectable, given `podman exec` fails? | **Yes — read it through `/proc`.** `/proc/$(podman inspect <container> --format '{{.State.Pid}}')/root/...` exposes the whole container filesystem read-only from the host. | Used to pre-flight all 31 hunks of patch 8 against the **live** engine before a reload: 31/31 clean. | — (`podman exec` itself is still blocked by RLIMIT_MEMLOCK; that is [`kv-cache-known-issues.md`](kv-cache-known-issues.md) B2) |
 
 ## 5. Retracted — claims this project published and then withdrew
@@ -100,6 +101,9 @@ For contrast, so that "not listed here" is not read as "settled":
 - **The controlled A/B harness with a genuinely cold arm.** Half of roadmap stage 1. The
   metrics half now exists ([`tier-report-metrics-plan.md`](tier-report-metrics-plan.md) and
   `tools/tierreport.py`); this half does not.
+- **Why the fs tier reads ~59 KiB per token served** against a measured KV density of
+  33,808 B/token — a ~1.8x read amplification, unexplained, and the same family as the
+  unexplained CacheWise figure.
 - **Why a 64 s promotion is still not explained.** [`kv-cache-historical.md`](kv-cache-historical.md) §6.
 - **`--max-num-seqs` 4 → 2.** Costs nothing to try, never tried under a controlled replay.
 - **Everything in [`kv-cache-known-issues.md`](kv-cache-known-issues.md) §C.**

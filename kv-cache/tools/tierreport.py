@@ -58,6 +58,7 @@ import os
 import random
 import re
 import sys
+import textwrap
 import time
 import urllib.request
 from collections import defaultdict
@@ -100,6 +101,23 @@ MIB = float(1 << 20)
 T_NEVER_READ_FRACTION = 0.50   # mass at "0 reads" that means oversized
 T_REUSE_P50_SECONDS = 60.0     # eviction-to-reuse p50 that means undersized
 T_BREAK_EVEN = 1.2             # tier tok/s over recompute tok/s to be worth it
+
+# Tiers whose I/O is dispatched to a worker pool rather than run inline.
+#
+# This matters more than it looks. For such a tier the per-batch seconds are
+# accumulated on several threads at once and then summed, so dividing bytes by
+# that sum understates the wall-clock rate by up to the pool width -- and every
+# "your disk is too slow" verdict is a division by exactly that number. It also
+# changes what the latency histogram MEANS: a batch that waits while its seven
+# siblings share the device is not a device that is failing, it is the fanout
+# doing precisely what it was built to do. This design queues deliberately
+# rather than preempting and evicting, so a long per-batch time is the chosen
+# trade, not a symptom.
+#
+# So a queued tier gets bounds and an explanation, never a verdict computed as
+# if the seconds were wall time. Override with --serial-io for a backend that
+# really does its reads inline.
+QUEUED_IO_TIERS = {"fs"}
 T_OCCUPANCY_HIGH = 0.95        # "full" for the occupancy-over-time statement
 T_OCCUPANCY_HIGH_FRACTION = 0.80
 
@@ -360,8 +378,13 @@ def safe_div(a, b):
     return a / b
 
 
-def derive(scrape):
-    """Turn a scrape into the report structure. No printing, no verdicts."""
+def derive(scrape, serial_io=False):
+    """Turn a scrape into the report structure. No printing, no verdicts.
+
+    `serial_io` says this deployment really does run tier I/O inline, so the
+    seconds counters are wall time and the rates can be stated flat. Leave it
+    False for the pooled backends in QUEUED_IO_TIERS.
+    """
     r = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "mode": "window" if scrape.base is not None else "lifetime",
@@ -480,6 +503,8 @@ def derive(scrape):
             "store_bytes": store_bytes,
             "store_seconds": store_seconds,
             "store_ops": scrape.sum(M_STORE_OPS, tier=t),
+            # Lower bounds, not rates, whenever the seconds were summed
+            # across a worker pool -- see QUEUED_IO_TIERS.
             "bytes_per_s": safe_div(load_bytes, load_seconds),
             "store_bytes_per_s": safe_div(store_bytes, store_seconds),
             "tokens_per_s": safe_div(served, load_seconds),
@@ -509,6 +534,23 @@ def derive(scrape):
         row["break_even_ratio"] = safe_div(
             row["tokens_per_s"], r["recompute_tokens_per_s"]
         )
+        # Is this tier's `load_seconds` wall time, or thread-time summed over a
+        # pool? If the latter, every rate above is a floor. The upper bound
+        # comes from the other end: the whole transfer cannot have taken less
+        # than its single slowest batch, which the latency histogram gives us.
+        row["queued_io"] = (t in QUEUED_IO_TIERS) and not serial_io
+        row["rate_is_lower_bound"] = bool(row["queued_io"] and row["load_ops"] > 1)
+        if row["rate_is_lower_bound"] and row["load_latency_p99"]:
+            row["bytes_per_s_upper"] = safe_div(load_bytes,
+                                                row["load_latency_p99"])
+            row["tokens_per_s_upper"] = safe_div(served,
+                                                 row["load_latency_p99"])
+            row["break_even_upper"] = safe_div(row["tokens_per_s_upper"],
+                                               r["recompute_tokens_per_s"])
+        else:
+            row["bytes_per_s_upper"] = None
+            row["tokens_per_s_upper"] = None
+            row["break_even_upper"] = None
         tiers.append(row)
 
     r["tiers"] = tiers
@@ -554,10 +596,21 @@ def derive(scrape):
         if rc and tps and tokens:
             tier_saved = tokens * (1.0 / rc - 1.0 / tps)
         tier_cost = row["store_seconds"] + row["stall_seconds"]
+        # On a queued tier both ends of this subtraction are pessimistic: the
+        # rate that produces `tier_saved` is a floor (thread-summed seconds),
+        # and `store_seconds` is summed over the same pool, so the cost is a
+        # ceiling. A negative net here is therefore not evidence of a loss.
+        tier_saved_upper = tier_saved
+        if rc and tokens and row.get("tokens_per_s_upper"):
+            tier_saved_upper = tokens * (1.0 / rc
+                                         - 1.0 / row["tokens_per_s_upper"])
         per_tier_value[t] = {
             "saved_seconds": tier_saved,
             "cost_seconds": tier_cost,
             "net_seconds": tier_saved - tier_cost,
+            "saved_seconds_upper": tier_saved_upper,
+            "net_seconds_upper": tier_saved_upper - tier_cost,
+            "bounded": bool(row.get("rate_is_lower_bound")),
         }
         saved += tier_saved
         cost += tier_cost
@@ -817,6 +870,11 @@ def verdicts(r, calibration=None):
         ratio = row["break_even_ratio"]
         served = row["hit_tokens_originated"]
         value = r["value"]["per_tier"].get(t, {})
+        # A tier whose I/O runs on a worker pool reports thread-summed seconds,
+        # so every rate below is a floor and no "too slow" answer can honestly
+        # be computed from it. Say what is known -- the bracket, and why the
+        # batch latency is long on purpose -- instead of a verdict.
+        bounded = bool(row.get("rate_is_lower_bound"))
 
         if served <= 0 and row["store_seconds"] <= 0:
             add("Is the %s tier pulling its weight?" % t, "unknown",
@@ -832,6 +890,34 @@ def verdicts(r, calibration=None):
                 "it to answer."
                 % (t, fmt_secs(row["store_seconds"])),
                 "%s{tier=\"%s\"} = 0" % (M_HIT_TOKENS, t))
+        elif bounded:
+            hi = row.get("break_even_upper")
+            add("Is the %s tier too slow?" % t, "unknown",
+                "Cannot be answered from these counters, and the number that "
+                "looks like an answer is not one. The %s tier dispatches its "
+                "I/O to a worker pool, so %s is the SUM of the per-batch times "
+                "across every worker, not wall time; dividing by it gives %s "
+                "tok/s, which is a floor. The other end comes from the latency "
+                "histogram: the whole transfer cannot have taken less than its "
+                "single slowest batch (%s), giving at most %s tok/s. So the "
+                "tier sits somewhere between %s and %s of recompute -- measure "
+                "the device directly (--calibrate) to place it.\n"
+                "The long batch time is the design, not a fault: this tier "
+                "QUEUES work across the fanout rather than preempting and "
+                "evicting, so a batch that waits while its siblings share the "
+                "device is the mechanism working. A request waits the "
+                "promotion, which overlaps those batches; it does not wait one "
+                "batch after another."
+                % (t, M_LOAD_SECONDS, fmt_num(row["tokens_per_s"]),
+                   fmt_secs(row["load_latency_p99"]),
+                   fmt_num(row.get("tokens_per_s_upper")),
+                   "-" if ratio is None else "%.2fx" % ratio,
+                   "-" if hi is None else "%.2fx" % hi),
+                "%s{tier=\"%s\"} is summed across the pool over %s load "
+                "batches; break-even is bracketed [%s, %s]"
+                % (M_LOAD_SECONDS, t, fmt_num(row["load_ops"]),
+                   "-" if ratio is None else "%.2f" % ratio,
+                   "-" if hi is None else "%.2f" % hi))
         elif ratio is None:
             add("Is the %s tier too slow?" % t, "unknown",
                 "Not enough timing data to compare the %s tier against "
@@ -871,7 +957,33 @@ def verdicts(r, calibration=None):
         if row["stall_seconds"] > 0 or served > 0:
             net = value.get("net_seconds")
             saved_s = value.get("saved_seconds")
-            if net is not None and net < 0:
+            if net is not None and net < 0 and bounded:
+                # Both halves of this subtraction are thread-summed on a queued
+                # tier, so it is pessimistic twice over and cannot be reported
+                # as a loss. Give the reader the two facts and the one number
+                # that IS wall-clock: the stall.
+                up = value.get("net_seconds_upper")
+                add("Is the %s tier actively hurting?" % t, "unknown",
+                    "Not decidable from these counters, in the direction that "
+                    "matters. The saving is computed from a delivery rate that "
+                    "is a floor (thread-summed seconds), and the %s of store "
+                    "cost on the other side of the subtraction is summed "
+                    "across the same pool, so it is a ceiling. Both errors "
+                    "push the answer the same way -- towards a loss that may "
+                    "not exist. At face value the tier is %s behind; at the "
+                    "optimistic end of the delivery bracket alone, still %s. "
+                    "Neither is a measurement.\n"
+                    "The one wall-clock number here is the stall: %s of "
+                    "request time was spent waiting on this tier. That is what "
+                    "a caller actually paid, and it is the figure to judge the "
+                    "tier by until the seconds counters are wall time."
+                    % (fmt_secs(value.get("cost_seconds")), fmt_secs(-net),
+                       ("%s behind" % fmt_secs(-up)) if (up or 0) < 0
+                       else ("%s ahead" % fmt_secs(up)),
+                       fmt_secs(row["stall_seconds"])),
+                    "saved and cost are both thread-summed; stall = %s "
+                    "(wall clock)" % fmt_secs(row["stall_seconds"]))
+            elif net is not None and net < 0:
                 saved_phrase = (
                     "saved %s of compute" % fmt_secs(saved_s) if saved_s >= 0
                     else "was %s SLOWER than recomputing the tokens it served"
@@ -892,7 +1004,17 @@ def verdicts(r, calibration=None):
                        fmt_secs(value.get("cost_seconds")), fmt_secs(net)),
                     "net = %s" % fmt_secs(net))
 
-        if calibration and "bytes_per_s" in calibration and row["bytes_per_s"]:
+        if bounded and calibration and "bytes_per_s" in calibration:
+            add("Where is the %s tier's ceiling?" % t, "unknown",
+                "Not comparable as measured. The calibration is wall time for "
+                "one stream; the engine's %s is thread-time summed over a "
+                "pool, so the two numbers do not describe the same clock and "
+                "their ratio means nothing. Fix the instrument (time the whole "
+                "promotion once, rather than each batch) before answering this."
+                % fmt_rate(row["bytes_per_s"]),
+                "engine rate is a thread-summed floor; calibration is "
+                "single-stream wall time")
+        elif calibration and "bytes_per_s" in calibration and row["bytes_per_s"]:
             dev = calibration["bytes_per_s"]
             eng = row["bytes_per_s"]
             if dev and eng:
@@ -944,6 +1066,26 @@ def verdicts(r, calibration=None):
                             fmt_secs(v["net_seconds"])),
                 "net = saved %s - cost %s" % (fmt_secs(v["saved_seconds"]),
                                               fmt_secs(v["cost_seconds"])))
+        elif any(row.get("rate_is_lower_bound") for row in r["tiers"]):
+            # The roll-up inherits the queued tier's pessimism; it cannot
+            # declare a loss the parts could not.
+            bounded_names = ", ".join(row["tier"] for row in r["tiers"]
+                                      if row.get("rate_is_lower_bound"))
+            add("Is the layered cache worth it?", "unknown",
+                "The sum says %s saved against %s of overhead%s, short by %s "
+                "-- a deficit that inherits the %s tier's thread-summed seconds on "
+                "both sides, so it is a pessimistic bound and not a result. "
+                "What can be said without that instrument: %s of prompt tokens "
+                "came from cache rather than compute, and %s of request time "
+                "was spent stalled on a tier."
+                % (fmt_secs(v["saved_seconds"]), fmt_secs(v["cost_seconds"]),
+                   span, fmt_secs(-v["net_seconds"]), bounded_names,
+                   fmt_pct(1.0 - (safe_div(r["by_source"].get("local_compute",
+                                                               0.0),
+                                            r["prompt_tokens"]) or 0.0)),
+                   fmt_secs(r["prefill_stall_seconds"])),
+                "net = %s, but %s seconds are thread-summed"
+                % (fmt_secs(v["net_seconds"]), bounded_names))
         else:
             add("Is the layered cache worth it?", "no",
                 "Not as configured%s: %s saved against %s of store overhead and "
@@ -1009,9 +1151,38 @@ def _md_table(headers, rows):
     return out
 
 
+def queued_note(r):
+    """One paragraph, shared by both renderers, for queued-I/O tiers.
+
+    Without it the table reads as an accusation: a 15-second batch time next to
+    a throughput figure that is really a floor. Both come from the same fact --
+    the I/O runs on a pool -- and neither is a fault.
+    """
+    names = [row["tier"] for row in r["tiers"] if row.get("queued_io")]
+    if not names:
+        return []
+    who = " and ".join(names)
+    plural = "tiers" if len(names) > 1 else "tier"
+    return [
+        "The %s %s dispatches its I/O to a worker pool. Two consequences for "
+        "this table. Batch p50/p99 are the service times of ONE batch while "
+        "its siblings share the device -- a request waits the promotion, which "
+        "overlaps them, not one batch after another; this design queues "
+        "deliberately rather than preempting and evicting, so a long batch "
+        "time is the trade being made and not a stall the caller sees. And "
+        "because the seconds counter sums across those threads, Throughput, "
+        "Equiv tok/s and vs recompute are LOWER BOUNDS (marked >=), not "
+        "measurements. Pass --serial-io if this backend really does read "
+        "inline." % (who, plural),
+    ]
+
+
 def tier_table(r):
+    # "Batch", not "Fetch": these are the service times of one I/O batch, and
+    # on a queued tier several of them are in flight at once. A request does
+    # not wait one of these; it waits the promotion, which overlaps them.
     headers = ["Tier", "Role", "Size", "Used", "Hit ratio", "Served tok",
-               "Fetch p50", "Fetch p99", "Throughput", "Equiv tok/s",
+               "Batch p50", "Batch p99", "Throughput", "Equiv tok/s",
                "vs recompute"]
     rows = []
     for row in r["tiers"]:
@@ -1024,10 +1195,13 @@ def tier_table(r):
             fmt_num(row["hit_tokens_originated"]),
             fmt_secs(row["load_latency_p50"]),
             fmt_secs(row["load_latency_p99"]),
-            fmt_rate(row["bytes_per_s"]),
-            fmt_num(row["tokens_per_s"]),
+            ("\u2265 " if row.get("rate_is_lower_bound") else "")
+            + fmt_rate(row["bytes_per_s"]),
+            ("\u2265 " if row.get("rate_is_lower_bound") else "")
+            + fmt_num(row["tokens_per_s"]),
             "-" if not row["break_even_ratio"]
-            else "%.2fx" % row["break_even_ratio"],
+            else ("\u2265 %.2fx" if row.get("rate_is_lower_bound")
+                  else "%.2fx") % row["break_even_ratio"],
         ])
     rows.append([
         "recompute", "fallback", "-", "-",
@@ -1070,6 +1244,9 @@ def render_stdout(r, vs, calibration=None):
         lines.append("TIERS")
         h, rows = tier_table(r)
         lines += ["  " + l for l in _table(h, rows)]
+        for para in queued_note(r):
+            lines.append("")
+            lines += ["  " + l for l in textwrap.wrap(para, 74)]
         lines.append("")
         lines.append("SIZING SIGNALS")
         h, rows = sizing_table(r)
@@ -1118,7 +1295,8 @@ def render_stdout(r, vs, calibration=None):
     for v in vs:
         lines.append("  [%s] %s" % (STATUS_MARK.get(v["status"], v["status"]),
                                     v["question"]))
-        lines.append("        %s" % v["statement"])
+        for para in v["statement"].split("\n"):
+            lines += ["        " + l for l in textwrap.wrap(para, 72)]
         lines.append("        signal: %s" % v["signal"])
     lines.append("")
 
@@ -1169,6 +1347,9 @@ def render_markdown(r, vs, calibration=None, source_url=None):
                    "prefill it replaced, so it is directly comparable to the "
                    "recompute row. `vs recompute` is that ratio: below 1.00x "
                    "the tier is slower than not having it.")
+        for para in queued_note(r):
+            out.append("")
+            out.append(para)
         out.append("")
 
         out.append("## Sizing signals")
@@ -1297,6 +1478,11 @@ def main(argv=None):
                          "the raw device rate (e.g. /kvcache/blocks)")
     ap.add_argument("--calibrate-files", type=int, default=24,
                     help="how many block files to read (default: %(default)s)")
+    ap.add_argument("--serial-io", action="store_true",
+                    help="this deployment runs tier I/O inline, so the seconds "
+                         "counters are wall time; report rates flat instead of "
+                         "as bounds (default: assume a worker pool for %s)"
+                         % ", ".join(sorted(QUEUED_IO_TIERS)))
     ap.add_argument("--timeout", type=float, default=30.0)
     args = ap.parse_args(argv)
 
@@ -1332,7 +1518,7 @@ def main(argv=None):
             return 2
 
     scrape = Scrape(samples, base=base, timestamp=now)
-    report = derive(scrape)
+    report = derive(scrape, serial_io=args.serial_io)
 
     calibration = None
     if args.calibrate:
