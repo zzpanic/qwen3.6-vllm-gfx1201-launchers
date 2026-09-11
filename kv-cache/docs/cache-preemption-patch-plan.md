@@ -1303,7 +1303,7 @@ mid-write. That is Phase B, and it is a much smaller change than anything R3.13 
 Phase A named the fix precisely enough that Phase B did not need designing, only writing.
 The patch is `<repo>/kv-cache/patch_kv_offload_serve_ready_prefix.py`, wired into the
 launcher after the Phase A instrumentation, gated on `RADIANCE_OFFLOAD_PENDING_IS_MISS`
-(launcher knob `KVOFF_PENDING_IS_MISS`, default **1** = the new behaviour).
+(launcher knob `KVOFF_PENDING_IS_MISS`, default **0**; 1 = the truncating serve-ready-prefix behaviour, opt-in).
 
 **The change, in one sentence.** `HIT_PENDING` stops meaning "wait for this block" and starts
 meaning "this block is not readable yet" — which is what `MISS` already means to both lookup

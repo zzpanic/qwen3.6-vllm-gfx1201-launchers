@@ -24,8 +24,22 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 - **Status:** **Fixed** by R3.15 (`patch_offload_mixed_hit.py`, hunks 3 and 4) and confirmed live by `check-r315-boot.sh` section 5. **Not yet fully validated** — `status-2026-09-10.md` §4 lists what is owed, with §4 item 4 already met by **CT5's gate** in `CORRECTNESS.md`. In particular the A/B that produced the 9.1 s / 20.6 s figures above was itself taken on defective code and must be re-run; until then the *size* of the historical pollution is unknown, only its direction.
 - **Measurement trap:** a probe that replicated the harness prompt byte-for-byte "cleared" the nonce — but it was run on the **fixed** engine, where there is nothing to find. This class of bug is invisible to any probe run on patched code. **Arm the defect before concluding that a cache respects a salt.**
 
-### A2. The N=8 stride store serves a coarser state than the exact position — CRITICAL (for exactness claims)
-- **Symptom:** A reused checkpoint is **≤ 8 chunks behind** the requested position; the served state is `S_boundary`, not the exact per-position `S_M`.
+### A2. The N=8 stride store truncates the hit to a boundary — CORRECTED 2026-09-11, NOT an accuracy defect
+> **This entry was wrong and is corrected in place.** It described a substitution the
+> implementation does not perform. The stride is **truncate-and-recompute, not
+> serve-an-approximate-state**: `resolve_mamba_align_size` (`scheduler.py:157`, resolved
+> `:518`) makes `max_hit_size_tokens = round_down(max_hit_size_tokens, mamba_align_size)`
+> at `:722`, applied to the *whole* hit window, so the engine only ever requests a snapshot
+> it actually kept. What is served is **exact**; the tokens between the boundary and the
+> requested position are recomputed by the normal prefill path. Corroborated independently:
+> the 85,696-token disk hit was bit-identical to a cold recompute. The cost is **compute,
+> not accuracy** — up to 13,184 tokens, ~6,592 on average, ~8% of an 85k prefix, and not
+> additive since the Mamba state bounded the hit regardless. **D4 below inherits this
+> correction.** The residual risk is a store/lookup N mismatch across a restart, which
+> yields a MISS rather than wrong data.
+
+- **Symptom:** A hit is truncated down to an N-chunk boundary; up to 8 chunks of prefix that
+  is held but declined, and recomputed.
 - **Root cause:** `patch_kv_offload_mamba_stride.py` keeps only when `(abs_chunk_idx + 1) % 8 == 0`; lookup rounds **down** to `N×tokens_per_chunk`. The 7-of-8 intermediate states are discarded (never read).
 - **Impact:** The state is **inherently approximate by the stride design** — it is *less sensitive to the nonce* than an exact state. It is independent of A1 and untouched by R3.15. It is what makes the GDN finite-memory approximation work (the gate makes the coarsening a *good* approximation), but it means the store is not exact at arbitrary positions.
 - **Status/workaround:** **Exact only at kept boundaries.** To get the exact state at an arbitrary position P, replay the ≤ one-block gap (see `kv-cache-future-work.md` §2.2) — which is exact *given* the checkpoint.
@@ -83,7 +97,10 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 - **Impact:** Not general to DASC's test set (e.g. Qwen3-Next 80B) or other benchmark mixes / hardware.
 - **Status:** State up front.
 
-### D4. NIAH accuracy impact of the stride — DESIGN
+### D4. NIAH accuracy impact of the stride — SUPERSEDED by A2's correction (2026-09-11)
+> The premise below — that a *coarser state is served* — is false; see A2. The served state
+> is exact, so there is no stride-induced retrieval degradation to characterise. Retained
+> only so the claim is not rediscovered from an old copy.
 - **Root cause:** The coarser (stride) state is less sensitive to the nonce, so needle-in-a-haystack retrieval can degrade.
 - **Impact:** **Modest** increase in NIAH failure rate; **scales with** the Mamba:full-attention reliance ratio and haystack length. Full-attention is a precise, stride-unaffected fallback; effect is larger for **shorter** haystacks and **Mamba-heavy** models.
 - **Status:** Characterized, not eliminated. Document it.

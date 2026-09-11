@@ -43,7 +43,7 @@ We are building and documenting a **two-tier (three-tier) KV-cache offload** for
   That is how a patch set is pre-flighted against the *live* engine without restarting it. Also useful: **`podman inspect`** + the **applied patches** + the **boot log** (`<repo>/logs/boot-qwen3.8-27b-vllm*.log`).
 - **API ports:** raw `127.0.0.1:5804`; llama-swap proxy `<server-ip>:1234`.
 - **No cache-flush endpoint** (404 on both) — you cannot force a cold run via the API.
-- **Key env in the container:** `RADIANCE_MAMBA_STORE_STRIDE=8`, `RADIANCE_OFFLOAD_EAGLE_GROUPS=1`, `RADIANCE_OFFLOAD_PENDING_IS_MISS=1`, `PYTHONHASHSEED=0` (pinned — required for the on-disk cache to survive a restart).
+- **Key env in the container:** `RADIANCE_MAMBA_STORE_STRIDE=8`, `RADIANCE_OFFLOAD_EAGLE_GROUPS=1`, `RADIANCE_OFFLOAD_PENDING_IS_MISS=0` (shipped; 1 = the truncating serve-ready-prefix, opt-in), `PYTHONHASHSEED=0` (pinned — required for the on-disk cache to survive a restart).
 - **Launcher:** `llama-swap-ggz14-27b.sh` (house copy of ggz14's `serve-mxfp4.sh`, 2026-09-05). All `KVOFF_*` defaults are in `kv-cache-current-implementation.md` §4.
 
 ---
@@ -57,7 +57,7 @@ We are building and documenting a **two-tier (three-tier) KV-cache offload** for
 - **Docs** (all in `<repo>/kv-cache/`): current-implementation, future-work, references, known-issues, operations, historical, the closed-decisions register, `CORRECTNESS.md`, the tier-report metrics plan, the dated statuses, and this handover. The full map is §10.
 
 **The one big finding (know this before trusting any number):**
-- **The BetterBench run is INVALID (polluted).** vLLM radiance matches the prefix cache by block **content**, not **chained prefix**, and BetterBench's "cold (nonce)" only varies **block 0** → the body self-caches. Evidence: 2.15M GPU + 2.45M external hits; A/B at 32k repeating body 9.1s (3,520 t/s) vs unique 20.6s (1,555 t/s). **Do not cite the BetterBench numbers.** The only valid quantitative claim is the "tier earned its keep" measurement above.
+- **The BetterBench run is INVALID (polluted).** vLLM radiance matches the prefix cache by block **content**, not **chained prefix**, and BetterBench's "cold (nonce)" only varies **block 0** → the body self-caches. Evidence: 2.15M GPU + 2.45M external hits; A/B at 32k repeating body 9.1s (3,520 t/s) vs unique 20.6s (1,555 t/s). **Do not cite the BetterBench numbers.** The "tier earned its keep" measurement above is **method only, not citable** (pre-2026-09-10, pending re-measurement, `status-2026-09-10.md` §4).
 
 ---
 

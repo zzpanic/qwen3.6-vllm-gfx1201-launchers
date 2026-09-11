@@ -56,6 +56,9 @@ both.
 | Does parallelising a promotion help? (PR #49225, R3.14 fanout) | **No win.** Kept because it is correct and free, not because it measured better. | Splits 8 ways exactly; ~117 MB/s either way. | — |
 | Should storage be upgraded? | **Yes — this REVERSES the earlier "do not buy disks".** The fs tier sits at **1.16×** break-even: 101 MB/s to tie recompute, device does 117. | [`kv-cache-historical.md`](kv-cache-historical.md) §5 | — (this is the standing recommendation, not a closure against work) |
 | GPUDirect / DMA disk→VRAM? | **Foreclosed, three separate ways.** | See [`../README.md`](../README.md) | — |
+| Can the CPU tier be grown past 24 GiB? | **No, not on this hardware.** `--kv-offloading-size 24` is a permanent ceiling, not a tuning choice. | The guest has 39 GB total, ~8 GB available, 24 GB already shared to the tier (`free -g`, 4 vCPU Skylake guest, 2026-09-11). | More host RAM. Until then, **reducing bytes/token is the only lever that raises CPU-tier residency** — see the density row below. |
+| Should the fs tier bypass the CPU tier and load straight to GPU? | **No — out of scope by decision** (pat, 2026-09-11), independently of the GPUDirect foreclosure above. | Ruled out for reasons beyond the tiering design; the staged-promotion architecture stays. | pat reopening it. |
+| What is the fs tier's stored density, and what is its floor? | **61,440 B/token today; 45,056 B/token is the achievable floor.** Per 1,648-token chunk: 2 self-attn groups every chunk (32,768 B/tok, irreducible), 1 MTP/draft group every chunk (16,384 B/tok, **recomputable**), 6 Mamba groups at a 1-in-8 stride (12,288 B/tok, cadence-tunable only). | File census 2026-09-11: every block file is exactly 27,000,832 B = 16,384 B/token/group; g0–g5 at 73 files, g6/g7 at 636, g8 at 632 (0.1148 measured stride rate vs 1/8). Independently matches `patch_kv_offload_mamba_stride.py:78-79`'s own arithmetic (30 files per 8 chunks). | A change to the group layout, the stride N, or the block size. |
 
 ## 4. Method — how measurements here are allowed to be made
 
@@ -94,6 +97,46 @@ repository, or a summary written from one, check it against this table.
 
 ---
 
+## 6. Operating the scarce resource — window types
+
+Added 2026-09-11. Windows are the scarcest resource in this project; everything else runs
+unattended and free. There are **three** kinds and conflating them wastes them:
+
+| window | what it is | constraints |
+|---|---|---|
+| **Reload** | the model restarts, arming patches | **resets every lifetime counter** — anything not captured first is gone. llama-swap may stay up. Short. |
+| **GPU exclusive** | llama-swap stopped, the GPU used exclusively | required for any timing comparison. **Ask pat in conversation first, every time; never `/unload`; keep the model hot afterwards.** Long. |
+| **Quiet** | no reload, no exclusivity, but **no competing traffic** | the resume test needs ≥60 min of genuine idle. **The kvq runners must be stopped first** or their traffic is what gets measured. |
+
+**Sequencing rule for a reload window, decided 2026-09-11.** Landing counters and behaviour
+changes together leaves **no "before"**: the instrument and the change arrive at the same
+moment and their effects cannot be separated. So: **reload 1** lands every patch with all
+behaviour changes at their neutral default (the precedent is `RADIANCE_MAMBA_STORE_STRIDE=1`
+disabling the stride patch entirely), making counters live while behaviour is unchanged, and
+the instrumented baseline is collected then. **Reload 2** flips knobs on against that
+baseline. A patch with no neutral off value does not go in a bundle.
+
+**Ordering rules within any window:** shared setup is paid once; anything that resets counters
+precedes anything needing a long history; nothing that warms the cache precedes something
+needing it cold; and the shortest activity that could *invalidate* the rest runs first — a
+failed boot check should end the window at minute two, not minute ninety.
+
+## Deferred — decided, not forgotten
+
+- **The remaining correctness validation runs** (`status-2026-09-10.md` §4 items 1, 2, 3, 5,
+  6). **Deferred by pat, 2026-09-11**: they are long-running, the engine-under-test has
+  passed them repeatedly, and no new information is expected. Items 2, 3 and 6 are genuine
+  re-measurements; item 4 was already met by CT5's gate.
+  **Two are not repeats and are deferred anyway, knowingly:** item 1 (output correctness with
+  the defect *armed* — invisible to any probe run on patched code, and the difference between
+  an inferred and a demonstrated wrong-output bug) and item 5 (**stock reproduction, which
+  gates filing anything upstream**). The harness for item 5 exists and self-tests clean
+  (`stock_repro.py --self-test` → `GATE: PASS`); only the two-arm run is missing, and it needs
+  an unpatched build plus a GPU exclusive window.
+  **Consequence, stated so it is not rediscovered:** the arm remains *assumed correct, not yet
+  validated correct*. **Reopen condition:** submitting anything upstream — at that moment
+  item 5 becomes a blocker, not before.
+
 ## Still open — deliberately not in this register
 
 For contrast, so that "not listed here" is not read as "settled":
@@ -101,9 +144,35 @@ For contrast, so that "not listed here" is not read as "settled":
 - **The controlled A/B harness with a genuinely cold arm.** Half of roadmap stage 1. The
   metrics half now exists ([`tier-report-metrics-plan.md`](tier-report-metrics-plan.md) and
   `tools/tierreport.py`); this half does not.
-- **Why the fs tier reads ~59 KiB per token served** against a measured KV density of
-  33,808 B/token — a ~1.8x read amplification, unexplained, and the same family as the
-  unexplained CacheWise figure.
+- **THE PRIORITY DEFECT: an fs-tier hit is reported as `MISS` when the CPU tier is full.**
+  Diagnosed 2026-09-11, upstream's defect, not a local misconfiguration. In
+  `v1/kv_offload/tiering/manager.py:386` a secondary-tier HIT returns
+  `LookupResult.MISS if not promoted else LookupResult.RETRY`; `_initiate_promotion`
+  (`:474`) returns `False` whenever `primary_tier.prepare_write()` returns `None`, which
+  `v1/kv_offload/cpu/manager.py:218-233` does when eviction cannot free a slot ("Eviction
+  will fail", or the ARC policy's candidates are pinned). **A block physically present on
+  disk is therefore reported absent, and the engine prefills.** The tier exists to catch
+  what the CPU tier overflows, but promoting out of it requires free space *in the tier that
+  just overflowed* — the same condition, so the fs tier cannot serve under the pressure it
+  was built for. Measured under two concurrent streams: CPU tier pinned at
+  `used_bytes == capacity_bytes`, 333 evictions / 8.99 GB, `lookup_chunk_miss_total` 35 →
+  6,906, and `tier_load_ops{fs}` **unchanged at 47** while the tier absorbed 9 GB of writes.
+  **There is no counter on the refusal path**, so these are indistinguishable from genuine
+  misses — the defect is invisible in `/metrics` and was only found by reading the code.
+  Agreed fix shape (pat): return `RETRY` with a bound instead of `MISS`, plus reserved
+  promotion headroom in the primary tier. `cpu_cache_evictable_perc = 1.0` is **not**
+  counter-evidence: it is sampled between scheduler steps, when nothing is pinned.
+- **Why the fs tier reads ~59 KiB per token served** — *largely resolved 2026-09-11*: stored
+  density is 61,440 B/token (see §3), so the fs tier reads close to everything it stored. The
+  residue is that the CPU tier reads 35,292 B/token for the same served data, which is
+  believed to be read-side (fs reads whole 27,000,832 B group-files, CPU reads only what it
+  serves) but is **not yet confirmed**.
+- **Where the traffic actually goes, and how much pressure changes it.** Single stream:
+  GPU prefix cache 89.8% of prompt tokens, recompute 9.0%, offload tiers 1.1%. Two
+  concurrent streams: GPU 50.5%, recompute 18.6%, **offload tiers 30.9%**. The tiers only
+  matter under concurrency, and the GPU pool arithmetic says why —
+  `kv_cache_size_tokens` 228,737 with `kv_cache_max_concurrency` 1.117, so at a 110k context
+  limit exactly 2.08 streams fit and a third must evict.
 - **Why a 64 s promotion is still not explained.** [`kv-cache-historical.md`](kv-cache-historical.md) §6.
 - **`--max-num-seqs` 4 → 2.** Costs nothing to try, never tried under a controlled replay.
 - **Everything in [`kv-cache-known-issues.md`](kv-cache-known-issues.md) §C.**

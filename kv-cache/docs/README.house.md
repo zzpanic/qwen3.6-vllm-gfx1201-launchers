@@ -9,7 +9,7 @@ them with no copy anywhere. They now live here and ride their own bind mount.
 
 | file | what it is |
 |---|---|
-| `cache-preemption-patch-plan.md` | The plan for the "retain, don't recompute" work. Read **Revision 2** first — it supersedes parts of the original and reorders the build. |
+| `cache-preemption-patch-plan.md` | The plan for the "retain, don't recompute" work. Read **Revision 3** first (it supersedes parts of Revision 2 and the original), then Revision 2. |
 | `patch_offload_mixed_hit.py` | Makes `OffloadingConnector` safe when a KV group's prefix hit lags the request's. Fixes two defects: a boundary assertion that only holds for full-attention groups, and a lookup that confirms a narrower chunk range than the load reads. Applied at every boot. |
 | `tierbench.py` | Deterministic KV tier attribution bench. Also the acceptance test for the R2.9.2 instrumentation. |
 
@@ -27,7 +27,7 @@ patches do — Python puts the *script's* directory on `sys.path[0]`, not the wo
 directory, so `cd /patches` alone would not be enough. The upstream clone stays pristine.
 
 Behaviour is still gated at runtime by `RADIANCE_OFFLOAD_MIXED_HIT` (`KVOFF_MIXED_HIT` in
-the launcher): `1` = upstream behaviour, `0` = the patch's decline-the-hit path.
+the launcher): `1` = serve mixed hits = default = safe, `0` = decline = the retained kill switch.
 
 ## tierbench
 

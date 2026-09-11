@@ -7,6 +7,24 @@
 # and every subsequent store fails. This is not a tuning script; it is the
 # eviction policy.
 #
+# AGE RULE RETIRED 2026-09-11: KVCACHE_MAX_AGE_HOURS now defaults to 0 (off).
+# The age rule was a cheap proxy for capacity management, adopted before the
+# capacity stage had ever been exercised. It is not a good proxy: it deletes
+# blocks that cost nothing to keep. Evidence on the day it was retired -- the
+# volume was 511 GB at 17% used against a 65% target, and the journal showed
+# every deletion in the script's entire history was "[N by age, 0 for capacity]",
+# including runs that deleted 774 blocks at 4% used. Its only other effect was to
+# cap how old a conversation could be and still resume from disk at eight hours,
+# which is precisely the capability this tier exists to provide.
+#
+# Capacity pressure, oldest-mtime-first, never below MIN_AGE_MIN, is sufficient:
+# it deletes exactly when space is needed and not before. Both stages were then
+# exercised for the first time -- capacity selected 2,182 of 3,338 blocks
+# oldest-first (322.3 -> 94.7 min) and spared every block under the 90-minute
+# floor; a forced-pressure sandbox run confirmed the floor branch warns and stops
+# rather than crossing it. Set KVCACHE_MAX_AGE_HOURS to a positive number to
+# bring the rule back -- e.g. to bound staleness for a reason other than capacity.
+#
 # AGE-BASED, changed 2026-09-06. The old policy did nothing below 80% used and
 # then purged 80% -> 65% in one cycle: ~2,975 blocks, at the moment the cache is
 # fullest and the engine busiest. Measured that afternoon, /kvcache went 55 GB ->
@@ -43,7 +61,7 @@ set -euo pipefail
 
 ROOT=${KVCACHE_ROOT:-/kvcache/blocks}
 MIN_AGE_MIN=${KVCACHE_MIN_AGE_MIN:-90}      # HARD FLOOR: nothing younger is ever deleted
-MAX_AGE_HOURS=${KVCACHE_MAX_AGE_HOURS:-8}   # delete anything older, every cycle, regardless of %use
+MAX_AGE_HOURS=${KVCACHE_MAX_AGE_HOURS:-0}   # 0 = age rule OFF, capacity alone governs; >0 = also delete anything older
 TARGET_PCT=${KVCACHE_TARGET_PCT:-65}        # and keep %use at or below this
 MAX_DELETE=${KVCACHE_MAX_DELETE:-4000}      # per-run cap so no cycle runs long; next cycle continues
 TMP_AGE_MIN=${KVCACHE_TMP_AGE_MIN:-60}      # orphaned *.tmp older than this go too
@@ -53,7 +71,10 @@ DRY=${DRY_RUN:-}
 
 # A floor at or above the ceiling would make the age rule delete blocks the floor
 # forbids -- incoherent rather than merely aggressive. Refuse instead of guessing.
-if [ "$MIN_AGE_MIN" -ge $(( MAX_AGE_HOURS * 60 )) ]; then
+# MAX_AGE_HOURS=0 means the age rule is off, so the guard does not apply -- without
+# this exemption the script would exit 1 and do NO reaping at all, which on a
+# filling volume is the dangerous failure, not the safe one.
+if [ "$MAX_AGE_HOURS" -gt 0 ] && [ "$MIN_AGE_MIN" -ge $(( MAX_AGE_HOURS * 60 )) ]; then
   echo "kvcache-reap: MIN_AGE_MIN=${MIN_AGE_MIN}min >= MAX_AGE_HOURS=${MAX_AGE_HOURS}h; refusing to run" >&2
   exit 1
 fi
@@ -78,13 +99,15 @@ rm_one() {
   removed=$((removed+1))
 }
 
-# --- Stage A: age. Runs every cycle whatever the usage. This is the stage that
-# --- stops the volume ever building toward a panic purge.
-while IFS= read -r -d '' -u 3 f; do
-  if [ "$removed" -ge "$MAX_DELETE" ]; then capped=1; break; fi
-  [ -f "$f" ] || continue
-  rm_one "$f"
-done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$(( MAX_AGE_HOURS * 60 ))" -print0)
+# --- Stage A: age. OFF by default since 2026-09-11 (see AGE RULE RETIRED above).
+# --- When enabled it runs every cycle whatever the usage.
+if [ "$MAX_AGE_HOURS" -gt 0 ]; then
+  while IFS= read -r -d '' -u 3 f; do
+    if [ "$removed" -ge "$MAX_DELETE" ]; then capped=1; break; fi
+    [ -f "$f" ] || continue
+    rm_one "$f"
+  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$(( MAX_AGE_HOURS * 60 ))" -print0)
+fi
 aged=$removed
 
 # --- Stage B: capacity. Only if age alone did not keep us under target. Deletes
@@ -117,7 +140,11 @@ fi
 
 now=$(pct)
 if [ "$removed" -eq 0 ]; then
-  echo "kvcache-reap: ${now}% used, nothing older than ${MAX_AGE_HOURS}h and at/below the ${TARGET_PCT}% target; nothing to do"
+  if [ "$MAX_AGE_HOURS" -gt 0 ]; then
+    echo "kvcache-reap: ${now}% used, nothing older than ${MAX_AGE_HOURS}h and at/below the ${TARGET_PCT}% target; nothing to do"
+  else
+    echo "kvcache-reap: ${now}% used, at/below the ${TARGET_PCT}% target (age rule off); nothing to do"
+  fi
 else
   echo "kvcache-reap: removed $removed block(s) [${aged} by age, $((removed - aged)) for capacity]; now ${now}% used"
 fi
@@ -126,6 +153,7 @@ if [ "$floor_hit" -eq 1 ]; then
   echo "kvcache-reap: WARNING ${now}% used is still above the ${TARGET_PCT}% target, but every remaining block is" >&2
   echo "kvcache-reap:   younger than ${MIN_AGE_MIN} min. NOT deleting those -- recent blocks are the engine's hot set," >&2
   echo "kvcache-reap:   and losing a load in flight kills EngineCore (see the header). If this line repeats, the" >&2
-  echo "kvcache-reap:   volume is too small for this workload; grow it or lower KVCACHE_MAX_AGE_HOURS." >&2
+  echo "kvcache-reap:   volume is too small for this workload; grow it, lower KVCACHE_MIN_AGE_MIN, or set" >&2
+  echo "kvcache-reap:   KVCACHE_MAX_AGE_HOURS to a positive value to shed old blocks before pressure builds." >&2
 fi
 exit 0

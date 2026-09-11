@@ -239,7 +239,7 @@ design note is [`docs/tier-report-metrics-plan.md`](docs/tier-report-metrics-pla
 It is deliberately **lifetime-cumulative and read-once**, which sidesteps the cold-arm
 problem rather than solving it: it reports what the operator's own traffic actually did, so
 there is no synthetic corpus to get wrong. Everything a *judgment* rests on is a monotonic
-counter or a histogram, never a gauge, because a gauge scraped once off a long-lived server
+counter or a histogram (the only gauges are `tier_capacity_bytes` and `tier_used_bytes` — configuration, not judgment), because a gauge scraped once off a long-lived server
 says almost nothing. What is still missing from this stage is the other half — the
 controlled A/B harness with a genuinely cold arm, which is what would let a *change* be
 measured rather than a deployment described.
@@ -430,7 +430,7 @@ Read in this order. Every document is written to be actionable without opening t
 | [`kv-cache-future-work.md`](docs/kv-cache-future-work.md) | The plan, the reuse-refresh mechanism and its `L` analysis, and the limitations to state up front. |
 | [`kv-cache-references.md`](docs/kv-cache-references.md) | Every PR, paper, blog and local artifact reviewed, each with a status and a ruling. |
 | [`status-2026-09-09.md`](docs/status-2026-09-09.md) | The investigation snapshot: the BetterBench pollution finding, the DASC/DAMP findings, the dead ends. |
-| [`cache-preemption-patch-plan.md`](docs/cache-preemption-patch-plan.md) | The deeper patch plan. **Revision 2 supersedes parts of the original.** |
+| [`cache-preemption-patch-plan.md`](docs/cache-preemption-patch-plan.md) | The deeper patch plan. **Revision 3 supersedes parts of Revision 2 (and the original) — read Revision 3 first, then Revision 2.** |
 | [`README.house.md`](docs/README.house.md) | The original house-files README: how `/house` is wired, `tierbench`, the instrumentation patch. |
 
 ---

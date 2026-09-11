@@ -120,9 +120,10 @@
 #   * The published BetterBench numbers for this stack are POLLUTED and must
 #     never be cited. vLLM matches the prefix cache by block CONTENT, not by
 #     chained prefix, and BetterBench's "cold (nonce)" varies only block 0, so
-#     the body self-caches. The only defensible quantitative claim is the
-#     "the tier earned its keep" measurement (~2.45M tokens served from the
-#     RAM/disk tiers ~= ~26 min of prefill avoided at the honest cold rate).
+#     the body self-caches. The "tier earned its keep" measurement (~2.45M tokens served from the
+#     RAM/disk tiers ~= ~26 min of prefill avoided at the honest cold rate) is
+#     method only, not citable -- it was taken in the polluted pre-R3.15 window;
+#     re-measurement is `status-2026-09-10.md` section 4.
 #
 # ============================================================================
 # ONE GPU
@@ -249,7 +250,7 @@ export KVOFF_DISK_WTHREADS="${KVOFF_DISK_WTHREADS:-4}"
 # ---------------------------------------------------------------------------
 
 # (a) mixed-hit guard. Stops OffloadingConnector killing the engine on a mixed
-#     local+external prefix hit. 1 = upstream behaviour, 0 = decline the hit.
+#     local+external prefix hit. 1 = serve mixed hits = default = safe, 0 = decline = the retained kill switch.
 export KVOFF_MIXED_HIT="${KVOFF_MIXED_HIT:-1}"
 
 # (b) PENDING_IS_MISS=0 -- THE ONE THAT MAKES THE FS TIER ACTUALLY SERVE.

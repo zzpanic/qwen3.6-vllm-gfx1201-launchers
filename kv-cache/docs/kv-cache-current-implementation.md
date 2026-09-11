@@ -19,7 +19,7 @@ What is actually built and running today for the two-tier (three-tier) KV offloa
 | Tier | Where | Sized by | Notes |
 |---|---|---|---|
 | **L1 GPU** | VRAM | `--kv-cache-memory` pin (measured per hardware+batch shape via `rad_kv_lookup`) or vLLM profiling | `--kv-cache-dtype fp8`; `~228,737 tokens` at this boot. |
-| **L2 CPU (primary)** | `/dev/shm` region (host tmpfs, `--ipc=host`) | `KV_OFFLOAD` → GiB via `kvoff_resolve`, **clamped to both** the tmpfs cap (`statvfs`, minus 256 MiB margin) **and** the RAM cap (`MemAvailable − 3 GiB keep-free`); min 4 GiB, else off | **Pre-faulted (`MADV_POPULATE_WRITE`) and pinned (`cudaHostRegister`) — never swaps.** **24 GiB ≈ 762,000 tokens** at this boot, confirmed live by `kv_offload_tier_capacity_bytes{tier="cpu"}` = 25.76 GB. Eviction: `KVOFF_POLICY` (default `lru`; `arc` available, scan-resistant). Admission: `KVOFF_STORE_THRESHOLD` (default 0 = admit on first sight; 2 = admit on second sighting). |
+| **L2 CPU (primary)** | `/dev/shm` region (host tmpfs, `--ipc=host`) | `KV_OFFLOAD` → GiB via `kvoff_resolve`, **clamped to both** the tmpfs cap (`statvfs`, minus 256 MiB margin) **and** the RAM cap (`MemAvailable − 3 GiB keep-free`); min 4 GiB, else off | **Pre-faulted (`MADV_POPULATE_WRITE`) and pinned (`cudaHostRegister`) — never swaps.** **24 GiB ≈ 762,000 tokens** at this boot, confirmed live by `kv_offload_tier_capacity_bytes{tier="cpu"}` = 25.76 GB. Eviction: `KVOFF_POLICY` (default `arc`, scan-resistant; `lru` available). Admission: `KVOFF_STORE_THRESHOLD` (default 0 = admit on first sight; 2 = admit on second sighting). |
 | **L3 disk (fs)** | dedicated filesystem (`KVOFF_DISK`), container path `/kvcache` | `--kv-transfer-config` (`TieringOffloadingSpec`, `OffloadingConnector`, `kv_both`, `kv_load_failure_policy=recompute`) | **8 read / 4 write threads** (tuned: 512 GB zvol, O_DIRECT, reads peak at 8 thr 719 MB/s, writes 4 thr already 24× the 44.6 MB/s stored). **`O_DIRECT`** → bypasses page cache; spare RAM can only help as the primary tier. **NO built-in eviction** → the reaper is mandatory (§5). **Requires the L2 primary tier** to reach the GPU. |
 
 **`kv_load_failure_policy` is INERT here** (measured): the recompute path is driven by `get_block_ids_with_load_errors()`, which only nixl/mooncake/flexkv/lmcache implement — `OffloadingConnector` returns an empty set, and `offloading/worker.py:361` is a **bare `assert transfer_result.success`**. A failed load kills EngineCore outright. See §7.
@@ -35,10 +35,10 @@ Applied at container start inside the entrypoint `bash -lc '…'`, in **this ord
 ### House (from `/house` = `<repo>/kv-cache`; `PYTHONPATH=/patches python3 /house/<patch>`)
 | # | Patch | What it does | Gate (default) | Order / notes |
 |---|---|---|---|---|
-| 1 | `patch_offload_mixed_hit.py` | Stops `OffloadingConnector` killing the engine on a mixed local+external prefix hit | `RADIANCE_OFFLOAD_MIXED_HIT` / `KVOFF_MIXED_HIT` (**1** = upstream/crashing; 0 = decline-the-hit) | first |
+| 1 | `patch_offload_mixed_hit.py` | Stops `OffloadingConnector` killing the engine on a mixed local+external prefix hit | `RADIANCE_OFFLOAD_MIXED_HIT` / `KVOFF_MIXED_HIT` (**1** = serve mixed hits = default = safe; 0 = decline = retained kill switch) | first |
 | 2 | `patch_kv_offload_instrumentation.py` | Adds 3 gauges (`cpu_cache_evictable_perc`, `cpu_cache_free_perc`, `fs_inflight_jobs`) + widens the `lookup_async_delay` histogram 10 s→600 s. **Instrumentation only.** | — | after 1 |
 | 3 | `patch_kv_offload_lookup_outcomes.py` | Counts every terminal branch of the lookup path (diagnostic: why production gets ~0 external hits when the bench gets an exact 85,696-token one). **Non-fatal.** | — | after 2 |
-| 4 | `patch_kv_offload_serve_ready_prefix.py` | Serve the ready prefix instead of deferring on an in-flight store (the Phase A fix — the only behaviour change in the block). **Non-fatal, but not harmless if it fails.** | `RADIANCE_OFFLOAD_PENDING_IS_MISS` / `KVOFF_PENDING_IS_MISS` (**1**) | must run after 3 |
+| 4 | `patch_kv_offload_serve_ready_prefix.py` | Serve the ready prefix instead of deferring on an in-flight store (the Phase A fix — the only behaviour change in the block). **Non-fatal, but not harmless if it fails.** | `RADIANCE_OFFLOAD_PENDING_IS_MISS` / `KVOFF_PENDING_IS_MISS` (**0**; 1 = the truncating serve-ready-prefix, opt-in) | must run after 3 |
 | 5 | `patch_kv_offload_eagle_groups.py` | Annotate the EAGLE/MTP draft KV group positionally so the scheduler stops flagging **all nine** groups as draft (prerequisite for #6). **Non-fatal.** | `RADIANCE_OFFLOAD_EAGLE_GROUPS` / `KVOFF_EAGLE_GROUPS` (**1**) | must run before 6 |
 | 6 | `patch_kv_offload_mamba_stride.py` | **R3.13 Mamba store cadence — the capacity lever (the N=8 stride).** Keep every Nth Mamba/GDN snapshot instead of one per chunk. | `RADIANCE_MAMBA_STORE_STRIDE` / `KVOFF_MAMBA_STRIDE` (**8**; 1 = upstream) | must run after 5 |
 | 7 | `patch_kv_offload_fs_fanout.py` | **R3.14 fs-tier job fanout** (port of upstream PR #49225): one fs job split across the thread pool instead of a single serial task over every block file. | `RADIANCE_FS_FANOUT_TARGET_MB` / `KVOFF_FS_FANOUT_MB` (**256**), `KVOFF_FS_FANOUT_MAX` (**0** = byte budget) | order-independent (different file) |
@@ -57,10 +57,10 @@ Applied at container start inside the entrypoint `bash -lc '…'`, in **this ord
 | `KVOFF_DISK` / `KVOFF_DISK_MNT` / `KVOFF_DISK_SUBDIR` | `""` / `/kvcache` / `blocks` | enable L3 (host path) / container path / subdirectory. |
 | `KVOFF_DISK_RTHREADS` / `KVOFF_DISK_WTHREADS` | 8 / 4 | fs-tier read / write threads (vLLM default 16). |
 | `KVOFF_HASHSEED` | 0 | **pinned `PYTHONHASHSEED`** — block filenames are content hashes chained from `NONE_HASH`; if unset, `kv_cache_utils.py:112` seeds from `os.urandom(32)` and every restart hashes the same tokens to different filenames, orphaning the whole on-disk cache (100% miss, no error). Changing it invalidates the cache. |
-| `KVOFF_MIXED_HIT` / `KVOFF_PENDING_IS_MISS` / `KVOFF_EAGLE_GROUPS` / `KVOFF_MAMBA_STRIDE` | 1 / 1 / 1 / 8 | the four offload behaviour gates (see §3). |
+| `KVOFF_MIXED_HIT` / `KVOFF_PENDING_IS_MISS` / `KVOFF_EAGLE_GROUPS` / `KVOFF_MAMBA_STRIDE` | 1 / 0 / 1 / 8 | the four offload behaviour gates (see §3). |
 | `KVOFF_FS_FANOUT_MB` / `KVOFF_FS_FANOUT_MAX` | 256 / 0 | fs-job fanout budget (MiB) / max (0 = byte budget). `KVOFF_FS_FANOUT_MAX=1` restores upstream one-task-per-job. |
 | `KVOFF_BLOCKS_PER_CHUNK` | `""` (empty = vLLM default 1) | KV blocks per offloaded chunk; raises it coarsens the offload grid **and** the external hit-window rounding. Leave empty for production. |
-| `KVOFF_POLICY` / `KVOFF_STORE_THRESHOLD` | `lru` / 0 | L2 eviction policy / admission filter. |
+| `KVOFF_POLICY` / `KVOFF_STORE_THRESHOLD` | `arc` / 0 | L2 eviction policy / admission filter. |
 | `KVOFF_RAM_RESERVE_GIB` | 15 | everything that is not the tier + headroom, for the explicit-size RAM clamp. |
 | `GC_ORPHANS` | `on` | startup GC (§5). |
 
@@ -95,7 +95,7 @@ Applied at container start inside the entrypoint `bash -lc '…'`, in **this ord
   --kv-cache-dtype fp8 --tensor-parallel-size <TP> --gpu-memory-utilization <GPU_UTIL>
   [--kv-cache-memory <KV_MEM>]
   [--kv-transfer-config <KVOFF_TIER_ARG>]            # L3 wiring (only if KVOFF_DISK set + L2 present)
-  --max-model-len 262144 --max-num-seqs 8 --max-num-batched-tokens 8192
+  --max-model-len 262144 --max-num-seqs 4 --max-num-batched-tokens 8192
   --attention-backend R4D
   --speculative-config <SPEC_CFG>                    # dflash (default) or mtp
   <ASYNC_FLAG> <EXTRA> <MMIMG_ARG> <SKIPMM_ARG>
@@ -105,6 +105,7 @@ Applied at container start inside the entrypoint `bash -lc '…'`, in **this ord
   --override-generation-config {"temperature":1.0,"top_p":0.95,"top_k":20}
   --chat-template <CT_PATH> [reasoning-effort]
 ```
+- **`--max-num-seqs` = 4** is the shipped value (every dated snapshot agrees); the register's open experiment **4 → 2** (costs nothing to try, never tried under a controlled replay) is noted, not adopted.
 - The `KVOFF_TIER_ARG` JSON is **space-free** (word-split at the call site) and deliberately **omits `cpu_bytes_to_use`** — `config/vllm.py:933` unconditionally `.update()`s it from `--kv-offloading-size`, so a copy here would just lose.
 - The three per-request-metrics flags are **all required** (llama-swap computes prompt t/s as `(prompt_tokens − cached)/ttft`, so `--enable-prompt-tokens-details` is what stops every prefix-cache hit from being miscounted as real prefill).
 - **Check in the log:** `"Using RadianceMxfp4W4A8LinearKernel for MXFP4 GEMM"`, `"[radiance] native MXFP4 enabled on gfx12x"`, the R4D selections table. After a restart, the eagle-group line must read **`[8]`** (not all nine flagged).
