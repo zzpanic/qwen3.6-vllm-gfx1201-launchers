@@ -42,13 +42,19 @@ root the script expects. The launcher does all three for you; nothing else does.
 
 See `APPLY-ORDER.txt`. Two pairs are genuinely ordered:
 
-- `serve_ready_prefix` (4) anchors on lines that `lookup_outcomes` (3) inserts.
+- `serve_ready_prefix` (4) anchors on lines that `lookup_outcomes` (3) inserts, and on
+  `offload_mixed_hit` (1)'s `_RADIANCE_ALLOW_MIXED_HIT` line.
 - `mamba_stride` (6) requires `eagle_groups` (5): while every group is flagged as
   an EAGLE/MTP draft group, `storable_chunks()` drops each group's trailing chunk
-  during decode and the store grid stops lining up with the hit window.
+  during decode and the store grid stops lining up with the hit window. It also
+  anchors on `offload_mixed_hit` (1)'s `_RADIANCE_ASSERT_DUMPED` line.
 
-`fs_fanout` (7) is order-independent — it is the only one that touches
-`v1/kv_offload/tiering/fs/manager.py`.
+Both 1-anchors are trivially satisfied — 1 is FATAL and runs first.
+
+`fs_fanout` (7) is order-independent with the rest. Three patches touch
+`v1/kv_offload/tiering/fs/manager.py` — `instrumentation` (2), `fs_fanout` (7), and
+`tier_report` (8) — and they are order-independent because they anchor at different
+sites in it, not because any one is the sole editor.
 
 ## Two of them are fatal; six only warn
 

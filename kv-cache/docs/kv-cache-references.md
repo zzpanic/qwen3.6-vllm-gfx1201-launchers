@@ -1,6 +1,6 @@
 # KV-Cache References
 
-Index of every PR, paper, blog, and local artifact pulled & reviewed in the DASC/DAMP + ReplaySSM + two-tier KV-offload investigation. For the plan see `kv-cache-future-work.md`; for the snapshot see `status-2026-09-09.md`.
+Index of every PR, paper, blog, and local artifact pulled & reviewed in the DASC/DAMP + ReplaySSM + two-tier KV-offload investigation. For the plan see `kv-cache-future-work.md`; for the snapshot see `status-2026-09-10.md` (`status-2026-09-09.md` is kept as history).
 
 Legend — status: `open` / `closed` (merged or superseded) / `commit` / `docs`. "Ruling" = why we reviewed it and the conclusion.
 

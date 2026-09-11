@@ -87,7 +87,7 @@ The **gap replay is exact *given* the checkpoint**; the **result's precision = t
 | Tier | Size | Tokens | Notes |
 |---|---|---|---|
 | **L1 GPU** | 32 GB VRAM, `--kv-cache-dtype fp8` | **~228,737** | store path reads 74 KB/token vs the load path's 35 KB/token |
-| **L2 RAM** (`/dev/shm`) | **24 GiB** | **~762,000** | at the measured 33,808 B/token; confirmed live by `kv_offload_tier_capacity_bytes{tier="cpu"}` |
+| **L2 RAM** (`/dev/shm`) | **24 GiB** | **~419,000** | at 61,440 B/token as stored; confirmed live by `kv_offload_tier_capacity_bytes{tier="cpu"}` |
 | **L3 disk** (fs) | 512 GB zvol | — | store rate **44.6 MB/s** |
 
 ### Tier transition / I/O latencies
@@ -105,7 +105,7 @@ The **gap replay is exact *given* the checkpoint**; the **result's precision = t
 
 ### The N=8 stride effect (the capacity lever)
 - **0.417× bytes** per 8 chunks (72 → 30 units).
-- L2 capacity at that density: **24 GiB ≈ 762,000 tokens**, ~3.3× the GPU cache.
+- L2 capacity at that density: **24 GiB ≈ 419,000 tokens**, ~1.83× the GPU cache.
 - Mamba store cost: **27 MB / group / chunk**; a long conversation = **~70 snapshots** (the GPU itself keeps 2).
 - Cost: prefix hits truncate down to an **N-chunk (13,184-token)** boundary.
 

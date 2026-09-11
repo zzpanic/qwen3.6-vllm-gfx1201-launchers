@@ -73,6 +73,20 @@ conversation that is ~8% of the prefix recomputed. This is not an extra cost on
 top of the attention groups -- the Mamba state is required at the boundary
 regardless, so the whole hit was already limited by it.
 
+THE DEAD ZONE (measured)
+
+The sharp edge of that truncation: any prefix shorter than N * 1,648 tokens gets
+ZERO external hit, not a short one. get_sliding_window_size_in_chunks() returns 1
+for MambaSpec, so _sliding_window_lookup() finds no snapshot for a sub-N-chunk
+prefix and _lookup() returns 0 via SKIP_ZERO_HIT. On-disk evidence at N=8: g0-g5
+hold 418 files each vs g6/g7 3,517 (ratio 8.41 ~= the stride) -- the six Mamba
+groups are the sparse ones, and short prefixes never land on them. Mean measured
+truncation is ~7,416 tokens (the uniform average would be N/2 * 1,648 = 6,592;
+the real prefix-length distribution skews higher).
+
+The stride is a capacity trade, not a free win: at N=8 the six Mamba groups take
+19.2% of the tier; without the stride they would take 67%.
+
 WHAT IT BUYS
 
 Bytes per 8 chunks, in units of 27,000,832: today 8 chunks x 9 groups = 72. With
@@ -156,6 +170,9 @@ apply(
         # radiance R3.13: we only keep every Nth Mamba snapshot, so the hit window must land
         # on the same grid -- otherwise _lookup asks for a state we deliberately did not
         # store and _sliding_window_lookup walks backwards probing chunks that cannot exist.
+        # That rounding down is what creates the dead zone: any prefix shorter than
+        # N * 1,648 tokens gets zero external hit (module docstring for the on-disk
+        # evidence and the capacity trade).
         mamba_align_size *= _RADIANCE_MAMBA_STRIDE
     return mamba_align_size''',
     sentinel="radiance R3.13: we only keep every Nth Mamba snapshot",

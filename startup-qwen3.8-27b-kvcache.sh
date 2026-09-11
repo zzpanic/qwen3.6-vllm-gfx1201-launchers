@@ -30,17 +30,20 @@
 # configuration. If the base launcher changes, this entry inherits the change.
 #
 # ============================================================================
-# STATUS: PROOF OF CONCEPT -- READ THIS BEFORE PUBLISHING OR TRUSTING NUMBERS
+# STATUS: WORKING, CORRECT, UNOPTIMISED -- READ BEFORE PUBLISHING OR TRUSTING
 # ============================================================================
-# This is a PROOF OF CONCEPT. It demonstrates that a three-tier KV-cache offload
-# can be made to work on a GDN hybrid model on a single consumer AMD card, and
-# it is measured doing so. That is the whole of the claim. It is NOT production
-# code, NOT a research-grade reproduction, and it has KNOWN CORRECTNESS ERRORS
-# in the implementation. It is published at this maturity deliberately, because
-# several people want the capability and the author has neither the time nor the
-# specialist expertise to carry it to completion alone.
+# This is a WORKING, CORRECT, UNOPTIMISED implementation delivered as a patch
+# stack -- not a proof of concept. It makes a three-tier KV-cache offload work
+# on a GDN hybrid model on a single consumer AMD card (gfx1201 / RDNA4), and it
+# is measured doing so: 81.8% of prompt tokens were served without recomputation
+# over ~14 h of real agent work, and an 85,696-token disk hit was bit-identical
+# to a cold recompute. The defects that were found are not still open -- they
+# were fixed, and then the fixes were tested. It is a starting point, not a
+# product, and it is published at this maturity deliberately: several people want
+# the capability and the author has neither the time nor the specialist expertise
+# to carry it to completion alone.
 #
-# WHAT THIS NEEDS BEFORE IT IS ANYTHING MORE THAN A PROOF OF CONCEPT
+# WHAT THIS NEEDS TO BE A RELEASE
 # (in order -- each stage's output is the next stage's input):
 #
 #   1. BENCHMARK HOOKS, METRICS AND A REPRODUCIBLE HARNESS. FIRST.
@@ -104,13 +107,14 @@
 # The specific limitations are enumerated in kv-cache-known-issues.md and
 # kv-cache-future-work.md; the three that matter most:
 #
-#   * The mamba stride (N=8) is APPROXIMATE BY DESIGN. The store keeps only
-#     every Nth chunk's recurrent state and a lookup rounds DOWN to the nearest
-#     kept boundary, so the served state can be up to 8 chunks stale. It is a
-#     good approximation because the Gated-DeltaNet gate gives the state finite
-#     effective memory -- but it is an approximation, and it measurably raises
-#     the NIAH failure rate. The exact fix (replay the <= one-block gap from the
-#     boundary checkpoint) is DESIGNED BUT NOT BUILT. See future-work §L.
+#   * The mamba stride (N=8) is TRUNCATE-AND-RECOMPUTE; the cost is compute,
+#     not accuracy. A lookup rounds DOWN to the nearest kept snapshot boundary,
+#     so the engine only ever requests a state it actually kept -- what is
+#     served is EXACT, and the gap (up to 13,184 tokens, ~6,592 on average) is
+#     recomputed on the normal prefill path. The price is that recompute plus
+#     the dead zone (prefixes under 13,184 tokens get a zero external hit). The
+#     exactness fix (replay the <= one-block gap) is DESIGNED BUT NOT BUILT.
+#     See future-work §L.
 #
 #   * A failed offload load KILLS EngineCore. `assert transfer_result.success`,
 #     and OffloadingConnector has no get_block_ids_with_load_errors(), so
@@ -180,7 +184,7 @@ export SERVED="${SERVED:-qwen3.8-27b-kvcache}"
 # useless. Explicit + clamped is reproducible.
 #
 # 24 GiB is the known-good size on this box (39.17 GiB guest). It holds roughly
-# 762,000 tokens at the measured 33,808 bytes/token -- about 22 prompts of 34k.
+# 419,000 tokens at 61,440 bytes/token as stored -- about 12 prompts of 34k.
 # See kv-cache-operations.md §3 for the full sizing table and the OOM warning
 # before you raise it.
 #

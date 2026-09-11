@@ -1,6 +1,6 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-11T05:05:53Z from the working
+Assembled by `make-dist.sh` on 2026-09-11T18:24:48Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
@@ -11,7 +11,7 @@ tree at `<repo>`.
 | `launcher/` | kv-cache/ + vllm/ | The KV-cache entry launcher and the base launcher it wraps. |
 | `ops/` | vllm/ | The mandatory reaper, its systemd units, the mount snippets. |
 | `bench/` | kv-cache/ | Harnesses, shipped for method. No result files. |
-| `tools/` | kv-cache/ | `tierreport.py` — the tier sizing/speed report, its fixture generator and its functional test. Meant to be run for its numbers, on your own traffic. |
+| `tools/` | kv-cache/ | `tierreport.py` — the tier sizing/speed report, its fixture generator and its functional test; and `kvvalidate.py` — the live-load validator that names your regime and reports cache performance with confidence markers. Both are meant to be run for their numbers, on your own traffic. |
 
 Deliberately excluded: `baselines/`, all bench-history, and every result file.
 Single-machine numbers, some known polluted — ship the method, not the numbers.
@@ -29,6 +29,7 @@ nested, so paths inside them do not always match paths here:
 | `<repo>/kvcache-reap.*` | `kv-cache/ops/` |
 | `<repo>/kv-cache/*bench*.py`, `phase*-read.sh` | `kv-cache/bench/` |
 | `<repo>/kv-cache/tierreport.py`, `tier_report_*.py` | `kv-cache/tools/` |
+| `<repo>/kv-cache/kvvalidate.py` | `kv-cache/tools/` |
 | `<repo>/ggz14-mxfp4` | ggz14's clone, `radiance-vllm-mxfp4/` beside the repo (see the root README's Quick start) |
 | `<repo>/benchmarks/`, `bench-history/` | not shipped — distilled into `docs/kv-cache-historical.md` |
 

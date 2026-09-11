@@ -745,15 +745,6 @@ KVOFF_HASHSEED=${KVOFF_HASHSEED:-0}
 # confirmed a narrower chunk range than the load actually reads. Flip to 0 only as a kill
 # switch; it costs external hits and buys nothing the fix does not already give.
 KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
-# RADIANCE_OFFLOAD_PENDING_IS_MISS: 1 = a lookup that meets a chunk whose store has not
-# landed yet takes the ready prefix it has already found; 0 = upstream, which defers the
-# whole request and hopes for a longer prefix a step later. DEFAULT IS 1, because Phase A
-# measured what upstream's hope is worth here: 11,849 of 11,878 production lookups deferred,
-# 3 served, and the trigger was HIT_PENDING over RETRY at 408 to 1. A bench hits because an
-# idle box has no in-flight stores; production stores 61 GB a boot and never goes quiet.
-# This is the A/B switch for that change -- flip to 0 to get upstream behaviour back without
-# unpatching anything. See kv-cache/cache-preemption-patch-plan.md R3.14.3.
-KVOFF_PENDING_IS_MISS=${KVOFF_PENDING_IS_MISS:-1}
 # RADIANCE_OFFLOAD_EAGLE_GROUPS: 1 = annotate the EAGLE/MTP draft KV group positionally on
 # the hybrid grouping path; 0 = upstream, which only does it for DeepSeek-V4 and therefore
 # not for us. DEFAULT IS 1. Without it no group is annotated, and the offload scheduler's
@@ -829,6 +820,22 @@ KVOFF_POLICY=${KVOFF_POLICY:-lru}
 # second appearance, so a prefix reused exactly twice is never served from cache.
 # Independent of KVOFF_POLICY; A/B them separately.
 KVOFF_STORE_THRESHOLD=${KVOFF_STORE_THRESHOLD:-0}
+# Offload generated tokens too, not just the prompt.
+#
+# vLLM defaults offload_prompt_only to TRUE (v1/kv_offload/base.py:685), so only prompt
+# tokens are ever written through to the offload tiers. For an agent workload at xhigh
+# reasoning effort a large fraction of every turn is GENERATED, and none of it reaches the
+# tier until it reappears as prompt on the following turn -- so a resume inside the same
+# turn, or a second agent picking up mid-stream, finds nothing.
+#
+# Measured 2026-09-11 (out/diag/diag2.log): a deliberate push-out test served 62.2% of a
+# re-requested prefix from disk with 0 promotion refusals, and the 37.8% shortfall tracked
+# HIT_PENDING (+49,980) almost exactly against recompute (+48,065) -- the data was not on
+# disk YET. Storing generated tokens is one of the two candidate causes.
+#
+# Costs write volume. Default here is vLLM's own default (true) so this changes nothing
+# unless set.
+KVOFF_PROMPT_ONLY=${KVOFF_PROMPT_ONLY:-false}
 KVOFF_TIER_ARG=""
 
 # --- garbage collection -----------------------------------------------------
@@ -1055,6 +1062,9 @@ if [[ -n "$KVOFF_DISK" ]]; then
     if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
       KVOFF_BPC_JSON=",\"blocks_per_chunk\":$KVOFF_BLOCKS_PER_CHUNK"
     fi
+    if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
+      KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"offload_prompt_only\":false"
+    fi
     KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"TieringOffloadingSpec\"$KVOFF_BPC_JSON$KVOFF_POLICY_JSON,\"secondary_tiers\":[{\"type\":\"fs\",\"root_dir\":\"$KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR\",\"n_read_threads\":$KVOFF_DISK_RTHREADS,\"n_write_threads\":$KVOFF_DISK_WTHREADS}]}}"
     mkdir -p "$KVOFF_DISK/$KVOFF_DISK_SUBDIR"
     echo "[kv-offload] L3 disk tier: $KVOFF_DISK -> $KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR (PYTHONHASHSEED=$KVOFF_HASHSEED," >&2
@@ -1062,6 +1072,11 @@ if [[ -n "$KVOFF_DISK" ]]; then
       echo "[kv-offload]   NON-DEFAULT blocks_per_chunk=$KVOFF_BLOCKS_PER_CHUNK" >&2
     fi
     echo "[kv-offload]   CPU tier policy=$KVOFF_POLICY store_threshold=$KVOFF_STORE_THRESHOLD" >&2
+    if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
+      echo "[kv-offload]   offload_prompt_only=FALSE -- generated tokens are written through too" >&2
+    else
+      echo "[kv-offload]   offload_prompt_only=true (vLLM default; generated tokens NOT offloaded)" >&2
+    fi
     echo "[kv-offload]   ${KVOFF_DISK_RTHREADS}r/${KVOFF_DISK_WTHREADS}w threads, $(df -h --output=size "$KVOFF_DISK" | tail -1 | tr -d ' ') volume, NO built-in eviction)" >&2
   fi
 fi
@@ -1550,7 +1565,6 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   ${KVOFF_DISK:+-v "$KVOFF_DISK":"$KVOFF_DISK_MNT"} \
   ${KVOFF_DISK:+-e PYTHONHASHSEED="$KVOFF_HASHSEED"} \
   -e RADIANCE_OFFLOAD_MIXED_HIT="$KVOFF_MIXED_HIT" \
-  -e RADIANCE_OFFLOAD_PENDING_IS_MISS="$KVOFF_PENDING_IS_MISS" \
   -e RADIANCE_OFFLOAD_EAGLE_GROUPS="$KVOFF_EAGLE_GROUPS" \
   -e RADIANCE_MAMBA_STORE_STRIDE="$KVOFF_MAMBA_STRIDE" \
   -e RADIANCE_FS_FANOUT_TARGET_MB="$KVOFF_FS_FANOUT_MB" \
@@ -1590,16 +1604,6 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # (metric names first, then the call sites that use them).
     PYTHONPATH=/patches python3 /house/patch_kv_offload_lookup_outcomes.py \
       || echo "[radiance] WARNING: lookup-outcome counters did not apply; Phase A metrics will be absent"
-    # House patch: serve the ready prefix instead of deferring on an in-flight store.
-    # This is the fix Phase A pointed at, and the only BEHAVIOUR change in this block --
-    # everything above it is instrumentation. Gated on RADIANCE_OFFLOAD_PENDING_IS_MISS so
-    # it is an A/B, not a one-way door. Must run AFTER the lookup-outcome patch: it adds a
-    # counter to the same two files and anchors on lines that patch inserts. See R3.14.3.
-    # Non-fatal, but not harmless if it fails: the engine would run upstream behaviour while
-    # the env var claims otherwise, so the warning names that explicitly, and phaseb-read.sh
-    # checks the counter series exists before it reports anything.
-    PYTHONPATH=/patches python3 /house/patch_kv_offload_serve_ready_prefix.py \
-      || echo "[radiance] WARNING: serve-ready-prefix patch did NOT apply -- lookups will still defer on an in-flight store, whatever RADIANCE_OFFLOAD_PENDING_IS_MISS says"
     # House patch: annotate the EAGLE/MTP draft KV group positionally, so the offload
     # scheduler stops treating all nine groups as draft groups. Prerequisite for the stride
     # patch below: while every group is flagged eagle, storable_chunks() drops the trailing
@@ -1635,6 +1639,29 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # exactly todays situation -- the disk stays invisible inside CPU-tier bandwidth.
     PYTHONPATH=/patches python3 /house/patch_kv_offload_tier_report.py \
       || echo "[radiance] WARNING: tier-report metrics did NOT apply -- tierreport.py will have no per-tier rows"
+    # House bundle (kv-queue task 20, reduced by task 37): the KV-offload
+    # promotion-refusal instrumentation + task 15 wall-clock timing. TWO patches
+    # applied in a fixed order by apply-bundle.py, which halts on the first failure:
+    #   1. patch_promotion_refusal_instrumentation.py -- counters that name the refusal.
+    #      Today every refusal is folded into lookup_chunk_miss_total and is
+    #      indistinguishable from a real miss, which is why this took reading the code
+    #      to find rather than reading /metrics. Instrumentation only. The counter
+    #      reading zero (0 refusals / 5,416 promotions, tier pinned at 100%) is the
+    #      EVIDENCE the fix was unnecessary: the fix patch (B2 reserved headroom +
+    #      B1 bounded retry) was removed in task 37.
+    #   2. patch_kv_offload_wallclock_reanchored.py -- task 15 wall-clock whole-job timing.
+    #      RE-ANCHORED: the original anchors the same metrics.py tail as patch 1 hunk 3b and
+    #      fails with "anchor matched 0x" on the instrumented tree. Do not swap in the
+    #      out/15 original.
+    # Order is load-bearing and enforced inside apply-bundle.py; it must run after the
+    # tier-report patch above because both patches reference TierReportMetrics /
+    # TieringOffloadingMetrics / _tr_tokens_per_hash, which that patch creates.
+    # Rehearsed before deployment via kv-queue out/37/rehearse.sh (throwaway --rm container,
+    # no GPU): all seven touched files byte-compile, idempotent.
+    # Non-fatal if it fails: the engine would serve upstream behaviour with no
+    # promotion_* counters, so the warning names that explicitly.
+    PYTHONPATH=/patches python3 /house/apply-bundle.py \
+      || echo "[radiance] WARNING: promotion-refusal bundle did NOT apply -- no promotion_* counters"
     python3 patch_topk_composite.py
     python3 patch_gdn_shared_build.py
     python3 patch_dflash_selector_topk.py

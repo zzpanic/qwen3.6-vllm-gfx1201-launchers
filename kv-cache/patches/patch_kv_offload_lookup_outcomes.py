@@ -27,7 +27,7 @@ them. It adds no branches of its own.
 
 WHAT IT CHANGES
 
-  1+2. metrics.py: twelve new counter names and their OffloadingCounterMetadata entries.
+  1+2. metrics.py: thirteen new counter names and their OffloadingCounterMetadata entries.
        No labels, so nothing downstream has to learn a new label schema.
 
   3.   scheduler.py: a _count_lookup_result helper, and a call to it at BOTH backend lookup

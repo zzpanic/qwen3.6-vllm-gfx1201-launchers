@@ -111,11 +111,12 @@ apply(
     ):
         return''',
     new='''    # Detection uses the merged MLA spec's model_version.
-    # radiance R3.13a: the rule below -- "the draft model's attention layer is registered
-    # last, so flag whichever group holds the last layer" -- describes how vLLM registers a
-    # draft model, not anything specific to DeepSeek. Gating it on model_version leaves every
-    # other speculative model unannotated, which trips the offload scheduler's
-    # flag-them-all fallback. Set RADIANCE_OFFLOAD_EAGLE_GROUPS=0 for the upstream gate.
+    # The rule this function applies -- the draft model's attention layer is
+    # registered last, so flag whichever group holds the last layer -- is a fact
+    # about how vLLM registers a draft model, not anything specific to DeepSeek.
+    # Gating it on model_version leaves every other speculative model unannotated,
+    # which trips the offload scheduler's flag-them-all fallback. Setting
+    # RADIANCE_OFFLOAD_EAGLE_GROUPS=0 restores the DeepSeek-only gate.
     if os.environ.get("RADIANCE_OFFLOAD_EAGLE_GROUPS", "1") != "1" and not any(
         getattr(spec, "model_version", None) == "deepseek_v4"
         for spec in kv_cache_spec.values()
@@ -131,13 +132,13 @@ apply(
     anchor="    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, vllm_config)",
     new='''    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, vllm_config)
 
-    # radiance R3.13a: upstream only annotates the EAGLE/MTP draft group on the DeepSeek-V4
-    # branch above. Hybrid Mamba+attention models land here instead, reach the offload
-    # scheduler with nothing annotated, and get all of their groups flagged as draft groups.
-    # filtered_spec (not kv_cache_spec) keeps registration order while excluding the
-    # hidden-state layers that are not in `groups` yet.
+    # Annotate the EAGLE/MTP draft group on the uniform-page-size path too. Upstream
+    # annotates only on the DeepSeek-V4 branch above, so a hybrid Mamba+attention model
+    # lands here with nothing annotated and the offload scheduler flags all of its groups
+    # as draft groups. filtered_spec (not kv_cache_spec) keeps registration order while
+    # excluding the hidden-state layers that are not in `groups` yet.
     _annotate_eagle_groups_deepseek_v4(vllm_config, filtered_spec, groups)''',
-    sentinel="radiance R3.13a: upstream only annotates",
+    sentinel="_annotate_eagle_groups_deepseek_v4(vllm_config, filtered_spec, groups)",
     label="B kv_cache_utils: annotate eagle groups on the hybrid page-size path",
 )
 

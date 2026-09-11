@@ -303,18 +303,19 @@ depends on the size, so shrinking is clean — the tier just holds fewer blocks.
 
 ### 3.5 What you get for it
 
-The tier holds roughly **31,700 tokens per GiB** (33,808 bytes/token measured — that is
-the architectural floor for this model, 16 full-attention layers × 2,048 B/token, and
-it is not reducible).
+The tier holds roughly **17,476 tokens per GiB** (61,440 bytes/token as stored — two
+full-attention groups per chunk, one MTP/draft group, and the six Mamba groups at a
+1-in-8 stride; `kv-cache-closed-decisions.md` §3). The 33,808 B/token attention-only figure
+is not the operating density and is reducible — dropping the recomputable draft group
+reaches a 45,056 B/token floor. **Not reachable by simply declining to store the draft group:** task 12 (2026-09-11) found the multi-group lookup returns zero for the whole hit when any group has no stored chunks (`offloading/scheduler.py:816`), so dropping g8 costs every offload hit rather than 27% of the bytes.
 
 | Tier | Tokens | Prompts of ~34k |
 |---|---|---|
-| 16 GiB | ~508,000 | ~15 |
-| 24 GiB (today) | ~762,000 | ~22 |
-| 28 GiB | ~888,000 | ~26 |
-| 30 GiB | ~951,000 | ~28 |
+| 24 GiB (today) | ~419,000 | ~12 |
+| 28 GiB | ~489,000 | ~14 |
+| 30 GiB | ~524,000 | ~15 |
 
-So 24 → 30 GiB is about **six more prompts** held in RAM instead of on disk. Worth
+So 24 → 30 GiB is about **three more prompts** held in RAM instead of on disk. Worth
 having, not worth an OOM.
 
 ---

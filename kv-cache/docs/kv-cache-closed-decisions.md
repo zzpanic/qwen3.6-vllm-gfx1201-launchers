@@ -45,6 +45,7 @@ both.
 | Can KV be made denser? | **No. 34 KB/token is the architectural floor.** | 16 attention layers × 2048 B. [`kv-cache-historical.md`](kv-cache-historical.md) §2 | The model architecture changes. Not by compression work on this one. |
 | Are the Mamba layers the storage waste? | **No — retracted twice.** The waste is **temporal, not spatial**. | Groups 0–5 are 97–99% dense; the MTP group is ~6%. Same §2. | — |
 | Is `blocks_per_chunk` a lever? | **No.** Investigated and closed. | [`kv-cache-historical.md`](kv-cache-historical.md) §9 | — |
+| What is the reuse L — and is the tier's `tokens_per_hash` the quantity C1 calls `tokens_per_chunk`? (C1) | **Yes, on this deployment: both are 1,648, so L ≤ 8 × 1,648 = 13,184 tokens, ~6,592 on average.** With `blocks_per_chunk = 1`, one offloaded chunk is one block, so the scheduler's chunk size *is* the group block size, which is the hash granularity the tier records as `tokens_per_hash`. | On-disk run config `tokens_per_hash: 1648` and per-group `tokens_per_block: 1648` (`/kvcache/blocks/_models_Qwen3.8-27B-MXFP4-mtpfp8_5f69fc4578e4/config.json:126,:18`); live engine read through `/proc/<pid>/root`: `tokens_per_chunk = tokens_per_block × blocks_per_chunk` (`offloading/scheduler.py:171`) with `blocks_per_chunk = 1` (`offloading/config.py:67` — the live `kv_connector_extra_config` sets neither `block_size` nor `blocks_per_chunk`); the engine's own boot asserts (`tokens_per_block % tokens_per_hash == 0`, `offloading/config.py:60`; all mamba groups agree, `offloading/scheduler.py:172`) passed with the engine serving. | A change to the block size or the stride N. |
 | Does the mamba-align cache shortfall need fixing? | **No — by design.** Every turn pays 1,664–3,327 tokens. | R3.12 | — |
 
 ## 3. The device, and what to buy
@@ -89,7 +90,7 @@ repository, or a summary written from one, check it against this table.
 |---|---|---|
 | *"vLLM radiance matches the prefix cache by block content, not by chained prefix"* — i.e. the GPU prefix cache was blamed for the polluted BetterBench run (A1) | **Wrong.** The GPU prefix cache chains correctly and always did. The defect was in the **offload tier's** mixed-hit lookup, which could hand `prepare_load` a key it had not confirmed. Fixed by R3.15. | `status-2026-09-09.md` §3, repeated into `kv-cache-future-work.md` §0 |
 | *"The N=8 stride is the mechanism behind A1"* | **Wrong, and a separate matter.** A1 was unconfirmed keys; the stride approximation is an independent, deliberate design limitation that R3.15 neither caused nor cured. | `kv-cache-known-issues.md` A2 |
-| *"The CPU tier holds ~508,000 tokens in 16 GiB"*, and the stride pair *"115,360 (N=1) → 276,900 (N=8)"* | **Superseded twice over.** The tier is **24 GiB** — `kv_offload_tier_capacity_bytes{tier="cpu"}` reads 25.76 GB on the live engine — and at the measured 33,808 B/token that is **~762,000 tokens**. The old token figures also rest on a Mamba-storage share retracted in §2, so they cannot simply be rescaled to the larger tier. | `kv-cache-current-implementation.md`, `kv-cache-future-work.md`, `kv-cache-handover.md` |
+| *"The CPU tier holds ~508,000 tokens in 16 GiB"*, and the stride pair *"115,360 (N=1) → 276,900 (N=8)"* | **Superseded twice over.** The tier is **24 GiB** — `kv_offload_tier_capacity_bytes{tier="cpu"}` reads 25.76 GB on the live engine — and at 61,440 B/token as stored that is **~419,000 tokens** (§3). The old token figures also rest on a Mamba-storage share retracted in §2, so they cannot simply be rescaled to the larger tier. | `kv-cache-current-implementation.md`, `kv-cache-future-work.md`, `kv-cache-handover.md` |
 | *"fs reads peak at 719.3 MB/s at 8 threads"* | **Not the rate the tier gets.** That was a threaded microbenchmark; in service the device delivers **~117 MB/s regardless of fanout**, against a ~101 MB/s recompute break-even (§3). | `kv-cache-future-work.md`, tier-latency table |
 | *"~2.45M tokens served ≈ 26 min of prefill avoided"* presented as **the valid quantitative claim** | **Uncitable**, along with every other number taken before 2026-09-10 — not because the harness was wrong but because the engine under it was serving mis-chained KV. Retained as method. Re-measurement is `status-2026-09-10.md` §4 items 2–3. | `kv-cache-future-work.md`, `kv-cache-handover.md` |
 | *"Live container state cannot be inspected"* (because `podman exec` fails) | **It can**, read-only, through `/proc/<pid>/root` — see §4. This also unblocks the `tokens_per_chunk` question, which was recorded as blocked rather than merely undone. | `kv-cache-known-issues.md` B2/C1 |
@@ -121,6 +122,34 @@ precedes anything needing a long history; nothing that warms the cache precedes 
 needing it cold; and the shortest activity that could *invalidate* the rest runs first — a
 failed boot check should end the window at minute two, not minute ninety.
 
+## 7. Plan exclusions (moved from `cache-preemption-patch-plan.md` R3.14.7)
+
+The closeout plan's "explicitly not doing" list, moved out of the narrative so the register
+carries it in one place. **Reopen conditions:** not stated in the source text — for the disk and
+CPU-tier rows see §3 above (device physically replaced / more host RAM) and `blocks_per_chunk`
+in §2 (—); the attention-only-offload and cascade-scheduling rows carry no reopen condition
+anywhere in the source.
+
+Unchanged from R3.10.7 and restated so it is in one place: **no new disks** (the device is
+exonerated, R3.9.2), **no CPU-tier resizing** (16 GiB is already at the host's limit, and
+R3.12.3 shows the fix is fewer bytes per token, not more bytes), **no attention-only offload**
+(it breaks resume correctness for a hybrid model), **no cascade scheduling work** (R3.10.2
+withdrew the premise), and **no `blocks_per_chunk` changes** (R3.12.5a).
+
+> **Two of these five are superseded and must not be read as current policy (2026-09-11).**
+> - *No new disks* rested on R3.9.2 exonerating the device. Later measurement put the fs tier
+>   at **break-even** — it needs ~101 MB/s to tie recompute and the device gives ~117 — so the
+>   disk is the constraint, not an exonerated component, and NVMe is ~19x. The exclusion stands
+>   only as "no disk purchase has been made", not as "a faster disk would not help".
+> - *No CPU-tier resizing* cites "16 GiB is already at the host's limit". The tier is now
+>   **24 GiB**, and 24 GiB is the real ceiling (the guest has 39 GB total, 8 available).
+>   The conclusion survives — the tier cannot grow further on this hardware — but the number
+>   in the reasoning is two revisions old.
+>
+> The other three (attention-only offload, cascade scheduling, `blocks_per_chunk`) stand as
+> written. Task 12 (2026-09-11) independently reinforces the first of those: a group with no
+> stored chunks zeroes the entire multi-group hit.
+
 ## Deferred — decided, not forgotten
 
 - **The remaining correctness validation runs** (`status-2026-09-10.md` §4 items 1, 2, 3, 5,
@@ -144,24 +173,30 @@ For contrast, so that "not listed here" is not read as "settled":
 - **The controlled A/B harness with a genuinely cold arm.** Half of roadmap stage 1. The
   metrics half now exists ([`tier-report-metrics-plan.md`](tier-report-metrics-plan.md) and
   `tools/tierreport.py`); this half does not.
-- **THE PRIORITY DEFECT: an fs-tier hit is reported as `MISS` when the CPU tier is full.**
-  Diagnosed 2026-09-11, upstream's defect, not a local misconfiguration. In
+- **REFUTED (2026-09-11/12): the "priority defect" — fs-tier hit reported as `MISS` when the CPU tier is full.**
+  The *mechanism* is real and was correctly traced: in
   `v1/kv_offload/tiering/manager.py:386` a secondary-tier HIT returns
   `LookupResult.MISS if not promoted else LookupResult.RETRY`; `_initiate_promotion`
   (`:474`) returns `False` whenever `primary_tier.prepare_write()` returns `None`, which
   `v1/kv_offload/cpu/manager.py:218-233` does when eviction cannot free a slot ("Eviction
-  will fail", or the ARC policy's candidates are pinned). **A block physically present on
-  disk is therefore reported absent, and the engine prefills.** The tier exists to catch
-  what the CPU tier overflows, but promoting out of it requires free space *in the tier that
-  just overflowed* — the same condition, so the fs tier cannot serve under the pressure it
-  was built for. Measured under two concurrent streams: CPU tier pinned at
-  `used_bytes == capacity_bytes`, 333 evictions / 8.99 GB, `lookup_chunk_miss_total` 35 →
-  6,906, and `tier_load_ops{fs}` **unchanged at 47** while the tier absorbed 9 GB of writes.
-  **There is no counter on the refusal path**, so these are indistinguishable from genuine
-  misses — the defect is invisible in `/metrics` and was only found by reading the code.
-  Agreed fix shape (pat): return `RETRY` with a bound instead of `MISS`, plus reserved
-  promotion headroom in the primary tier. `cpu_cache_evictable_perc = 1.0` is **not**
-  counter-evidence: it is sampled between scheduler steps, when nothing is pinned.
+  will fail", or the ARC policy's candidates are pinned). But the *empirical claim* — that
+  this fires at scale and is why the fs tier "cannot serve under the pressure it was built
+  for" — is **refuted**: `kv_offload_promotion_refused_total{fs}` measured **0 across 5,416
+  promotions** with the CPU tier pinned at 100% for 90+ minutes, the exact condition the
+  thesis predicted would produce refusals. In its working regime the tier serves 73–87% of
+  external tokens from disk. The original observation that motivated this (two concurrent
+  streams, CPU tier pinned at `used_bytes == capacity_bytes`, 333 evictions / 8.99 GB,
+  `lookup_chunk_miss_total` 35 → 6,906, `tier_load_ops{fs}` unchanged at 47 while the tier
+  absorbed 9 GB of writes) came from a **warm-up / residency window** — the CPU tier had not
+  yet filled, so the fs tier was short-circuited on primary HITs and never consulted
+  (`TieringOffloadingManager.lookup` returns on a primary HIT). That made a working tier look
+  dead. There was no counter on the refusal path at the time, which is why the observation
+  was indistinguishable from genuine misses in `/metrics` and was only found by reading the
+  code. The agreed fix shape (bounded `RETRY` + reserved promotion headroom, task 00) is
+  **not needed to make the tier serve**; the B1/B2 patches are retained as instrumentation
+  only. `cpu_cache_evictable_perc = 1.0` is not counter-evidence: it is sampled between
+  scheduler steps, when nothing is pinned. See `out/FAILURE-TAXONOMY.md` §E and
+  `../WHERE-WE-ARE.md` §1–§4.
 - **Why the fs tier reads ~59 KiB per token served** — *largely resolved 2026-09-11*: stored
   density is 61,440 B/token (see §3), so the fs tier reads close to everything it stored. The
   residue is that the CPU tier reads 35,292 B/token for the same served data, which is

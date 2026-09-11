@@ -9,7 +9,7 @@ them with no copy anywhere. They now live here and ride their own bind mount.
 
 | file | what it is |
 |---|---|
-| `cache-preemption-patch-plan.md` | The plan for the "retain, don't recompute" work. Read **Revision 3** first (it supersedes parts of Revision 2 and the original), then Revision 2. |
+| `cache-preemption-patch-plan.md` | The plan for the "retain, don't recompute" work. Read **Revision 3** first (it supersedes parts of Revision 2 and the original), then Revision 2 in `kv-cache-historical.md`. |
 | `patch_offload_mixed_hit.py` | Makes `OffloadingConnector` safe when a KV group's prefix hit lags the request's. Fixes two defects: a boundary assertion that only holds for full-attention groups, and a lookup that confirms a narrower chunk range than the load reads. Applied at every boot. |
 | `tierbench.py` | Deterministic KV tier attribution bench. Also the acceptance test for the R2.9.2 instrumentation. |
 

@@ -67,7 +67,15 @@ See `kv-cache-references.md` for links, `kv-cache-future-work.md` for the plan, 
 
 ## C. Open — unresolved questions
 
-### C1. `tokens_per_chunk` not confirmed → the reuse L is only `8 × tokens_per_chunk` — OPEN, not blocked
+### C1. `tokens_per_chunk` not confirmed → the reuse L is only `8 × tokens_per_chunk` — CLOSED 2026-09-11
+> **Closed 2026-09-11.** `tokens_per_chunk` is **1,648** on this deployment, and it is the
+> same quantity the on-disk run config records as `tokens_per_hash`: with
+> `blocks_per_chunk = 1`, one offloaded chunk is exactly one block, so the scheduler's
+> chunk size (`tokens_per_block × blocks_per_chunk`) is the group block size, which is
+> the hash granularity. The reuse L is therefore `8 × 1,648 = 13,184` tokens (≤),
+> ~6,592 on average. Ruling, evidence and reopen condition:
+> [`kv-cache-closed-decisions.md`](kv-cache-closed-decisions.md) §2.
+
 - **Symptom:** The reuse refresh length is expressed as `≤ one block = 8 chunks = 8 × tokens_per_chunk tokens`, but `tokens_per_chunk` is not pinned to a concrete value.
 - **Root cause:** Nobody has read it off the running engine. It is not blocked: B2's `/proc` route reads the live config directly.
 - **Impact:** `L` is not a concrete token count yet (e.g. chunk=64 → up to ~512 tokens).

@@ -34,7 +34,7 @@
 |---|---|
 | Hardware | AMD Radeon AI PRO R9700 (gfx1201, 32 GB GDDR6) |
 | Software | vLLM 0.27.1 (radiance 0.9.3) + ggz14 + zzpanic github loader + custom patches |
-| Model | Qwen 3.8-27B (24 Mamba + 8 attention layers) |
+| Model | Qwen 3.8-27B (48 Gated-DeltaNet + 16 full-attention layers) |
 | Workload | An `opencode` session — code review plus testing/validation — with concurrent open-webui chat sessions using web search |
 | Baseline | Unpatched vLLM 0.27.1, same workload |
 
@@ -99,22 +99,24 @@ declares **48 linear-attention + 16 full-attention** layers (`full_attention_int
 error rather than a different model — but it should be corrected at the source before
 anyone builds on it, because the attention-layer count is what sets storage density.
 
-**b) Storage density, three different values.** The capacities imply three densities that
-do not agree, and none matches the measured one:
+**b) Storage density — resolved (2026-09-11).** The rows below look like three
+disagreeing densities, but the main discrepancy (33,808 vs 61,440) is now explained:
 
 | From | Implied bytes/token |
 |---|---|
-| CPU RAM: 419,430 tokens in 24 GiB | ~61,440 |
-| Filesystem: 8,317,057 tokens in 511 GiB | ~65,977 |
-| Filesystem: 3,506,944 stored in 215 GiB | ~65,846 |
-| **Measured directly on this stack** | **33,808** |
+| CPU RAM: 419,430 tokens in 24 GiB | **~61,440 — the stored density** |
+| Filesystem: 8,317,057 tokens in 511 GiB | ~65,977 (open sub-question) |
+| Filesystem: 3,506,944 stored in 215 GiB | ~65,846 (open sub-question) |
+| Attention-only floor (Mamba ≈ 0) | 33,808 — a floor, not the stored density |
 
-The two filesystem figures agree with each other, which suggests they share a source. The
-RAM figure differs from them and both differ from the measured 33,808 B/token — which is
-itself well established: 16 full-attention layers × 2,048 B/token/layer plus one MTP
-layer accounts for 103% of it, i.e. attention arithmetic alone explains the whole number.
-At 33,808 B/token a 24 GiB tier holds ~762,000 tokens, not 419,430. Something is being
-counted differently in at least two of these rows.
+The 33,808 B/token row is the misidentified one: it is the **attention-only architectural
+floor** (16 full-attention layers × 2,048 B/token/layer plus one MTP layer, Mamba ≈ 0),
+not the stored density. It under-counts the stored bytes because the MTP/draft group is
+stored as a full 16,384 B/token block file and the six Mamba groups are stored 1-in-8
+(adding 12,288 B/token). The stored density is **61,440 B/token** (the CPU RAM row, which
+is the figure load-bearing for the 'what does 24 GiB hold' question), so 24 GiB holds
+**~419,000 tokens**, not ~762,000. The two filesystem figures (~65,000) share a source
+and remain a separate open sub-question; they do not change the stored-density resolution.
 
 **c) The tok/sec column does not follow from the wall clock.** Against the stated
 100,000-token prefix:
