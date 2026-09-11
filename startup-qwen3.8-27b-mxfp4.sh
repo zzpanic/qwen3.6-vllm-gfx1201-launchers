@@ -1258,6 +1258,9 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # it at /cache so the build persists. Versioned by image tag: aiter does not
 # validate sources, only GPU arch, so a stale .so from an older image would
 # load silently — a new tag starts fresh.
+# No automatic cleanup: each new image tag leaves its aiter-jit-<tag>/ behind
+# (likewise old fp8so/ keys; pycache/ revalidates on mtime). Prune by hand
+# (rm -rf the stale dir under /cache) when rotating images.
 # shellcheck disable=SC2001
 AITER_JIT_TAG="${AITER_JIT_TAG:-$(echo "$IMAGE" | sed 's|.*/||; s|[^A-Za-z0-9._-]|-|g')}"
 # STARTUP NOISE, defaults set 2026-09-05 at pat's request. Both are read by the image's
@@ -1342,7 +1345,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_BANNER_PLAIN="${RADIANCE_BANNER_PLAIN:-1}" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor -e TRITON_CACHE_DIR=/cache/triton \
   -e AITER_ROOT_DIR=/cache/aiter -e TRITON_CACHE_AUTOTUNING=1 \
-  -e AITER_JIT_DIR=/cache/aiter-jit-"$AITER_JIT_TAG" \
+  -e AITER_JIT_DIR=/cache/aiter-jit-"$AITER_JIT_TAG" -e AITER_JIT_TAG="$AITER_JIT_TAG" \
   -e PYTHONPYCACHEPREFIX=/cache/pycache -e PYTHONDONTWRITEBYTECODE= \
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
@@ -1382,8 +1385,10 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
        radiance_arnq.py "$SP"/
     # Skip the hipcc rebuild when sources are unchanged: the .so is
     # byte-identical for identical inputs, and /cache persists across boots
-    # (same pattern as R4D_CACHE above). Saves ~14s per start.
-    FP8_KEY="$(sha256sum radiance_mxfp4_fp8.hip | cut -d " " -f1)-gfx1201"
+    # (same pattern as R4D_CACHE above). Saves ~14s per start. Keyed on
+    # source hash + arch + image tag: the .hip ships inside the image, so the
+    # same source under a different hipcc/pybind11 must not reuse an old .so.
+    FP8_KEY="$(sha256sum radiance_mxfp4_fp8.hip | cut -d " " -f1)-gfx1201-$AITER_JIT_TAG"
     if [ -f "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" ]; then
       cp "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" "$SP"/radiance_mxfp4_fp8.so
       echo "[radiance] fp8.so from cache ($FP8_KEY)"
