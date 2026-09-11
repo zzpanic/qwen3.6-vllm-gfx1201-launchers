@@ -1,15 +1,27 @@
 1  patch_offload_mixed_hit.py
 2  patch_kv_offload_instrumentation.py
 3  patch_kv_offload_lookup_outcomes.py
-4  patch_kv_offload_serve_ready_prefix.py
-5  patch_kv_offload_eagle_groups.py          (upstream counterpart: PR #55390)
-6  patch_kv_offload_mamba_stride.py
-7  patch_kv_offload_fs_fanout.py             (ported from PR #49225)
-8  patch_kv_offload_tier_report.py           (needs 2; instrumentation only)
+4  patch_kv_offload_eagle_groups.py          (upstream counterpart: PR #52047,
+                                              which does NOT cover this model -- see below)
+5  patch_kv_offload_mamba_stride.py
+6  patch_kv_offload_fs_fanout.py             (ported from PR #49225)
+7  patch_kv_offload_tier_report.py           (needs 2; instrumentation only)
+8  patch_kv_offload_wallclock_reanchored.py  (needs 2; re-anchors the timing it adds)
+9  patch_promotion_refusal_instrumentation.py (counters only; kept as a tripwire)
 
-This order is a dependency, not a preference. 8 extends the get_stats() that 2
+This order is a dependency, not a preference. 7 extends the get_stats() that 2
 creates on the fs tier, and refuses to apply if 2 has not run -- it says so
-rather than failing on a missing anchor.
+rather than failing on a missing anchor. 8 re-anchors timing that 2 installs, so it
+follows 2 for the same reason.
+
+REMOVED 2026-09-12, deliberately, and not to be re-added:
+  patch_kv_offload_serve_ready_prefix.py   built on the promotion-refusal thesis, which
+      was refuted by measurement (0 refusals across 5,416 promotions at a 100%-full CPU
+      tier). Its knob RADIANCE_OFFLOAD_PENDING_IS_MISS is gone with it; upstream's
+      wait-for-it behaviour is what runs now.
+  patch_promotion_refusal_fix.py           the "fix" for that same refuted thesis.
+The counters in 9 are kept on purpose: they are the evidence the thesis is dead, and the
+tripwire if the CPU tier is ever shrunk.
 
 BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
 delete it in favour of the upstream implementation wherever one now exists. That is

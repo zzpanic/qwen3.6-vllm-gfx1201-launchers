@@ -17,7 +17,7 @@
 #     v
 #   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
 #                                   plus the offload delta: the GPU -> /dev/shm ->
-#                                   /kvcache staging, the eight house patches in
+#                                   /kvcache staging, the nine house patches in
 #                                   ../patches/, and the RADIANCE_* gates on them.
 #
 # The tuning defaults below are NOT maintained here. They are copied across from
@@ -28,7 +28,7 @@
 #
 # The delta is seven items and nothing else: HOUSE resolution; the KVOFF_* knob
 # block; the /dev/shm fit check and RAM clamp; the fs-tier --kv-transfer-config
-# builder; the extra container mounts and RADIANCE_* env; the eight /house patch
+# builder; the extra container mounts and RADIANCE_* env; the nine /house patch
 # lines in the prelude; and --kv-transfer-config on the serve line. See
 # ./README.md for the table.
 #
@@ -1486,6 +1486,23 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 #   RADIANCE_BANNER_PLAIN=1  disables ANSI colour in the banner. Everything we read comes back
 #                            through journalctl, where the escape codes are just noise.
 # Both remain overridable per-entry from config.yaml, since these are :- defaults.
+# --- prune stale radiance cache trees (stale permutations), before the exec ---------
+# The live tree is known by construction (CACHE at :340, CACHE_SUF at :311-340), so the
+# pruner takes it as --live and can never touch it. It is capacity-governed, whole-tree-
+# first, floor-protected, and bounded by a hard time budget (timeout) so it cannot delay
+# first token: a slow scan that cannot finish within the budget simply retains (gives up
+# rather than overrun). It is a NO-OP when DRY_RUN is set (the launcher's dry run stays
+# side-effect free), and a missing pruner or any failure is a no-op for the boot
+# (existence check + `|| true`). The pruner defaults to dry-run; the launcher calls it
+# --apply so it actually reclaims. The base prefix is derived from CACHE/CACHE_SUF (not
+# hard-coded): ${CACHE%$CACHE_SUF}.
+if [ -z "${DRY_RUN:-}" ]; then
+  if [ -x "${RADIANCE_CACHE_REAP:-$HOME/bin/radiance-cache-reap.sh}" ]; then
+    timeout 20 "${RADIANCE_CACHE_REAP:-$HOME/bin/radiance-cache-reap.sh}" \
+      --live "$CACHE" --base "${CACHE%$CACHE_SUF}" --apply \
+      >/dev/null 2>&1 || true
+  fi
+fi
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host --ulimit memlock=-1 \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
   --security-opt seccomp=unconfined --cap-add SYS_PTRACE \
@@ -1558,6 +1575,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_MXFP4_REFLINEAR="${RADIANCE_MXFP4_REFLINEAR:-0}" \
   -e RADIANCE_RUN_BWTEST="${RADIANCE_RUN_BWTEST:-0}" \
   -e RADIANCE_BANNER_PLAIN="${RADIANCE_BANNER_PLAIN:-1}" \
+  -e RADIANCE_HEALTH_PORT="$PORT" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor -e TRITON_CACHE_DIR=/cache/triton \
   -e AITER_ROOT_DIR=/cache/aiter -e TRITON_CACHE_AUTOTUNING=1 \
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
@@ -1693,6 +1711,25 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # hypothetical: an Aug-20 build sat there and silently served a kernel 17 hours older than
     # its own source, producing fluent-looking garbage with no error anywhere in the log.
     cd /
+    # Record a boot-SUCCESS stamp (container side; the primary mechanism). The container
+    # has the live cache tree bind-mounted at /cache, so it can record its own success:
+    # a background job waits for the server to become reachable, then writes
+    # /cache/.last-boot-ok (host: $CACHE/.last-boot-ok). The next boot pruner reads one
+    # small file per tree and knows, exactly and unpoisonably, when each config last
+    # served. It is backgrounded (never delays or blocks the entrypoint) and every command
+    # is guarded, so a missing tool or a failed write cannot stop the boot. A boot that
+    # never comes up writes no stamp -> the tree keeps its old or absent stamp -> retained
+    # (conservative; the atime fallback still prunes dead trees). The waiter is a child of
+    # the container, so a container stop kills it (the natural bound). NOTE: no single
+    # quote character anywhere in this block, because it lives inside the launcher
+    # -lc single-quoted body.
+    ( if command -v curl >/dev/null 2>&1; then
+        until curl -sf "http://localhost:${RADIANCE_HEALTH_PORT:-8080}/health" >/dev/null 2>&1; do sleep 2; done
+      else
+        until bash -c "exec 3<>/dev/tcp/localhost/${RADIANCE_HEALTH_PORT:-8080}" 2>/dev/null; do sleep 2; done
+      fi
+      { date -u +%Y-%m-%dT%H:%M:%SZ | sed "s/^/ts=/"; echo "host=$HOSTNAME"; } > /cache/.last-boot-ok 2>/dev/null || true
+    ) >/dev/null 2>&1 &
     exec /opt/radiance_entrypoint.sh "$@"' _ \
      "$CSNAP" --served-model-name "$SERVED" --host 0.0.0.0 --port "$PORT" \
     --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \

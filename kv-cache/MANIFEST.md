@@ -1,13 +1,13 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-11T18:24:48Z from the working
+Assembled by `make-dist.sh` on 2026-09-11T22:53:13Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
 |---|---|---|
 | `README.md` | kv-cache/ | **Start here.** Status, roadmap, architecture. |
 | `docs/` | kv-cache/ | Handover, operations runbook, implementation, known issues, future work, references, the correctness suite's specification, and the experimental record, and the register of closed decisions. |
-| `patches/` | kv-cache/ | The eight house patches, their apply order, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
+| `patches/` | kv-cache/ | The nine house patches, their apply order, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
 | `launcher/` | kv-cache/ + vllm/ | The KV-cache entry launcher and the base launcher it wraps. |
 | `ops/` | vllm/ | The mandatory reaper, its systemd units, the mount snippets. |
 | `bench/` | kv-cache/ | Harnesses, shipped for method. No result files. |

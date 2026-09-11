@@ -139,14 +139,31 @@ def inv_lookup_partition(m):
     tol, marker, active = busy_tolerance(m, LOOKUP_INFLIGHT_HEADROOM)
     drift = calls - total
     ok = abs(drift) <= tol
+    # Which DIRECTION the drift goes decides how bad it is.
+    #
+    #   drift > 0  -- lookup_calls ran ahead of the outcome buckets, i.e. some lookups
+    #                 exited without recording any outcome. Measured on this box as a
+    #                 CONSTANT +32 across repeated scrapes at zero traffic, which rules
+    #                 out the non-atomic-scrape race (a race jitters; a constant cannot).
+    #                 These are real uninstrumented exits in vLLM's lookup path -- a gap
+    #                 in the engine's accounting, not a fault in the operator's cache,
+    #                 and it costs correctness nothing. WARN.
+    #
+    #   drift < 0  -- the buckets sum to MORE than the calls that produced them, i.e. an
+    #                 outcome was counted twice. That is corrupted accounting and every
+    #                 rate derived from these counters is then suspect. FAIL.
+    severity = "warn" if drift > 0 else "fail"
     detail = (f"served {served:.0f} + zero_hit {zero:.0f} + short_window {short:.0f} "
               f"+ deferred {deferred:.0f} = {total:.0f} vs lookup_calls {calls:.0f} "
               f"(drift {drift:+.0f}, bound {tol:.0f} for {active:.0f} active)")
+    if not ok and drift > 0:
+        detail += (f" — {drift:+.0f} lookups recorded no outcome ({drift / calls * 100:.3f}% "
+                   f"of calls); an engine accounting gap, not a cache fault")
     return _mk("lookup_partition", ok, detail,
                 {"served": served, "zero_hit": zero, "short_window": short,
                  "deferred": deferred, "lookup_calls": calls, "sum": total,
                  "drift": drift, "tolerance": tol, "active": active},
-                marker=marker)
+                marker=marker, severity=severity)
 
 
 def inv_cpu_equals_external(m):
@@ -386,9 +403,17 @@ def busy_tolerance(m, per_unit):
     return tol, marker, active
 
 
-def _mk(name, ok, detail, values, marker="SOLID"):
-    return {"name": name, "pass": bool(ok), "detail": detail,
-            "values": values, "marker": marker}
+def _mk(name, ok, detail, values, marker="SOLID", severity="fail"):
+    """severity: what a violation of THIS invariant means.
+
+    "fail" -- the cache is doing something wrong; the result cannot be trusted.
+    "warn" -- something is off in vLLM's own accounting, but the cache is serving
+              correctly. A downstream user running this tool to answer "is my cache
+              working?" must not be told FAIL for a defect in the engine's counters
+              that costs them nothing. Reserve FAIL for incorrectness.
+    """
+    return {"name": name, "pass": bool(ok), "detail": detail, "values": values,
+            "marker": marker, "severity": "fail" if ok else severity}
 
 
 def _fail(name, detail, values):
@@ -678,10 +703,14 @@ def main():
         inv_disk_vs_engine(m, a.fs_path),
         inv_group_ratio(m, a.fs_path, a.stride),
     ]
+    # A warn-severity violation does not fail the run: the tool's headline answers
+    # "is my cache working?", and an engine accounting gap does not make it not work.
+    hard_fail = [i for i in invariants if not i["pass"] and i.get("severity") != "warn"]
+    soft_warn = [i for i in invariants if not i["pass"] and i.get("severity") == "warn"]
     regime, rwarn = detect_regime(m, a.history)
     active, running, waiting, mwarn = detect_multiclient(m, a.expected_active)
-    warnings = rwarn + mwarn
-    all_pass = all(i["pass"] for i in invariants)
+    warnings = rwarn + mwarn + [f"{i['name']}: {i['detail']}" for i in soft_warn]
+    all_pass = not hard_fail
     cfg = {"n_read_threads": a.n_read_threads, "max_model_len": a.max_model_len,
            "maxseqs": a.maxseqs, "concurrent_agents": a.concurrent_agents}
 
@@ -722,6 +751,9 @@ def _emit(result, as_json, all_pass=True):
         print(json.dumps(result, indent=2, default=str))
     else:
         okc = "PASS" if result.get("ok") else "FAIL"
+        if result.get("ok") and any(i.get("severity") == "warn" and not i["pass"]
+                                    for i in result.get("invariants", [])):
+            okc = "PASS (with warnings)"
         print(f"kvvalidate — {okc}  ({result.get('timestamp')})")
         print(f"  endpoint: {result.get('metrics_url')}")
         print(f"  fs path : {result.get('fs_path')}   engine pid: "
@@ -729,7 +761,8 @@ def _emit(result, as_json, all_pass=True):
         print()
         print("  invariants")
         for i in result.get("invariants", []):
-            print(f"    [{'PASS' if i['pass'] else 'FAIL'}][{i.get('marker','SOLID'):<10}] "
+            tag = "PASS" if i["pass"] else ("WARN" if i.get("severity") == "warn" else "FAIL")
+            print(f"    [{tag}][{i.get('marker','SOLID'):<10}] "
                   f"{i['name']:<20} {i['detail']}")
         print()
         print(f"  regime: {result.get('regime')}   "

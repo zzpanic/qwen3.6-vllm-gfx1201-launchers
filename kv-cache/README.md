@@ -85,7 +85,7 @@ for a workstation: the R9700, gfx1201, 32 GB, TP=1.
 
 ## Try it in ten minutes
 
-The whole chain — the tier sizing, the RAM clamp, the eight house patches, the fs-tier
+The whole chain — the tier sizing, the RAM clamp, the nine house patches, the fs-tier
 config — can be exercised **without a GPU window.** `DRY_RUN=1` prints the container command
 instead of running it, and stays side-effect free (the startup GC reports what it would do
 and deletes nothing):
@@ -415,7 +415,7 @@ The limitations, stated plainly and without apology:
   that is the device (a raidz of spinning disks behind a zvol behind virtio_blk — an NVMe
   device is ~19× this) or the implementation is not yet established.
 
-**The code is implementation-grade; the delivery is a patch stack.** It is eight anchored
+**The code is implementation-grade; the delivery is a patch stack.** It is nine anchored
 string-surgery patches applied at container start against a version-bound vendor image
 (vLLM 0.27.1 + radiance 0.9.3), which is what makes it precise and what makes it brittle in
 exactly the same way. That is the honest shape of it, said where it is useful rather than
@@ -436,7 +436,7 @@ This is on the upstream path, not beside it. vLLM's own connector documentation 
 hybrid models are **"currently not optimized for the offloading connector"** — which is
 precisely the gap this work fills, and the reason the gfx1201/RDNA4 result is worth
 reporting back. The **llm-d filesystem backend is the in-tree `FileSystemTierManager` this
-runs**, with the same authors (Ozeri, Harnik, IBM). The eight house patches are a
+runs**, with the same authors (Ozeri, Harnik, IBM). The nine house patches are a
 transitional layer: the destination is to reconcile each against current vLLM/radiance HEAD
 and **delete it in favour of the upstream implementation wherever one exists.** Two open PRs
 already measure as directly applicable — **#54327** (bounded capacity + LRU eviction to the fs
@@ -463,7 +463,7 @@ That is a constraint on how the work is done, not a wish about where it might la
   trade at any margin.
 - **Not breaking existing capability is a requirement of every stage,** including the ones
   that look like housekeeping. It is why every behaviour-changing patch here is behind an
-  environment gate whose unset state is upstream behaviour, and why the eight patches are to
+  environment gate whose unset state is upstream behaviour, and why the nine patches are to
   be *deleted* in favour of upstream implementations wherever one exists rather than
   maintained alongside them.
 
@@ -527,7 +527,7 @@ defect found the hard way. Read it before designing the harness, not after.
 **2. Continue the review of existing work, and produce an implementation plan.**
 [`docs/kv-cache-references.md`](docs/kv-cache-references.md) is the review so far — every PR,
 paper and blog already assessed, each with a ruling. Continue it, then write the plan.
-Concretely, this includes reconciling the eight house patches against current
+Concretely, this includes reconciling the nine house patches against current
 vLLM/radiance HEAD and **deleting each one in favour of the upstream implementation wherever
 one exists**: at least one already has an upstream counterpart (the eagle-groups fix is PR
 #55390; the fs fanout was ported from PR #49225). Two open PRs already measure as directly
@@ -556,7 +556,7 @@ These patches were written one at a time, each to answer a specific question, an
 They monkey-patch by string surgery. They carry an implicit dependency **order** documented
 only in the launcher. Their gating environment variables are inconsistent in naming and in
 whether `0` or `1` means "upstream behaviour". This wants to be a single coherent module with
-an explicit interface, not eight scripts in a trench coat. It lands here rather than earlier
+an explicit interface, not nine scripts in a trench coat. It lands here rather than earlier
 because stages 2 and 3 decide how much of it survives to be refactored.
 
 **5. Speed optimisation.**
@@ -579,7 +579,7 @@ deliberately long and state their own reasoning and their own doubts, because th
 an agent needs in order to not repeat work that has already been done and discarded.
 
 To be plain about the shape of it, in the place where that is useful: **the code is
-implementation-grade, and the delivery is a patch stack** — eight anchored string-surgery
+implementation-grade, and the delivery is a patch stack** — nine anchored string-surgery
 patches applied at container start against a version-bound vendor image (vLLM 0.27.1 +
 radiance 0.9.3). That is what makes it precise and what makes it brittle in the same way.
 
@@ -600,7 +600,7 @@ cd qwen3.6-vllm-gfx1201-launchers/kv-cache
 | [`docs/kv-cache-references.md`](docs/kv-cache-references.md) | every PR, paper and experiment already reviewed, each with a ruling |
 | [`docs/kv-cache-historical.md`](docs/kv-cache-historical.md) | the experimental record — including the claims that were **retracted**, and why. Read it before re-running an experiment that looks obvious |
 | [`docs/kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md) | **the register of what is settled**, each row carrying the one condition that would reopen it. Read this before proposing work; the historical record is the reasoning behind it |
-| [`patches/README.md`](patches/README.md) | what the eight patches need in order to run, which two are fatal on failure, and the env gate on each |
+| [`patches/README.md`](patches/README.md) | what the nine patches need in order to run, which two are fatal on failure, and the env gate on each |
 | [`tools/README.md`](tools/README.md) | the tier sizing/speed report: what it needs, how to test it with no engine, and how to read `--calibrate` honestly |
 
 A prompt that works: *"Read kv-cache/README.md, then docs/kv-cache-handover.md and
@@ -661,7 +661,7 @@ Read in this order. Every document is written to be actionable without opening t
 | [`kv-cache-historical.md`](docs/kv-cache-historical.md) | **The experimental record.** Every hypothesis, measurement, correction and retraction, in order — so you do not re-run a settled experiment or build on a withdrawn claim. |
 | [`kv-cache-closed-decisions.md`](docs/kv-cache-closed-decisions.md) | **The register of closed decisions.** The same closures as a scannable table rather than a narrative, with the evidence and the reopen condition for each. Consult it first; it exists so the narrative documents do not have to be read end to end to find out whether a question is already answered. |
 | [`kv-cache-operations.md`](docs/kv-cache-operations.md) | The runbook: turn the disk tier off, resize `/dev/shm`, resize the KV tier. Each with commands, verification and undo. |
-| [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the eight patches with gates and order, the two-layer GC, the serve invocation. |
+| [`kv-cache-current-implementation.md`](docs/kv-cache-current-implementation.md) | What is actually built and running: the three tiers, the nine patches with gates and order, the two-layer GC, the serve invocation. |
 | [`kv-cache-known-issues.md`](docs/kv-cache-known-issues.md) | Every problem, gotcha and limitation as Symptom / Root cause / Impact / Status, by severity, plus the hard "never do X" list. |
 | [`kv-cache-future-work.md`](docs/kv-cache-future-work.md) | The plan, the reuse-refresh mechanism and its `L` analysis, and the limitations to state up front. |
 | [`kv-cache-references.md`](docs/kv-cache-references.md) | Every PR, paper, blog and local artifact reviewed, each with a status and a ruling. |
@@ -783,7 +783,7 @@ The house patches and documents here are the author's own work, built on and aga
 and the radiance overlay; upstream code carries its own licences. Where a patch was ported
 from an upstream PR it says so, with the PR number, in the patch file itself.
 
-**Author:** zzpanic — <zzpanic@gmail.com>, [github.com/zzpanic](https://github.com/zzpanic).
+**Author:** zzpanic — [github.com/zzpanic](https://github.com/zzpanic).
 
 Reproductions on other hardware are wanted more than anything else here. If you run this on
 a different card, a different storage stack, or an NVMe device, the results are worth sending

@@ -1,4 +1,4 @@
-# The eight house patches
+# The nine house patches
 
 These are **not standalone scripts.** Read this before you try to run one.
 
@@ -16,7 +16,7 @@ is the intended failure mode, not a bug.
 
 ## They need `_patchlib`
 
-Every one of the eight begins:
+Every one of the nine begins:
 
 ```python
 from _patchlib import apply
