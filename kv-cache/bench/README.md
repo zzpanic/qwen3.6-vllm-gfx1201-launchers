@@ -19,7 +19,7 @@ and tags every probe with whether anything else was on the engine at the time â€
 a co-tenant changes batch composition, which moves logits, which flips a near-tie token.
 That guard matters in one direction only: contention can *create* a spurious divergence
 but can never hide a real one, so a divergence seen under contention proves nothing while
-a clean uncontended run is a real pass. `../docs/CORRECTNESS.md` states the property under
+a clean uncontended run is a real pass. `../docs/SETUP.md` states the property under
 test, the hard rules, and the case list.
 
 `tierbench.py` is the one to start with for speed. It measures one long prefix in four

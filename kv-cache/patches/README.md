@@ -112,7 +112,7 @@ Check each against current vLLM/radiance HEAD and delete it in favour of the
 upstream implementation wherever one now exists. Two already measure as directly
 applicable to this tree — PR #54327 (`tiering/fs/manager.py`, 100%) would retire
 the external reaper entirely, and PR #54743 supplies the filtered-group primitive
-patch 5 reinvents by hand. See `../docs/kv-cache-references.md` §3a for the
+patch 5 reinvents by hand. See `../docs/SETUP.md` §3a for the
 measured per-file applicability, and `../README.md` stage 2 for where this sits
 on the roadmap.
 

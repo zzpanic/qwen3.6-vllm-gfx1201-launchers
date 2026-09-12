@@ -30,4 +30,4 @@ copies on the host, because those are the ones that can disagree.
 
 `etc-fstab-snippets/` holds the `/dev/shm` and cache-filesystem lines, with the
 sizing arithmetic in comments. Sizing procedure and the OOM cliff are in
-`docs/kv-cache-operations.md` §2 and §3 — read §3.0 before enlarging the tier.
+`docs/SETUP.md` §2 and §3 — read §3.0 before enlarging the tier.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launcher for the KV-cache offload proof of concept: entry `qwen3.8-27b-kvcache`.
+# Launcher for the KV-cache offload implementation: entry `qwen3.8-27b-kvcache`.
 #
 # ============================================================================
 # WHAT THIS IS

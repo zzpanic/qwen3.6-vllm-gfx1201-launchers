@@ -1,6 +1,6 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-11T22:53:13Z from the working
+Assembled by `make-dist.sh` on 2026-09-12T00:47:43Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
@@ -31,7 +31,8 @@ nested, so paths inside them do not always match paths here:
 | `<repo>/kv-cache/tierreport.py`, `tier_report_*.py` | `kv-cache/tools/` |
 | `<repo>/kv-cache/kvvalidate.py` | `kv-cache/tools/` |
 | `<repo>/ggz14-mxfp4` | ggz14's clone, `radiance-vllm-mxfp4/` beside the repo (see the root README's Quick start) |
-| `<repo>/benchmarks/`, `bench-history/` | not shipped — distilled into `docs/kv-cache-historical.md` |
+| `<repo>/benchmarks/`, `bench-history/` | not shipped — the working record stays in the source tree |
+| `<repo>/kv-cache/kv-cache-historical.md`, `cache-preemption-patch-plan.md`, `kv-cache-closed-decisions.md`, `status-*.md` | not shipped — the experimental record; this repository publishes the result, not the route to it |
 
-**This is a proof of concept.** Read the status section of `README.md` before
-using or citing any of it.
+**This is a working, correct, unoptimised implementation.** Read `README.md` for what is
+measured, and `docs/SETUP.md` for what is not yet done.
