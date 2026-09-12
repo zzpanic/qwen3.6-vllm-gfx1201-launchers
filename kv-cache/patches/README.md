@@ -85,10 +85,11 @@ full-attention groups, and widening the lookup so a window group confirms the
 chunks it will actually load — are unconditional when mixed hits are served.
 
 Note what the warnings mean in practice: **a patch that fails silently leaves the
-environment variables lying.** `RADIANCE_OFFLOAD_PENDING_IS_MISS=0` with patch 4
-unapplied reads as "pending-is-miss disabled" while the code has never heard of
-the flag. If you are A/B-ing, check the metric series exists before you believe a
-result — `bench/phaseb-read.sh` does exactly that.
+environment variables lying.** Setting a gate for a patch you have not applied reads
+as "that behaviour is disabled" when in fact the code has never heard of the flag,
+and the two are indistinguishable from the outside. If you are A/B-ing, confirm the
+patch's metric series actually exists in `/metrics` before you believe a result;
+`tools/kvvalidate.py` reports which series are present.
 
 ## Every behaviour change is gated
 
