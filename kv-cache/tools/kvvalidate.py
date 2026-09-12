@@ -679,6 +679,12 @@ def main():
     ap.add_argument("--concurrent-agents", type=int, default=2,
                     help="concurrent agents; the cpu-tier cliff fires below (this+1) contexts")
     ap.add_argument("--json", action="store_true", help="machine output")
+    ap.add_argument("--markdown", action="store_true",
+                    help="markdown report, for pasting into an issue, forum or chat")
+    ap.add_argument("--metrics-file", default=None,
+                    help="read a saved /metrics snapshot instead of scraping the endpoint. "
+                         "The two invariants that count files on disk are skipped, since the "
+                         "filesystem they describe is not the one the snapshot came from.")
     a = ap.parse_args()
 
     # auto-search for the history csv
@@ -690,19 +696,30 @@ def main():
                 break
 
     t0 = time.time()
+    # A saved snapshot makes a run reproducible by somebody who is not holding the machine:
+    # the counters are whatever they were at capture time, and the report reads identically.
+    # The two on-disk invariants cannot run against it -- the store they would count is the
+    # live one, which has no relationship to a snapshot taken elsewhere -- so they are
+    # skipped rather than checked against the wrong filesystem and reported as a result.
+    from_file = bool(a.metrics_file)
     try:
-        m = parse_prom(fetch_metrics(a.metrics_url))
+        if from_file:
+            with open(a.metrics_file, encoding="utf-8", errors="replace") as fh:
+                m = parse_prom(fh.read())
+        else:
+            m = parse_prom(fetch_metrics(a.metrics_url))
     except Exception as e:
-        return _emit({"blocked": f"could not scrape metrics at {a.metrics_url}: {e}"},
-                     a.json)
+        src = a.metrics_file if from_file else a.metrics_url
+        return _emit({"blocked": f"could not read metrics from {src}: {e}"}, a.json)
 
     invariants = [
         inv_lookup_partition(m),
         inv_cpu_equals_external(m),
         inv_promotion_refused(m),
-        inv_disk_vs_engine(m, a.fs_path),
-        inv_group_ratio(m, a.fs_path, a.stride),
     ]
+    if not from_file:
+        invariants += [inv_disk_vs_engine(m, a.fs_path),
+                       inv_group_ratio(m, a.fs_path, a.stride)]
     # A warn-severity violation does not fail the run: the tool's headline answers
     # "is my cache working?", and an engine accounting gap does not make it not work.
     hard_fail = [i for i in invariants if not i["pass"] and i.get("severity") != "warn"]
@@ -726,6 +743,7 @@ def main():
 
     result = {
         "ok": all_pass,
+        "metrics_file": (os.path.basename(a.metrics_file) if from_file else None),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "elapsed_s": round(time.time() - t0, 2),
         "metrics_url": a.metrics_url,
@@ -743,6 +761,8 @@ def main():
         "tier_value": tier_value_section(m),
         "performance": performance_section(m, cfg),
     }
+    if a.markdown:
+        return _emit_markdown(result)
     return _emit(result, a.json, all_pass)
 
 
@@ -808,6 +828,107 @@ def _emit(result, as_json, all_pass=True):
 
 def _fmt(v, spec=",.0f"):
     return format(v, spec) if v is not None else "n/a"
+
+
+def _emit_markdown(result):
+    """Render the report as markdown, for pasting somewhere public.
+
+    This exists because the useful thing to do with a cache report is show it to somebody --
+    in an issue, on a forum, in a chat -- and a terminal dump pasted into those places loses
+    its alignment and becomes unreadable. The content is identical to the text report; only
+    the presentation differs. Every confidence marker is preserved, because a figure quoted
+    without its marker is exactly the kind of number that gets repeated as fact.
+    """
+    ok = result.get("ok")
+    warned = any(i.get("severity") == "warn" and not i["pass"]
+                 for i in result.get("invariants", []))
+    verdict = "PASS" if ok and not warned else ("PASS (with warnings)" if ok else "FAIL")
+    out = []
+    out.append(f"## KV-cache offload report — {verdict}")
+    out.append("")
+    out.append(f"`{result.get('timestamp')}` · regime **{result.get('regime')}** "
+               f"(running {result.get('req_running')}, waiting {result.get('req_waiting')})")
+    out.append("")
+    out.append("### Invariants")
+    out.append("")
+    out.append("| | check | result |")
+    out.append("|---|---|---|")
+    for i in result.get("invariants", []):
+        tag = "PASS" if i["pass"] else ("WARN" if i.get("severity") == "warn" else "FAIL")
+        detail = i["detail"].replace("|", "\\|")
+        out.append(f"| {tag} | `{i['name']}` | {detail} |")
+    out.append("")
+
+    pt = result.get("prompt_tokens") or {}
+    if pt.get("prompt_tokens_total"):
+        total = pt["prompt_tokens_total"]
+        out.append("### Where prompt tokens came from")
+        out.append("")
+        out.append("| source | tokens | share |")
+        out.append("|---|---:|---:|")
+        for k in ("local_cache_hit", "external_kv_transfer", "local_compute"):
+            v = pt.get(k)
+            if isinstance(v, (int, float)):
+                out.append(f"| {k} | {v:,.0f} | {v / total * 100:.1f}% |")
+        out.append(f"| **total** | **{total:,.0f}** | |")
+        out.append("")
+        served = total - pt.get("local_compute", 0)
+        out.append(f"**{served / total * 100:.1f}% of prompt tokens served without recomputation.** "
+                   f"A rising `local_cache_hit` share is the GPU cache doing its job, not the tier "
+                   f"failing -- read rates, not shares.")
+        out.append("")
+
+    perf = result.get("performance") or {}
+    if perf:
+        out.append("### Performance")
+        out.append("")
+        out.append("Markers: `SOLID` directly measured · `REGIME` depends on the cache's current "
+                   "state · `UNRESOLVED` two derivations disagree, do not quote it as fact.")
+        out.append("")
+        rs = perf.get("read_speed_request_experienced") or []
+        if rs:
+            out.append("| tier | token rate | bandwidth | |")
+            out.append("|---|---:|---:|---|")
+            for r in rs:
+                out.append(f"| {r['tier']} | {r['tok_s']:,.0f} tok/s | {r['mb_s']:,.1f} MB/s "
+                           f"| `{r['marker']}` |")
+            out.append("")
+            out.append(f"_{rs[0].get('label','')}_")
+            out.append("")
+        bpt = perf.get("bytes_per_token")
+        if bpt:
+            out.append(f"- **bytes/token** (measured): fs {bpt['fs']:,.0f} · cpu {bpt['cpu']:,.0f} "
+                       f"`{bpt['marker']}` — this is what the sizing guidance is built on.")
+        wd = perf.get("wait_diagnostic")
+        if wd:
+            out.append(f"- **wait fraction** {wd['wait_fraction'] * 100:.1f}% of "
+                       f"{wd['n_read_threads']} read threads `{wd['marker']}` — {wd['advice']}")
+        ref = perf.get("latency_histogram_refusal")
+        if isinstance(ref, dict) and ref.get("refused"):
+            out.append(f"- `REFUSAL` {ref.get('reason', '')}")
+        elif isinstance(ref, str) and ref:
+            out.append(f"- `REFUSAL` {ref}")
+        out.append("")
+
+    warnings = result.get("warnings") or []
+    if warnings:
+        out.append("### Warnings")
+        out.append("")
+        for w in warnings:
+            out.append(f"- {w}")
+        out.append("")
+
+    out.append("---")
+    out.append("")
+    if result.get("metrics_file"):
+        out.append(f"Produced by `tools/kvvalidate.py --markdown --metrics-file "
+                   f"{result['metrics_file']}` — a saved `/metrics` snapshot, so the two "
+                   f"on-disk invariants are not part of this report.")
+    else:
+        out.append(f"Produced by `tools/kvvalidate.py --markdown` · engine pid "
+                   f"`{result.get('engine_pid')}` · fs path `{result.get('fs_path')}`")
+    print("\n".join(out))
+    return 0
 
 
 def _emit_performance(p, cfg):

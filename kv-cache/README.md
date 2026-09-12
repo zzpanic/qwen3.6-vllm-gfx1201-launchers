@@ -14,14 +14,22 @@ its ROCm build for Instinct only (gfx942/gfx950) and its tracker has no RDNA iss
 
 ## What you can expect
 
-Measured over **31.5M prompt tokens** of real agent coding work — 2–3 agents on one card, ~14 h:
+Measured over **31.9M prompt tokens** of real agent coding work — 2–3 agents on one card, ~14 h:
 
 | | share of prompt tokens |
 |---|---|
-| GPU prefix cache | 64.1% |
-| offload tiers (RAM + disk) | 17.7% |
-| **served without recompute** | **81.8%** |
-| recomputed | 18.2% |
+| GPU prefix cache | 64.5% |
+| offload tiers (RAM + disk) | 17.5% |
+| **served without recompute** | **82.0%** |
+| recomputed | 18.0% |
+
+Reproduce this exact report yourself — the snapshot it came from ships with the repo:
+
+```bash
+python3 tools/kvvalidate.py --markdown --metrics-file examples/metrics-snapshot-20260912.txt
+```
+
+The full output is [`examples/EXAMPLE-REPORT.md`](examples/EXAMPLE-REPORT.md).
 
 Tier read rates, which do not depend on workload:
 
