@@ -46,7 +46,7 @@ Shipping both is a wart, not a design, and they should be merged. That merge is
 **stage 4 (refactoring)** of the roadmap in the top-level README, and deliberately
 not earlier: until the stage-1 metrics harness exists, a merge cannot be shown to
 have preserved behaviour. Until then the split has one virtue — the cache work is
-a PROOF OF CONCEPT with known correctness errors, and it should not be reachable
+a working, correct, unoptimised implementation, and it should not be reachable
 by accident from the production path.
 
 ## Where both of them come from

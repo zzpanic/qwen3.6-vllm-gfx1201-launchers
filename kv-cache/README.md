@@ -14,7 +14,11 @@ its ROCm build for Instinct only (gfx942/gfx950) and its tracker has no RDNA iss
 
 ## What you can expect
 
-Measured over **31.9M prompt tokens** of real agent coding work — 2–3 agents on one card, ~14 h:
+Measured over **31.9M prompt tokens** of real agent coding work — 2–3 agents on one card, ~14 h.
+**These are from one specific saturated run, and a fresh boot will not reproduce them**: the disk
+tier cannot serve until the RAM tier fills, so for roughly the first 45 minutes the numbers look
+far worse. That run's raw `/metrics` ships in `examples/`, so the figures below are checkable even
+though they are not re-derivable on demand:
 
 | | share of prompt tokens |
 |---|---|
@@ -60,9 +64,17 @@ runs six gates against a live endpoint:
 - **CT4** — boundary sweep across chunk edges (±1 token), the case most likely to hide a defect.
 - **CT6** — measures the recurrent-stride store against cold recompute at nine prefix lengths.
 
-Last run, on the shipped stack: **CT1, CT2, CT3, CT5 PASS. CT4 bit-identical on all 11
-uncontended probes. CT6 `max|dlogprob| = 0.0` at all nine lengths**, non-boundary included — the
-stride truncates how far back a hit reaches, it does not approximate the state it returns. An
+Last run, on the shipped stack: **CT1, CT2, CT5 PASS. CT4 bit-identical on all 11 uncontended
+probes. CT6 `max|dlogprob| = 0.0` at all nine lengths**, non-boundary included — the stride
+truncates how far back a hit reaches, it does not approximate the state it returns.
+
+**CT3 and CT4 both reported FAIL in that run, and both were contention.** CT4's three failing
+offsets are each tagged `contended=True` while all eleven uncontended probes are bit-identical.
+CT3 failed with the cache serving *nothing* on either side (`gpu_hits=0, ext_hits=0` — two
+recomputes disagreeing), and **passed on a re-run against a quiet card**: `tokens_identical=True,
+max|dlogprob|=0.0`. So the CT3 pass comes from a second run, not the full-suite one. Said plainly
+because a suite that only ever passes is a suite nobody has tested — and because the contention
+effect below is the whole reason those failures are not defects. An
 85,696-token disk hit was bit-identical to a cold recompute, and across the run there were 5,423
 promotions with 0 refused.
 

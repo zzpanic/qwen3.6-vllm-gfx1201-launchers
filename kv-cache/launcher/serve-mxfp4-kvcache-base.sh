@@ -752,7 +752,7 @@ KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
 # ("draft attention groups [0, 1, 2, 3, 4, 5, 6, 7, 8] detected"). That withholds the newest
 # chunk of every conversation from the store for the whole of a decode and shortens every
 # servable prefix by a chunk, nine times over. Verify after a restart: the line must read
-# "[8]". See kv-cache/patch_kv_offload_eagle_groups.py and upstream PR #55390.
+# "[8]". See kv-cache/patch_kv_offload_eagle_groups.py and upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
 KVOFF_EAGLE_GROUPS=${KVOFF_EAGLE_GROUPS:-1}
 # RADIANCE_MAMBA_STORE_STRIDE: keep every Nth Mamba/GDN snapshot instead of one per chunk.
 # 1 = off (upstream). DEFAULT IS 8. A Mamba group holds ONE recurrent state and the load

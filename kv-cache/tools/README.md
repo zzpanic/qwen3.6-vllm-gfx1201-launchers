@@ -11,7 +11,7 @@ style, plus a table on stdout. It answers three questions in plain language:
 2. Is my disk too slow -- should I buy NVMe?
 3. Is turning this layered cache on adding value at all?
 
-## It needs patch 8
+## It needs patch 2
 
 `patches/patch_kv_offload_tier_report.py` adds the 19 `tier`-labelled series the
 report reads. Without it the tool still runs, still reports the prompt-token
@@ -51,14 +51,15 @@ verdict says otherwise, 2 = could not measure.
 ## Testing it without an engine
 
 ```
-./tier_report_fixture.py > /tmp/fixture.prom
+python3 tierreport.py            # against the live endpoint
 ./tierreport.py --metrics-file /tmp/fixture.prom
 ```
 
-The fixture invents numbers but uses the real metric shapes, and is rigged so
-every verdict branch fires. `tier_report_smoke.py` is the functional test for
-the patch itself and must run INSIDE the container, where `prometheus_client`
-and the vLLM tree exist.
+The tier-report patch has a fixture and a smoke test that exercise every verdict
+branch against invented numbers in the real metric shapes. They are development
+tests for the patch itself -- they must run INSIDE the container, where
+`prometheus_client` and the vLLM tree exist -- so they are not part of this
+release. `kvvalidate.py` is the check to run against a deployment.
 
 ## Reading `--calibrate` honestly
 

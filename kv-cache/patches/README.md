@@ -42,7 +42,7 @@ root the script expects. The launcher does all three for you; nothing else does.
 
 See `APPLY-ORDER.txt`. Two pairs are genuinely ordered:
 
-- `serve_ready_prefix` (4) anchors on lines that `lookup_outcomes` (3) inserts, and on
+- `wallclock_reanchored` (8) re-anchors timing that `instrumentation` (2) installs, and on
   `offload_mixed_hit` (1)'s `_RADIANCE_ALLOW_MIXED_HIT` line.
 - `mamba_stride` (6) requires `eagle_groups` (5): while every group is flagged as
   an EAGLE/MTP draft group, `storable_chunks()` drops each group's trailing chunk
@@ -66,7 +66,7 @@ fallback**, so a failure there is a hard boot failure, not a warning:
 | 1 | `patch_offload_mixed_hit.py` | **FATAL** — engine does not boot |
 | 2 | `patch_kv_offload_instrumentation.py` | **FATAL** — engine does not boot |
 | 3 | `patch_kv_offload_lookup_outcomes.py` | warns; Phase A metrics absent |
-| 4 | `patch_kv_offload_serve_ready_prefix.py` | warns; upstream deferral behaviour, whatever the env var says |
+| 8 | `patch_kv_offload_wallclock_reanchored.py` | warns; timing stays per-batch rather than whole-job |
 | 5 | `patch_kv_offload_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
 | 6 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
 | 7 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
@@ -98,7 +98,7 @@ No patch changes behaviour unconditionally. The gates:
 | Patch | Environment variable(s) |
 |---|---|
 | `offload_mixed_hit` | `RADIANCE_OFFLOAD_MIXED_HIT`, `RADIANCE_ALLOW_MIXED_HIT`, `RADIANCE_ASSERT_DUMPED` |
-| `serve_ready_prefix` | `RADIANCE_OFFLOAD_PENDING_IS_MISS`, `RADIANCE_PENDING_IS_MISS` |
+| `promotion_refusal_instrumentation` | none -- counters only, always on |
 | `eagle_groups` | `RADIANCE_OFFLOAD_EAGLE_GROUPS` |
 | `mamba_stride` | `RADIANCE_MAMBA_STORE_STRIDE`, `RADIANCE_MAMBA_STRIDE`, `RADIANCE_ASSERT_DUMPED` |
 | `fs_fanout` | `RADIANCE_FS_FANOUT_MAX`, `RADIANCE_FS_FANOUT_TARGET_MB` |

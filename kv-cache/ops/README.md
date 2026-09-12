@@ -17,7 +17,7 @@ path in this connector. Never lower it; never hand-delete a young block.
 
 ## After every reload: check the patches actually took
 
-    ./check-r315-boot.sh
+    python3 ../tools/kvvalidate.py      # confirms the patches are live and serving
 
 Read-only, about a second. The patches are applied at container start from the
 mounted source directory, so a stale mount, a failed hunk or a launcher that

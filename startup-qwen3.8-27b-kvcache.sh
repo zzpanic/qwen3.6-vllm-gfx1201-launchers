@@ -5,7 +5,7 @@
 # WHAT THIS IS
 # ============================================================================
 # This is the KV-cache work as a SEPARATE, PUBLISHABLE ENTRY. Everything the
-# three-tier offload needs -- the tier sizes, the eight house patches, the
+# three-tier offload needs -- the tier sizes, the nine house patches, the
 # eviction policy, the fs tier, the stride, the GC contract -- is pinned HERE,
 # in one file, with the reasoning inline, rather than being spread across the
 # production entry's env block in config.yaml.
@@ -33,7 +33,7 @@
 # STATUS: WORKING, CORRECT, UNOPTIMISED -- READ BEFORE PUBLISHING OR TRUSTING
 # ============================================================================
 # This is a WORKING, CORRECT, UNOPTIMISED implementation delivered as a patch
-# stack -- not a proof of concept. It makes a three-tier KV-cache offload work
+# stack -- not a working implementation. It makes a three-tier KV-cache offload work
 # on a GDN hybrid model on a single consumer AMD card (gfx1201 / RDNA4), and it
 # is measured doing so: 81.8% of prompt tokens were served without recomputation
 # over ~14 h of real agent work, and an 85,696-token disk hit was bit-identical
@@ -61,9 +61,9 @@
 #   2. CONTINUE THE REVIEW OF EXISTING WORK, AND WRITE AN IMPLEMENTATION PLAN.
 #      kv-cache-references.md is the review so far -- every PR, paper and blog
 #      assessed, each with a ruling. Continue it, then plan. This includes
-#      reconciling the eight house patches against current vLLM/radiance HEAD
+#      reconciling the nine house patches against current vLLM/radiance HEAD
 #      and DELETING each in favour of the upstream implementation wherever one
-#      exists (the eagle-groups fix has a counterpart in PR #55390; the fs
+#      exists (the eagle-groups fix has a counterpart in PR #52047 (NOT merged as #55390; #52047 does not cover this model); the fs
 #      fanout was ported from PR #49225). AVOID REIMPLEMENTATION -- a house
 #      patch that duplicates merged upstream work is a liability, not an asset:
 #      one more thing to rebase, and it will silently diverge. Score upstream
@@ -257,28 +257,19 @@ export KVOFF_DISK_WTHREADS="${KVOFF_DISK_WTHREADS:-4}"
 #     local+external prefix hit. 1 = serve mixed hits = default = safe, 0 = decline = the retained kill switch.
 export KVOFF_MIXED_HIT="${KVOFF_MIXED_HIT:-1}"
 
-# (b) PENDING_IS_MISS=0 -- THE ONE THAT MAKES THE FS TIER ACTUALLY SERVE.
-#
-#     radiance R3.14.3 defaults this to 1, which truncates a prefix lookup at
-#     the first HIT_PENDING chunk. That is WHY the disk tier served ~0 for
-#     weeks: a promotion starts, the request defers, the half-landed promotion
-#     reads back as HIT_PENDING, the lookup breaks at chunk 0, hit_count is 0,
-#     and the scheduler returns a full recompute. The proof was that the
-#     kv_offload_load_* metric family did not even EXIST -- those series
-#     register lazily on the first load, and no load was ever issued.
-#
-#     0 restores upstream's behaviour (wait for the promotion).
-#
-#     MEASURED COST, and it is real: a 34k re-read goes 13.5 s -> 17.5 s. In
-#     exchange the cache works: 18 load series appear, 1.06-1.22 GB moved per
-#     re-read, and the engine reports "External prefix cache hit rate: 92.0%".
-#     Set to 1 to trade correctness of the cache back for the 4 s.
-export KVOFF_PENDING_IS_MISS="${KVOFF_PENDING_IS_MISS:-0}"
+# (b) REMOVED 2026-09-12 -- there used to be a KVOFF_PENDING_IS_MISS knob here, described as
+#     "THE ONE THAT MAKES THE FS TIER ACTUALLY SERVE". It was the gate on
+#     patch_kv_offload_serve_ready_prefix.py, which was deleted along with the
+#     promotion-refusal thesis it was built on (0 refusals across 5,416 promotions at a
+#     100%-full CPU tier). The code no longer reads the variable at all, so setting it did
+#     nothing except print a reassuring line in the boot log. Upstream's wait-for-the-
+#     promotion behaviour -- which is what the knob emulated at 0 -- is now simply what runs.
+#     Do not reintroduce it without the patch.
 
 # (c) eagle-groups. vLLM's MTP-draft-group annotator is hard-gated to
 #     DeepSeek-V4, so on this model production was flagging ALL NINE KV groups
 #     as draft groups. The patch flags only group 8. The boot log line must read
-#     [8], not all nine. Upstream PR #55390.
+#     [8], not all nine. Upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
 export KVOFF_EAGLE_GROUPS="${KVOFF_EAGLE_GROUPS:-1}"
 
 # (d) mamba stride N=8. THE CAPACITY LEVER, and the approximation -- see the
@@ -380,7 +371,7 @@ export EXTRA
 
 echo "[kvcache] entry=$SERVED container=$NAME" >&2
 echo "[kvcache]   CPU tier ${KVCACHE_TIER_GIB} GiB, policy=${KVOFF_POLICY}, reserve=${KVOFF_RAM_RESERVE_GIB} GiB" >&2
-echo "[kvcache]   fs tier ${KVOFF_DISK:-<off>}${KVOFF_DISK:+/$KVOFF_DISK_SUBDIR}, pending_is_miss=${KVOFF_PENDING_IS_MISS}" >&2
+echo "[kvcache]   fs tier ${KVOFF_DISK:-<off>}${KVOFF_DISK:+/$KVOFF_DISK_SUBDIR}" >&2
 echo "[kvcache]   mamba_stride=${KVOFF_MAMBA_STRIDE} eagle_groups=${KVOFF_EAGLE_GROUPS}" >&2
 echo "[kvcache]   base launcher: $BASE_LAUNCHER" >&2
 

@@ -46,7 +46,7 @@ Upstream knows. The function carries its own note:
 
      # FIXME(yifan): avoid/generalize this hacky check.
 
-and vllm-project/vllm#55390 ("Annotate MTP draft KV groups positionally") is the
+and vllm-project/vllm#52047 (NOT merged as #55390; #52047 does not cover this model) ("Annotate MTP draft KV groups positionally") is the
 open PR for it. Only ~11% of that PR's diff applies to our tree -- it targets a
 different grouping path -- so this patch ports the *idea*, not the diff.
 
