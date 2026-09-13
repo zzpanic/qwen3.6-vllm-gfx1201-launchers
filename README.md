@@ -295,35 +295,34 @@ below is the part that stays here: it is about choosing between them.
 ## KV-cache offload
 
 `startup-qwen3.8-27b-kvcache.sh` and the [`kv-cache/`](kv-cache/) directory add **KV-cache
-offload** to the MXFP4 stack: the GPU prefix cache spills into a pinned RAM tier in `/dev/shm`,
-so a prefix evicted from the card comes back at ~11.8 GB/s instead of being re-prefilled.
+offload** to the MXFP4 stack.
 
-**Why it exists:** on one card, concurrency is not for sale. Two decode streams here
-produce the same total throughput as one, and a concurrent prefill taxes the other stream
-~29%, so the second slot is a *convenience* slot for short requests only. That leaves
-exactly one lever for running agents on a single card — not recomputing the prefix an
-agentic tool re-sends every turn.
+**Why — more than one client per slot.** When more clients than `--max-num-seqs` slots share the
+engine, they take turns, and each turn can push another client's prefix out of the GPU cache.
+Without offload that client **reprocesses its whole prefix** on its next turn; with offload the
+prefix is **loaded back instead of reprocessed**.
 
-**The default is the recommended setup, and it is plug and play:** GPU → RAM, three
-behavioural patches, the RAM tier sized automatically to at least 2× the smaller of the GPU
-KV pool and max-model-len. If this machine cannot hold that minimum, offload switches itself
-off and the boot log says why; `KVCACHE_TIER_GIB=<GiB>` overrides. Watch it work with:
+It comes in two options from the same launcher:
+
+| | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk (experimental) |
+|---|---|---|
+| run | `./startup-qwen3.8-27b-kvcache.sh` | `KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh` |
+| tiers | RAM tier in `/dev/shm` | the same RAM tier + a disk tier |
+| patches | 3 behavioural | those 3 + instrumentation + two disk-tier patches |
+| needs | RAM for the tier | that, plus a filesystem and the reaper |
+| tools | `kvwatch.py` | `kvwatch.py`, `kvvalidate.py`, `tierreport.py` |
+
+In both, the RAM tier is sized automatically to at least 2× the smaller of the GPU KV pool and
+max-model-len; if that does not fit, offload turns itself off and the boot log says why
+(`KVCACHE_TIER_GIB=<GiB>` overrides). Watch either option with:
 
 ```bash
 watch -n 5 python3 kv-cache/tools/kvwatch.py
 ```
 
-**A disk tier is available as an experimental build** (`KVCACHE_EXPERIMENTAL=1`): a third
-tier on a dedicated filesystem plus the full instrumentation set and the tools that read it.
-It needs an external reaper, and on ordinary storage it is unresolved whether it is even faster
-than a recompute — turn it on to work on the tier, not to get a faster cache.
-
-Status, measurements, correctness results and the roadmap are in
-[kv-cache/README.md](kv-cache/README.md); setup and sizing in
-[kv-cache/docs/SETUP.md](kv-cache/docs/SETUP.md). **Contributions to any of the six roadmap
-stages are the reason it is here** — the first of which is tidying the benchmark hooks into a
-reproducible cache-metrics harness, because nothing after it can be shown to have helped
-without it.
+Details in [kv-cache/README.md](kv-cache/README.md) and
+[kv-cache/docs/SETUP.md](kv-cache/docs/SETUP.md); the roadmap is in the header of
+`startup-qwen3.8-27b-kvcache.sh`. Contributions to any of its stages are welcome.
 
 ## Contents
 
@@ -335,7 +334,7 @@ going:
 | --- | --- |
 | `startup-qwen3.8-27b-mxfp4.sh` | **current.** Every measurement in `benchmarks/` dated 2026-09-05 is this one. |
 | `startup-qwen3.8-27b-int4.sh` | **maintained fallback** (int4 W4A16). Same model, better-understood path, measurably slower. Kept because it is what to fall back to when a radiance bump breaks the MXFP4 stack — that has happened. |
-| `startup-qwen3.8-27b-kvcache.sh` | **current, with KV-cache offload.** The MXFP4 build plus a RAM tier for the prefix cache (GPU → RAM), sized automatically. A disk tier is an experimental build (`KVCACHE_EXPERIMENTAL=1`). See [kv-cache/README.md](kv-cache/README.md). |
+| `startup-qwen3.8-27b-kvcache.sh` | **current, with KV-cache offload.** The MXFP4 build plus prefix-cache offload, in two options: GPU → RAM (default) or GPU → RAM → disk (experimental, `KVCACHE_EXPERIMENTAL=1`). See [kv-cache/README.md](kv-cache/README.md). |
 | `startup-qwen3.6-27b-vllm.sh` | **historical.** Qwen3.6 is superseded by Qwen3.8 on the same architecture; kept for the reasoning and the tile table, not because you should serve it. |
 | `startup-qwen3.6-35b-vllm.sh` | **historical.** As above, plus the MoE-specific findings (why MTP is off at that size). |
 

@@ -3,9 +3,10 @@
 Every command here runs from the repository root. Each change says how to verify it
 and how to undo it.
 
-There are two builds (see the README): the **default**, GPU → RAM with three patches, and the
-**experimental** one, `KVCACHE_EXPERIMENTAL=1`, which adds a disk tier and the instrumentation.
-Sections marked *experimental* do not apply to the default.
+There are two options (see the README), called builds in the launcher and the patch notes:
+**option 1, the default build** — GPU → RAM with three patches — and **option 2, the experimental
+build** — `KVCACHE_EXPERIMENTAL=1`, which adds a disk tier and the instrumentation. Everything not
+marked *experimental* applies to both.
 
 ## Prerequisites
 

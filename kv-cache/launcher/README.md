@@ -45,7 +45,8 @@ those seven items are the whole job.
 ## Why they are still two files
 
 Shipping both is a wart, not a design, and they should be merged. That merge is
-**stage 4 (refactoring)** of the roadmap in the top-level README, and deliberately
+**stage 4 (refactoring)** of the roadmap in the header of
+`startup-qwen3.8-27b-kvcache.sh`, and deliberately
 not earlier: until the stage-1 metrics harness exists, a merge cannot be shown to
 have preserved behaviour. Until then the split has one virtue — the cache work is
 a working, correct, unoptimised implementation, and it should not be reachable
