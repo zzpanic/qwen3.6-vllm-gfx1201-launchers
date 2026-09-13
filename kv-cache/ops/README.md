@@ -19,17 +19,19 @@ path in this connector. Never lower it; never hand-delete a young block.
 ## After every reload: check it is serving
 
     watch -n 5 python3 ../tools/kvwatch.py   # either build: hit rates and bytes moved
-    python3 ../tools/kvvalidate.py           # experimental build: the patches are live
+    python3 ../tools/kvvalidate.py           # experimental build ONLY: the patches are live
 
-The default build's boot log names what it applied (`[kvcache]` lines, then one
-`[radiance]` warning per patch that did not apply).
-
-Read-only, about a second. The patches are applied at container start from the
-mounted source directory, so a stale mount, a failed hunk or a launcher that
-skipped a step all look identical from outside — the engine boots either way and
-then fails hours later under real traffic, which is how the R3.15 bug was found.
-The script reads the RUNNING engine's files through `/proc/<pid>/root`, not the
-copies on the host, because those are the ones that can disagree.
+`kvvalidate.py` is read-only and takes about a second. The patches are applied at
+container start from the mounted source directory, so a stale mount, a failed hunk
+or a launcher that skipped a step all look identical from outside — the engine
+boots either way and then fails hours later under real traffic, which is how the
+R3.15 bug was found. The script reads the RUNNING engine's files through
+`/proc/<pid>/root`, not the copies on the host, because those are the ones that
+can disagree. On the default build it reports FAILs that are not real, because the
+counters it compares are not exported; there, read the boot log instead — the
+`[kvcache]` lines name the build, and each of the two non-fatal default patches
+prints a `[radiance] WARNING` if it did not apply (the third, mixed-hit, stops the
+boot).
 
 ## The mounts
 

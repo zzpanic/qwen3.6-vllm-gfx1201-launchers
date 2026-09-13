@@ -19,21 +19,22 @@ its ROCm build for Instinct only (gfx942/gfx950) and its tracker has no RDNA iss
 |---|---|---|
 | select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
 | tiers | GPU → RAM | GPU → RAM → disk |
-| house patches | 3 behavioural: mixed-hit, eagle-groups, mamba-stride | those 3 + the instrumentation set + fs fanout |
+| house patches | 3 behavioural: mixed-hit, eagle-groups, mamba-stride | those 3 + the instrumentation set + two disk-tier patches (fs fanout, lookup invalidation, the latter gated off) |
 | needs | `/dev/shm` sized for the RAM tier | that, plus a dedicated filesystem and the **reaper** |
 | observability | upstream only — `external_prefix_cache_hits/queries`, `kv_offload_store_bytes`: *whether* the tier serves | + per-tier counters, `tools/kvvalidate.py`, `tools/tierreport.py`: *why* it did or did not |
 
 The default is the patch set the author's own production entry runs. It is small on purpose: the
-three patches are the ones that change what gets served, and every one of them is needed for
+three patches are the behavioural changes the RAM tier needs, and every one of them is needed for
 correctness or capacity on this model. The experimental build adds everything that was needed to
-*find* those three. On ordinary storage the disk tier serves at roughly break-even with a
-recompute, and it needs an external garbage collector because vLLM's fs tier never deletes. Turn
-it on if you want to work on the tier, not to get a faster cache.
+*find* those three. On ordinary storage it is unresolved whether the disk tier is even faster than
+a recompute (somewhere between 0.55× and 2.2×), and it needs an external garbage collector because
+vLLM's fs tier never deletes. Turn it on if you want to work on the tier, not to get a faster cache.
 
 ## What you can expect
 
 The RAM tier reads at **337,408 tok/s (11.8 GB/s)** — against a recompute, a hit is effectively
-free. That rate does not depend on workload, and it is the same in both builds.
+free. That rate does not depend on workload. It was measured on the experimental build; the default
+build loads from RAM through the same copy path.
 
 **The floor:** a prefix under **13,184 tokens** gets no external hit at all — the recurrent-state
 snapshots are kept every 8th chunk, and a shorter prefix never reaches one. If your prefixes are
@@ -53,7 +54,7 @@ reproduce it:
 Its raw `/metrics` ships in `examples/`, so the report is checkable without the hardware:
 
 ```bash
-python3 tools/kvvalidate.py --markdown --metrics-file examples/metrics-snapshot-20260912.txt
+python3 kv-cache/tools/kvvalidate.py --markdown --metrics-file kv-cache/examples/metrics-snapshot-20260912.txt
 ```
 
 The full output is [`examples/EXAMPLE-REPORT.md`](examples/EXAMPLE-REPORT.md). The same run's disk
@@ -134,20 +135,23 @@ watch -n 5 python3 kv-cache/tools/kvwatch.py
 ```
 
 It shows GPU and offload-tier hit rates since the last refresh, the bytes the tier loaded and
-stored, and the last few requests with how much of each was cached.
+stored, and the last few requests with how much of each was cached. It reads through llama-swap on
+`:1234`; without llama-swap, point it at the engine with
+`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics`.
 
 Then read [`docs/SETUP.md`](docs/SETUP.md) — prerequisites, sizing, and for
 the experimental build the reaper (**required**, not advisory: without it the disk tier grows
 without bound), the tools, and how to read the metrics without falling into the two traps that
 cost this project the most time.
 
-On the experimental build, `python3 tools/kvvalidate.py` checks a running system: it
+On the experimental build, `python3 kv-cache/tools/kvvalidate.py` checks a running system: it
 re-establishes five invariants against a live busy endpoint, names which regime you are in before
 you draw a conclusion, and marks every performance figure `SOLID`, `REGIME` or `UNRESOLVED`. It is
 read-only and stdlib-only. Its `lookup_partition` check is the one to watch: the engine's six
 terminal lookup buckets must sum to `lookup_calls` exactly, and any drift means a lookup exited
 without recording an outcome — so every rate below it is a lower bound until you find the exit.
-On the default build it has nothing to read.
+**Do not run it against the default build:** the counters it compares are not exported there, and
+it reports FAILs that are not real.
 
 ## What this is
 

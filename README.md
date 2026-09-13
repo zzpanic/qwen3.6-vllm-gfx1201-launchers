@@ -315,8 +315,8 @@ watch -n 5 python3 kv-cache/tools/kvwatch.py
 
 **A disk tier is available as an experimental build** (`KVCACHE_EXPERIMENTAL=1`): a third
 tier on a dedicated filesystem plus the full instrumentation set and the tools that read it.
-It needs an external reaper, and on ordinary storage it serves at roughly break-even with a
-recompute — turn it on to work on the tier, not to get a faster cache.
+It needs an external reaper, and on ordinary storage it is unresolved whether it is even faster
+than a recompute — turn it on to work on the tier, not to get a faster cache.
 
 Status, measurements, correctness results and the roadmap are in
 [kv-cache/README.md](kv-cache/README.md); setup and sizing in

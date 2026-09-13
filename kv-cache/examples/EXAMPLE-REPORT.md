@@ -7,12 +7,12 @@ come from. The raw `/metrics` snapshot it was generated from ships beside it as
 output without the hardware:
 
 ```bash
-python3 tools/kvvalidate.py --markdown --metrics-file examples/metrics-snapshot-20260912.txt
+python3 kv-cache/tools/kvvalidate.py --markdown --metrics-file kv-cache/examples/metrics-snapshot-20260912.txt
 ```
 
-Run it against your own endpoint with `python3 tools/kvvalidate.py --markdown` and compare. That
-needs the experimental build too: on the default build the counters it reads are not exported, and
-`watch -n 5 python3 tools/kvwatch.py` is the view to use instead.
+Run it against your own endpoint with `python3 kv-cache/tools/kvvalidate.py --markdown` and compare. That
+needs the experimental build too: on the default build the counters it compares are not exported,
+so it reports FAILs that are not real. Use `watch -n 5 python3 kv-cache/tools/kvwatch.py` there instead.
 
 > **Read the regime line first.** This report says `saturated` — the RAM tier is full and the disk
 > tier is serving. A freshly booted engine reports a warm-up regime instead, where the disk tier

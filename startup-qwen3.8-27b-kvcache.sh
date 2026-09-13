@@ -33,9 +33,10 @@
 # STATUS: WORKING, CORRECT, UNOPTIMISED -- READ BEFORE PUBLISHING OR TRUSTING
 # ============================================================================
 # This is a WORKING, CORRECT, UNOPTIMISED implementation delivered as a patch
-# stack -- not a working implementation. It makes a three-tier KV-cache offload work
-# on a GDN hybrid model on a single consumer AMD card (gfx1201 / RDNA4), and it
-# is measured doing so: 81.8% of prompt tokens were served without recomputation
+# stack. It makes KV-cache offload work -- to RAM by default, and to disk in the
+# experimental build -- on a GDN hybrid model on a single consumer AMD card
+# (gfx1201 / RDNA4), and it is measured doing so (on the experimental build):
+# 82.0% of prompt tokens were served without recomputation
 # over ~14 h of real agent work, and an 85,696-token disk hit was bit-identical
 # to a cold recompute. The defects that were found are not still open -- they
 # were fixed, and then the fixes were tested. It is a starting point, not a
@@ -77,9 +78,10 @@
 #      the pending-is-miss behaviour -- so a deployment can pick its point on
 #      the curve and a benchmark can sweep it. Then prototype the most
 #      promising quality option. The strongest candidate is THE EXACTNESS FIX:
-#      replay the <= one-block gap from the stride checkpoint, turning the
-#      stride from an approximation into an exact reconstruction. Designed but
-#      not built; the single well-described gap to the full method.
+#      replay the <= one-block gap from the stride checkpoint, so a hit reaches
+#      the full stored prefix instead of rounding down to the last kept
+#      snapshot. Designed but not built; the single well-described gap to the
+#      full method.
 #
 #   4. REFACTORING. These patches were written one at a time, each to answer a
 #      specific question, and it shows: they monkey-patch by string surgery,
@@ -93,8 +95,8 @@
 #
 #   5. SPEED OPTIMISATION. Nothing here has been tuned; it has only been made
 #      to work. The known ceilings are all measured and all documented -- the
-#      fs tier serves at ~117 MB/s against a ~101 MB/s recompute break-even
-#      (1.16x, i.e. barely worth doing), the promotion path is strictly staged
+#      fs tier reads at ~229 MB/s wall clock and whether that beats a recompute
+#      is unresolved (somewhere between 0.55x and 2.2x), the promotion path is strictly staged
 #      through the CPU tier so disk and RAM contend for the same region, and
 #      there is no DMA path from disk to VRAM on this hardware. Which of those
 #      are real limits and which are just untuned is, in most cases, not yet
@@ -148,9 +150,10 @@
 #     instrumented patch set: store-path and lookup-outcome counters, fs
 #     fanout, the tier report, the promotion-refusal tripwire, and the lookup
 #     invalidation/deferral/miss-reason patches. tools/kvvalidate.py and
-#     tools/tierreport.py need this build -- against the default they have
-#     nothing to read. The disk tier needs the reaper (section 6) and serves at
-#     roughly break-even with a recompute on ordinary storage.
+#     tools/tierreport.py need this build -- on the default build the counters
+#     they compare are not exported, and kvvalidate reports FAILs that are not
+#     real. The disk tier needs the reaper (section 6), and whether it is faster
+#     than a recompute on ordinary storage is unresolved (0.55x-2.2x).
 #
 # Individual knobs still win over the build switch: KVCACHE_DISK=/kvcache on the
 # default build gives the minimal patch set WITH a disk tier, which is exactly
@@ -169,8 +172,8 @@
 # ============================================================================
 # USAGE
 # ============================================================================
-#     llama-swap-qwen38-27b-kvcache.sh --port <N>    (llama-swap's contract)
-#     llama-swap-qwen38-27b-kvcache.sh -h            this text, then the base
+#     startup-qwen3.8-27b-kvcache.sh --port <N>      (llama-swap contract)
+#     startup-qwen3.8-27b-kvcache.sh -h              this text, then the base
 #                                                    launcher's full knob list
 #
 # Every knob below is overridable from the environment (config.yaml `env:`),
@@ -213,8 +216,8 @@ export SERVED="${SERVED:-qwen3.8-27b-kvcache}"
 # 2. THE CPU PRIMARY TIER (L2) -- size in GiB.
 #
 # DEFAULT: KVCACHE_TIER_GIB=auto, which computes the recommended minimum below
-# from MAXLEN and KV_MEM and caps it to what this box can hold. Set a number to
-# pin it instead.
+# from MAXLEN and KV_MEM, and turns offload OFF if this box cannot hold it. Set a
+# number to pin it instead.
 #
 # Deliberately NOT the base launcher's KV_OFFLOAD=auto: that sizes from
 # MemAvailable at boot, which depends on what else happened to be resident at
@@ -314,9 +317,9 @@ fi
 #
 # OFF by default. KVCACHE_EXPERIMENTAL=1 turns it on at /kvcache; KVCACHE_DISK
 # names another path (and turns it on in either build); KVCACHE_DISK="" forces it
-# off. Off costs nothing but capacity: the disk reads at ~117 MB/s against a
-# ~101 MB/s recompute break-even, i.e. only 1.16x, so serving from disk is barely
-# faster than recomputing. See operations §1.
+# off. Off costs nothing but capacity: the disk reads at ~229 MB/s wall clock,
+# and whether that beats recomputing is unresolved -- somewhere between 0.55x and
+# 2.2x, pending a single-stream prefill measurement.
 #
 # THREE THINGS THAT WILL BITE (all verified in the 0.27.1 tree):
 #   1. PYTHONHASHSEED must be pinned. Block filenames are content hashes chained
@@ -393,15 +396,16 @@ export KVOFF_MIXED_HIT="${KVOFF_MIXED_HIT:-1}"
 #     [8], not all nine. Upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
 export KVOFF_EAGLE_GROUPS="${KVOFF_EAGLE_GROUPS:-1}"
 
-# (d) mamba stride N=8. THE CAPACITY LEVER, and the approximation -- see the
-#     status warning at the top of this file. 0.417x the bytes, which lifts the
-#     RAM tier from 0.50x the GPU cache to 1.21x. Set 1 for exact-but-huge.
+# (d) mamba stride N=8. THE CAPACITY LEVER: keep every 8th recurrent-state
+#     snapshot, 0.417x the stored bytes. What is served stays EXACT; the cost is
+#     that a hit rounds down to a 13,184-token boundary (see the limitations at
+#     the top of this file). Set 1 to store every snapshot at 2.4x the bytes.
 export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-8}"
 
 # (e) fs fanout. EXPERIMENTAL (KVOFF_MINIMAL=0) only. Splits one promotion across up to N parallel read tasks
 #     (upstream does one task per job). Ported from PR #49225. It splits the
-#     work exactly 8 ways as designed -- and the disk still gives ~117 MB/s
-#     either way, because this device is the limit, not the concurrency. Kept
+#     work exactly 8 ways as designed -- and measured no faster either way,
+#     because this device is the limit, not the concurrency. Kept
 #     because it is correct and free, not because it measured a win.
 #     Set KVOFF_FS_FANOUT_MAX=1 to restore upstream exactly without unpatching.
 export KVOFF_FS_FANOUT_MB="${KVOFF_FS_FANOUT_MB:-256}"
@@ -423,7 +427,7 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 #     eviction-to-reuse, prefill stall) that `tools/tierreport.py` reads to
 #     answer "is my RAM the right size, is my disk too slow, is this cache
 #     worth running at all". It NEEDS (f) applied first -- it wraps the same
-#     call sites -- so it is last in the apply order. Everything it emits is a
+#     call sites -- so it follows it in the apply order. Everything it emits is a
 #     counter or a histogram, never a gauge, because the report is scraped once
 #     from a long-lived server: an instantaneous level carries no information
 #     after three weeks of uptime.
@@ -476,7 +480,7 @@ if [[ -n "${KVOFF_DISK:-}" ]]; then
     echo "[kvcache] *** WARNING: fs tier is ON but kvcache-reap.timer is not enabled." >&2
     echo "[kvcache]     This tier NEVER deletes on its own. Without the reaper, $KVOFF_DISK" >&2
     echo "[kvcache]     fills until the filesystem is full. Install it with:" >&2
-    echo "[kvcache]       sudo cp $HERE/../kvcache-reap.{service,timer} /etc/systemd/system/" >&2
+    echo "[kvcache]       sudo cp $HERE/kv-cache/ops/kvcache-reap.{service,timer} /etc/systemd/system/" >&2
     echo "[kvcache]       sudo systemctl daemon-reload" >&2
     echo "[kvcache]       sudo systemctl enable --now kvcache-reap.timer" >&2
   fi

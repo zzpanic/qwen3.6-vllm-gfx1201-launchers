@@ -1,6 +1,6 @@
 # Setup and tools
 
-Everything here assumes the launcher from the repository root. Each change says how to verify it
+Every command here runs from the repository root. Each change says how to verify it
 and how to undo it.
 
 There are two builds (see the README): the **default**, GPU → RAM with three patches, and the
@@ -11,8 +11,8 @@ Sections marked *experimental* do not apply to the default.
 
 - One AMD gfx1201 card (R9700, 32 GB), ROCm, podman or docker.
 - `/dev/shm` **larger than the RAM tier**. The tier is a shared-memory region; if `/dev/shm` cannot
-  hold it the boot dies with no log line at all. The kernel default is half of RAM, which is usually
-  too small.
+  hold it the boot dies with no log line at all. The kernel default is half of RAM; check it against
+  the tier size below.
 - *Experimental only:* a filesystem for the disk tier. Ordinary SATA SSD is fine — the tier reads
   at 228 MB/s and is device-bound, so a faster disk helps and a slower one is the limit.
 
@@ -61,7 +61,9 @@ experimental build**, or the filesystem fills. The default build has no disk tie
 need it.
 
 ```bash
-sudo cp ops/kvcache-reap.{sh,service,timer} /etc/systemd/system/   # .sh to /usr/local/bin
+sudo cp kv-cache/ops/kvcache-reap.sh /usr/local/bin/
+sudo cp kv-cache/ops/kvcache-reap.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now kvcache-reap.timer
 systemctl is-enabled kvcache-reap.timer          # want: enabled
 ```
@@ -84,7 +86,7 @@ KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh            # serve, expe
 | `KVCACHE_TIER_GIB` | RAM tier, GiB. `auto` (default) applies the sizing rule above |
 | `KVCACHE_DISK` | disk tier path. Defaults to `/kvcache` on the experimental build, unset on the default |
 
-Confirm it came up — the first `[kvcache]` line names the build and the tier size:
+Confirm it came up — the `[kvcache]` lines name the build and the tier size:
 ```bash
 sudo journalctl -u llama-swap --since "10 min ago" --no-pager | grep -E '\[kvcache\]|kv-offload'
 ```
@@ -99,7 +101,7 @@ cold.
 reads only metrics upstream vLLM exports:
 
 ```bash
-watch -n 5 python3 tools/kvwatch.py
+watch -n 5 python3 kv-cache/tools/kvwatch.py
 ```
 
 GPU and offload-tier hit rates (lifetime and since the last refresh — read the second), load/store
@@ -111,11 +113,13 @@ skipped without it. The first refresh shows no rates — it has nothing to diffe
 **`tools/kvvalidate.py`** — *experimental build.* Read-only, stdlib-only, no GPU, one HTTP read.
 Against a live busy endpoint it re-establishes five invariants, **names the regime you are in
 before you draw a conclusion**, and marks every performance figure `SOLID`, `REGIME` or
-`UNRESOLVED`. On the default build the counters it reads do not exist.
+`UNRESOLVED`. **Do not run it against the default build:** the counters it compares are not
+exported there, so it reads them as zero and reports FAILs (`cpu_equals_external`,
+`disk_vs_engine`) that are not real.
 
 ```bash
-python3 tools/kvvalidate.py                      # text
-python3 tools/kvvalidate.py --json               # machine-readable, severity per invariant
+python3 kv-cache/tools/kvvalidate.py             # text
+python3 kv-cache/tools/kvvalidate.py --json      # machine-readable, severity per invariant
 ```
 
 One thing it will tell you that looks alarming and is not: a freshly booted engine reports the
@@ -136,8 +140,8 @@ correctness gates. CT5 is a negative control and gates the rest; nothing else ru
 deliberately corrupted output is correctly flagged.
 
 ```bash
-python3 bench/correctbench.py --test ct5 --yes    # ~6 s, no GPU pressure
-python3 bench/correctbench.py --test all --yes    # ~75 min, pushes real prefills
+python3 kv-cache/bench/correctbench.py --test ct5 --yes    # ~6 s, no GPU pressure
+python3 kv-cache/bench/correctbench.py --test all --yes    # ~75 min, pushes real prefills
 ```
 
 **Run correctness on a quiet card.** A single co-tenant request is enough to flip a near-tie token

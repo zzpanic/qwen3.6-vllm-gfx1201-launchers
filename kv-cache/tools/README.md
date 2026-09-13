@@ -1,7 +1,7 @@
 # kvwatch.py -- watch the cache work (either build)
 
 ```
-watch -n 5 python3 tools/kvwatch.py
+watch -n 5 python3 kv-cache/tools/kvwatch.py      # from the repository root
 ```
 
 One screen, refreshed every 5 s: GPU and offload-tier prefix-cache hit rates
@@ -15,7 +15,10 @@ directly (the per-request table needs llama-swap and is skipped without it). The
 first refresh prints no rates -- it has nothing to difference against yet.
 
 The two tools below need the **experimental** build (`KVCACHE_EXPERIMENTAL=1`):
-the counters they read are added by its instrumentation patches.
+the counters they read are added by its instrumentation patches. Do not run
+`kvvalidate.py` against the default build -- it still runs, but reads the missing
+counters as zero and reports FAILs (`cpu_equals_external`, `disk_vs_engine`) that
+are not real.
 
 # tierreport.py -- justify the size and speed of each cache tier
 

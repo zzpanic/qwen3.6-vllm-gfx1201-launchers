@@ -1,33 +1,22 @@
-# /etc/fstab additions for the KV offload tiers. Both are preconditions, not tuning.
+# /etc/fstab lines for the KV offload tiers. Preconditions, not tuning.
 
-# 1. /dev/shm holds the CPU primary tier (--kv-offloading-size). The kernel default
-#    is 50% of RAM = 15.67 GiB on the 31.34 GiB VM, which is BELOW the 16 GiB the
-#    27b entry asks for. The region is pre-faulted, so an overshoot fails the boot
-#    with no log line. 20G leaves margin above the 16 GiB tier.
-tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=20G 0 0
-
-# 1a. AFTER THE +8 GB UPGRADE (planned 2026-09-08, 32 GB -> 40 GB), replace the line
-#     above with:
+# 1. /dev/shm holds the RAM tier (--kv-offloading-size). NEEDED BY BOTH BUILDS.
+#    Size the tier first (docs/SETUP.md -> Sizing: at least 2x the smaller of the GPU
+#    KV pool and max-model-len, in tokens, at the offloaded bytes/token), then make
+#    /dev/shm a few GiB larger. The kernel default is 50% of RAM, which is often below
+#    the tier.
 #
-#       tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=28G 0 0
-#
-#     and raise the tier in config.yaml to "--kv-offloading-size 24".
-#     The arithmetic, from `free -m` on 2026-09-08 with the 16 GiB tier resident:
-#       total 32090 MB, used 22687, of which shared (the tier) 16728
-#       => everything that is NOT the tier uses ~5960 MB.
-#     On 40 GB: 39.2 GiB usable - 6 GiB other - 24 GiB tier = ~9 GiB headroom, which
-#     is roughly what the box runs with today. The tier is the only cache tier that
-#     beats recompute (11+ GB/s vs the fs tier's 1.16x), so spare RAM belongs here.
-#     Capacity at the measured 33,808 B/token: 508k -> 762k tokens, ~13 -> ~20 prompts
-#     of 34k. Keep shm 4 GiB above the tier: the region is pre-faulted and the launcher
-#     only requires tier+0.25, which is too thin to absorb other /dev/shm users.
-#     DO NOT raise the tier without raising shm first -- an overshoot fails the START
-#     with no log line. Verify with statvfs, never df:
-#       python3 -c "import os;s=os.statvfs('/dev/shm');print(s.f_blocks*s.f_frsize/2**30)"
+#    On the author's box: MAXLEN 204,800 -> 2 x 204,800 x 61,440 B = 23.4 GiB -> a
+#    24 GiB tier, on a 40 GB guest, with /dev/shm at 28G. The region is pre-faulted, so
+#    a tier that does not fit fails the START with no log line -- the launcher's
+#    KVCACHE_TIER_GIB=auto checks this and disables offload rather than try.
+#    Verify with statvfs, never df (df rounds a tmpfs UP):
+#      python3 -c "import os;s=os.statvfs('/dev/shm');print(s.f_blocks*s.f_frsize/2**30)"
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=28G 0 0
 
-# 2. The 512 GB zvol dpool/virtual/llama-cache, holding the fs secondary tier.
-#    BY LABEL, NOT BY DEVICE: attaching this zvol renamed the root disk vda -> vdb
-#    on the 2026-09-07 reboot. A /dev/vdX line here would be a future unbootable box.
-#    noatime: the reaper keys on mtime, so atime buys nothing and costs a write per
-#    read on the array. nofail: a detached disk must not wedge the boot.
+# 2. EXPERIMENTAL BUILD ONLY: a dedicated filesystem for the disk tier.
+#    BY LABEL, NOT BY DEVICE: attaching a second virtual disk can rename the root disk
+#    (vda -> vdb here on 2026-09-07), and a /dev/vdX line would then be an unbootable box.
+#    noatime: the reaper keys on mtime, so atime buys nothing and costs a write per read.
+#    nofail: a detached disk must not wedge the boot.
 LABEL=kvcache /kvcache ext4 noatime,nodiratime,nofail 0 2
