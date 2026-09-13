@@ -114,8 +114,11 @@ def main():
 
     G = lambda k: (v(k) or 0.0)
 
+    # llama-swap URLs name the entry; a direct engine URL has only host:port.
+    label = (METRICS.split("/upstream/")[1].split("/")[0] if "/upstream/" in METRICS
+             else METRICS.split("://")[-1].split("/")[0])
     print("KV CACHE  %s     %s   %s" % (
-        METRICS.split("/upstream/")[-1].split("/")[0],
+        label,
         time.strftime("%H:%M:%S"),
         ("delta over %.0fs" % dt) if dt and dt > 0.5 else "delta: first sample"))
     print("  running %-3.0f waiting %-3.0f  pool %5.1f%%  preemptions %-5.0f" % (
