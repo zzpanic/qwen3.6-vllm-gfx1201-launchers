@@ -1,3 +1,22 @@
+# kvwatch.py -- watch the cache work (either build)
+
+```
+watch -n 5 python3 tools/kvwatch.py
+```
+
+One screen, refreshed every 5 s: GPU and offload-tier prefix-cache hit rates
+(lifetime, and since the last refresh -- read the second), bytes the tier loaded
+and stored, and the last few requests with how much of each was cached. Read-only.
+
+It reads only metrics upstream vLLM exports, so it is the one tool here that works
+on the **default** build. It reads the `qwen3.8-27b-kvcache` entry through llama-swap
+on `:1234`; set `KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` to read vLLM
+directly (the per-request table needs llama-swap and is skipped without it). The
+first refresh prints no rates -- it has nothing to difference against yet.
+
+The two tools below need the **experimental** build (`KVCACHE_EXPERIMENTAL=1`):
+the counters they read are added by its instrumentation patches.
+
 # tierreport.py -- justify the size and speed of each cache tier
 
 ```

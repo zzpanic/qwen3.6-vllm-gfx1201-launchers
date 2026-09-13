@@ -1,24 +1,47 @@
-# Three-tier KV-cache offload for a GDN hybrid on a single AMD card
+# KV-cache offload for a GDN hybrid on a single AMD card
 
-**GPU → RAM → disk KV-cache offload for Qwen3.8-27B** (Gated-DeltaNet hybrid, MXFP4 weights,
-FP8 KV), served by vLLM 0.27.1 / radiance 0.9.3 on one **AMD Radeon AI PRO R9700**
-(gfx1201 / RDNA4, 32 GB, TP=1), at a 204,800-token context.
+**GPU → RAM KV-cache offload for Qwen3.8-27B** (Gated-DeltaNet hybrid, MXFP4 weights, FP8 KV),
+served by vLLM 0.27.1 / radiance 0.9.3 on one **AMD Radeon AI PRO R9700** (gfx1201 / RDNA4,
+32 GB, TP=1), at a 204,800-token context. A third tier on disk is available as an experimental
+build.
 
 On one card, **the cheapest prefill is the one you do not do.** Run two agents and the second
 evicts the first, which then re-prefills its whole prefix — tens of thousands of tokens, ~45 s
-of wall clock during which the card belongs to nobody. This caches that prefix in RAM and on
-disk so the turn starts immediately.
+of wall clock during which the card belongs to nobody. This caches that prefix in system RAM so
+the turn starts immediately.
 
 As far as we can tell this is **the only hybrid KV offload that runs on RDNA4**. LMCache ships
 its ROCm build for Instinct only (gfx942/gfx950) and its tracker has no RDNA issues.
 
+## Two builds — use the default
+
+| | **default (recommended)** | experimental |
+|---|---|---|
+| select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
+| tiers | GPU → RAM | GPU → RAM → disk |
+| house patches | 3 behavioural: mixed-hit, eagle-groups, mamba-stride | those 3 + the instrumentation set + fs fanout |
+| needs | `/dev/shm` sized for the RAM tier | that, plus a dedicated filesystem and the **reaper** |
+| observability | upstream only — `external_prefix_cache_hits/queries`, `kv_offload_store_bytes`: *whether* the tier serves | + per-tier counters, `tools/kvvalidate.py`, `tools/tierreport.py`: *why* it did or did not |
+
+The default is the patch set the author's own production entry runs. It is small on purpose: the
+three patches are the ones that change what gets served, and every one of them is needed for
+correctness or capacity on this model. The experimental build adds everything that was needed to
+*find* those three. On ordinary storage the disk tier serves at roughly break-even with a
+recompute, and it needs an external garbage collector because vLLM's fs tier never deletes. Turn
+it on if you want to work on the tier, not to get a faster cache.
+
 ## What you can expect
 
-Measured over **31.9M prompt tokens** of real agent coding work — 2–3 agents on one card, ~14 h.
-**These are from one specific saturated run, and a fresh boot will not reproduce them**: the disk
-tier cannot serve until the RAM tier fills, so for roughly the first 45 minutes the numbers look
-far worse. That run's raw `/metrics` ships in `examples/`, so the figures below are checkable even
-though they are not re-derivable on demand:
+The RAM tier reads at **337,408 tok/s (11.8 GB/s)** — against a recompute, a hit is effectively
+free. That rate does not depend on workload, and it is the same in both builds.
+
+**The floor:** a prefix under **13,184 tokens** gets no external hit at all — the recurrent-state
+snapshots are kept every 8th chunk, and a shorter prefix never reaches one. If your prefixes are
+below ~13K tokens this will not help you.
+
+The one long measured run was on the **experimental** build: **31.9M prompt tokens** of real agent
+coding work, 2–3 agents on one card, ~14 h. It is a single saturated run, and a fresh boot will not
+reproduce it:
 
 | | share of prompt tokens |
 |---|---|
@@ -27,33 +50,22 @@ though they are not re-derivable on demand:
 | **served without recompute** | **82.0%** |
 | recomputed | 18.0% |
 
-Reproduce this exact report yourself — the snapshot it came from ships with the repo:
+Its raw `/metrics` ships in `examples/`, so the report is checkable without the hardware:
 
 ```bash
 python3 tools/kvvalidate.py --markdown --metrics-file examples/metrics-snapshot-20260912.txt
 ```
 
-The full output is [`examples/EXAMPLE-REPORT.md`](examples/EXAMPLE-REPORT.md).
-
-Tier read rates, which do not depend on workload:
-
-| tier | token rate | bandwidth | note |
-|---|---|---|---|
-| RAM | 337,408 tok/s | 11.8 GB/s | effectively free against a recompute |
-| disk | 3,868 tok/s | 228 MB/s | device-bound (5.3% wait), ordinary SATA SSD |
-
-**The floor:** a prefix under **13,184 tokens** gets no external hit at all — the recurrent-state
-snapshots are kept every 8th chunk, and a shorter prefix never reaches one. If your prefixes are
-below ~13K tokens this will not help you.
-
-**Not tuned.** Prefill throughput against the disk tier is unresolved between 0.52× and 2.08× of
-recompute; the RAM tier is unambiguous at ~45× the worst-case prefill. Treat disk as insurance
-against eviction, RAM as the tier that pays.
+The full output is [`examples/EXAMPLE-REPORT.md`](examples/EXAMPLE-REPORT.md). The same run's disk
+tier read at 3,868 tok/s (228 MB/s, device-bound, ordinary SATA SSD), and prefill against it is
+unresolved between 0.52× and 2.08× of recompute. The default build has no equivalent report,
+because the counters that produce it are among the patches it leaves out.
 
 ## Correctness
 
 Exactness was the design requirement, and it is tested rather than asserted. `bench/correctbench.py`
-runs six gates against a live endpoint:
+runs six gates against a live endpoint. It exercises the disk tier, so it runs against the
+experimental build, whose patches are a superset of the default's:
 
 - **CT5** — negative control. Deliberately mutated output *must* be flagged, identical output must
   not. Nothing else runs unless this passes, because a suite that has never failed is untested.
@@ -64,9 +76,9 @@ runs six gates against a live endpoint:
 - **CT4** — boundary sweep across chunk edges (±1 token), the case most likely to hide a defect.
 - **CT6** — measures the recurrent-stride store against cold recompute at nine prefix lengths.
 
-Last run, on the shipped stack: **CT1, CT2, CT5 PASS. CT4 bit-identical on all 11 uncontended
-probes. CT6 `max|dlogprob| = 0.0` at all nine lengths**, non-boundary included — the stride
-truncates how far back a hit reaches, it does not approximate the state it returns.
+Last run: **CT1, CT2, CT5 PASS. CT4 bit-identical on all 11 uncontended probes. CT6
+`max|dlogprob| = 0.0` at all nine lengths**, non-boundary included — the stride truncates how far
+back a hit reaches, it does not approximate the state it returns.
 
 **CT3 and CT4 both reported FAIL in that run, and both were contention.** CT4's three failing
 offsets are each tagged `contended=True` while all eleven uncontended probes are bit-identical.
@@ -85,37 +97,62 @@ can only create a spurious divergence — never hide a real one. Judge on uncont
 
 ## Sizing
 
-Both numbers are model-specific; derive yours as shown in [`docs/SETUP.md`](docs/SETUP.md). Here:
+**One rule: the RAM tier holds at least 2× the smaller of the GPU KV pool and max-model-len**, both
+in tokens. The GPU pool is the `GPU KV cache size` line in the boot log; Qwen3.8's max-model-len
+tops out at 262,144.
 
-- on-GPU pool **40,652 B/token**, offload **61,440 B/token** (offload costs 1.51× per token)
-- one 204,800-token context = **8.33 GB** on-chip, **12.58 GB** offloaded
+| smaller of GPU pool and max-model-len | RAM tier, at least | at 61,440 B/token |
+|---|---|---|
+| 100k | 200k tokens | 11.4 GiB |
+| 200k | 400k tokens | 22.9 GiB |
+| 262,144 (e.g. a 300k pool at Qwen3.8's max) | 524,288 tokens | 30.0 GiB |
 
-Size the RAM tier at **(concurrent agents + 1) × context × 61,440 B**, the `+1` being the staging
-slot a promotion needs. Ours is 24 GiB — 2.05 full contexts, which fits two agents and not a third
-— and leave ~15 GB of system RAM for the engine, drafter and working set. Disk is cheap: give it
-what you can. At a 32K context the whole thing is ~2 GB and you probably do not need this.
+Convert at the *offloaded* bytes per token, which is not the GPU's: 61,440 B here, against 40,652 B
+on-chip. Both are model-specific; [`docs/SETUP.md`](docs/SETUP.md) shows how to derive yours.
+
+**You do not have to do this by hand.** The launcher's default, `KVCACHE_TIER_GIB=auto`, computes
+the minimum from `MAXLEN` and `KV_MEM` — on this stack 2 × 204,800 × 61,440 B = 23.4 GiB, so 24 GiB
+— and checks it against `/dev/shm` and system RAM, keeping 15 GiB back for the engine, drafter and
+OS. **If the minimum does not fit, offload is disabled for that boot and the log says why.** Set
+`KVCACHE_TIER_GIB=<GiB>` to override.
 
 ## Getting started
 
 ```bash
 git clone https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers
 cd qwen3.6-vllm-gfx1201-launchers
-DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh     # prints the container command, runs nothing
+DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh                         # default build; prints the command, runs nothing
+DRY_RUN=1 KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh  # experimental build, same
 ```
 
-If that prints a sane command the launcher is wired correctly. Then read
-[`docs/SETUP.md`](docs/SETUP.md) — prerequisites, the reaper (**required**, not advisory: without
-it the disk tier grows without bound), sizing, the tools, and how to read the metrics without
-falling into the two traps that cost this project the most time.
+If that prints a sane command the launcher is wired correctly; the boot log's `[kvcache]` lines
+name the build and the tier size. Once it is serving, watch the cache work — this reads only
+upstream metrics, so it works on both builds:
 
-To check a running system, `python3 tools/kvvalidate.py` re-establishes five invariants against a
-live busy endpoint, names which regime you are in before you draw a conclusion, and marks every
-performance figure `SOLID`, `REGIME` or `UNRESOLVED`. It is read-only and stdlib-only. It will warn
-about a small gap in vLLM's own lookup accounting; that is an engine defect, not your setup.
+```bash
+watch -n 5 python3 kv-cache/tools/kvwatch.py
+```
+
+It shows GPU and offload-tier hit rates since the last refresh, the bytes the tier loaded and
+stored, and the last few requests with how much of each was cached.
+
+Then read [`docs/SETUP.md`](docs/SETUP.md) — prerequisites, sizing, and for
+the experimental build the reaper (**required**, not advisory: without it the disk tier grows
+without bound), the tools, and how to read the metrics without falling into the two traps that
+cost this project the most time.
+
+On the experimental build, `python3 tools/kvvalidate.py` checks a running system: it
+re-establishes five invariants against a live busy endpoint, names which regime you are in before
+you draw a conclusion, and marks every performance figure `SOLID`, `REGIME` or `UNRESOLVED`. It is
+read-only and stdlib-only. Its `lookup_partition` check is the one to watch: the engine's six
+terminal lookup buckets must sum to `lookup_calls` exactly, and any drift means a lookup exited
+without recording an outcome — so every rate below it is a lower bound until you find the exit.
+On the default build it has nothing to read.
 
 ## What this is
 
-Nine anchored patches against vLLM 0.27.1 + radiance 0.9.3, applied at container start — see
+Anchored patches against vLLM 0.27.1 + radiance 0.9.3, applied at container start: three in the
+default build, the full set in the experimental one — see
 [`patches/APPLY-ORDER.txt`](patches/APPLY-ORDER.txt). It is a working, correct, unoptimised
 implementation, not a proof of concept, and the intended destination is upstream vLLM: check each
 patch against current HEAD and drop it wherever upstream has since implemented it.
@@ -126,4 +163,5 @@ things this project got wrong on the way.
 
 **Author:** zzpanic — [github.com/zzpanic](https://github.com/zzpanic). Reproductions on other
 hardware are wanted more than anything else here: if you run this on a different card, please open
-an issue with `tools/kvvalidate.py` output.
+an issue with your boot log's `[kvcache]` lines and the `External prefix cache hit rate` it reaches
+— or, on the experimental build, `tools/kvvalidate.py` output.

@@ -1,15 +1,18 @@
 # Example: what a working cache looks like
 
-A real report from this box, over ~14 hours of agent coding work on one R9700 — the run every
-figure in the README comes from. The raw `/metrics` snapshot it was generated from ships beside
-it as [`metrics-snapshot-20260912.txt`](metrics-snapshot-20260912.txt), so you can reproduce this
-exact output without the hardware:
+A real report from this box, over ~14 hours of agent coding work on one R9700, on the
+**experimental** build (GPU → RAM → disk, instrumented) — the run the README's prompt-token shares
+come from. The raw `/metrics` snapshot it was generated from ships beside it as
+[`metrics-snapshot-20260912.txt`](metrics-snapshot-20260912.txt), so you can reproduce this exact
+output without the hardware:
 
 ```bash
 python3 tools/kvvalidate.py --markdown --metrics-file examples/metrics-snapshot-20260912.txt
 ```
 
-Run it against your own endpoint with `python3 tools/kvvalidate.py --markdown` and compare.
+Run it against your own endpoint with `python3 tools/kvvalidate.py --markdown` and compare. That
+needs the experimental build too: on the default build the counters it reads are not exported, and
+`watch -n 5 python3 tools/kvwatch.py` is the view to use instead.
 
 > **Read the regime line first.** This report says `saturated` — the RAM tier is full and the disk
 > tier is serving. A freshly booted engine reports a warm-up regime instead, where the disk tier
@@ -19,17 +22,19 @@ Run it against your own endpoint with `python3 tools/kvvalidate.py --markdown` a
 
 ---
 
-## KV-cache offload report — PASS
+## KV-cache offload report — PASS (2 checks not run — no data)
 
-`2026-09-12T11:02:56+1000` · regime **saturated** (running 1.0, waiting 0.0)
+`2026-09-12T17:41:36+1000` · regime **saturated** (running 1.0, waiting 0.0)
 
 ### Invariants
 
 | | check | result |
 |---|---|---|
-| PASS | `lookup_partition` | served 7686 + zero_hit 429 + short_window 4012 + deferred 273208 = 285335 vs lookup_calls 285365 (drift +30, bound 32 for 1 active) |
+| PASS | `lookup_partition` | served 7686 + zero_hit 429 + short_window 4012 + short_result 0 + deferred_backend 273208 + deferred_loading 30 = 285365 vs lookup_calls 285365 (drift +0, bound 32 for 1 active) |
 | PASS | `cpu_equals_external` | cpu_hit_tokens 5570240 == external_kv_transfer 5570240  (external_prefix_cache_hits=5570240) (drift +0, bound 4096 for 1 active) |
 | PASS | `promotion_refused` | refused 0 (metric absent = 0) / initiated 5423  [no_evictable=0, protected=0] |
+| UNKNOWN | `disk_vs_engine` | not run: metrics were read from a saved snapshot, so the on-disk store it describes is not the live filesystem |
+| UNKNOWN | `group_ratio` | not run: metrics were read from a saved snapshot, so the on-disk store it describes is not the live filesystem |
 
 ### Where prompt tokens came from
 
@@ -48,8 +53,8 @@ Markers: `SOLID` directly measured · `REGIME` depends on the cache's current st
 
 | tier | token rate | bandwidth | |
 |---|---:|---:|---|
-| fs | 3,868 tok/s | 228.1 MB/s | `SOLID` |
-| cpu | 337,408 tok/s | 11,834.1 MB/s | `SOLID` |
+| fs | 3,868 tok/s | 228 MB/s | `SOLID` |
+| cpu | 337,408 tok/s | 11,834 MB/s | `SOLID` |
 
 _as a request sees it (submit->complete, includes the wait)_
 
@@ -59,4 +64,4 @@ _as a request sees it (submit->complete, includes the wait)_
 
 ---
 
-Produced by `tools/kvvalidate.py --markdown --metrics-file metrics-snapshot-20260912.txt` — a saved `/metrics` snapshot, so the two on-disk invariants are not part of this report.
+Produced by `tools/kvvalidate.py --markdown --metrics-file metrics-snapshot-20260912.txt` — a saved `/metrics` snapshot, so the two on-disk invariants are reported as not run.

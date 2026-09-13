@@ -1,8 +1,9 @@
 # Operations files
 
-## The reaper is MANDATORY, not optional
+## The reaper is MANDATORY for the experimental disk tier
 
-The fs (disk) tier writes and **never deletes**: `tiering/fs/manager.py` has no
+The default build has no disk tier and needs none of this section. With
+`KVCACHE_EXPERIMENTAL=1` (or any `KVCACHE_DISK`), the fs tier writes and **never deletes**: `tiering/fs/manager.py` has no
 capacity, quota or TTL parameter and exposes no eviction hook. Without an
 external reaper the filesystem fills until it is full.
 
@@ -15,9 +16,13 @@ external reaper the filesystem fills until it is full.
 that is in flight kills EngineCore outright — there is no load-failure recovery
 path in this connector. Never lower it; never hand-delete a young block.
 
-## After every reload: check the patches actually took
+## After every reload: check it is serving
 
-    python3 ../tools/kvvalidate.py      # confirms the patches are live and serving
+    watch -n 5 python3 ../tools/kvwatch.py   # either build: hit rates and bytes moved
+    python3 ../tools/kvvalidate.py           # experimental build: the patches are live
+
+The default build's boot log names what it applied (`[kvcache]` lines, then one
+`[radiance]` warning per patch that did not apply).
 
 Read-only, about a second. The patches are applied at container start from the
 mounted source directory, so a stale mount, a failed hunk or a launcher that
@@ -28,6 +33,6 @@ copies on the host, because those are the ones that can disagree.
 
 ## The mounts
 
-`etc-fstab-snippets/` holds the `/dev/shm` and cache-filesystem lines, with the
-sizing arithmetic in comments. Sizing procedure and the OOM cliff are in
-`docs/SETUP.md` §2 and §3 — read §3.0 before enlarging the tier.
+`etc-fstab-snippets/` holds the `/dev/shm` and cache-filesystem lines. The sizing
+rule is in `docs/SETUP.md` → Sizing; only the `/dev/shm` line is needed by the
+default build.

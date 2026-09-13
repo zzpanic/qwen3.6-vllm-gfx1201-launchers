@@ -22,16 +22,37 @@ docstring):
     chunk/token hit counters: those are per-lookup-attempt and repeat on every
     scheduler step (decode inflation), so a high chunk-hit number says nothing
     about real work.
-  * Never print a derived quantity as a finding when it is an algebraic identity
-    of the measured ones. Every invariant below is checked against independently
-    incremented sources, so a hold is a real result, not a tautology.
+   * Never print a derived quantity as a finding when it is an algebraic identity
+     of the measured ones. Every invariant below is checked against independently
+     incremented sources, so a hold is a real result, not a tautology.
+   * A counter that has never been incremented is never exported by the engine.
+     An absent line therefore means 0, NOT "broken", and a check that has no
+     data to measure is UNKNOWN, not FAILED. Absence must never read as a fault.
+
+The three result states (per check and for the whole run):
+    PASS    -- the invariant held.
+    WARN    -- vLLM's own accounting is incomplete, but the cache is serving
+              correctly; a downstream user must not be told FAIL for something
+              that costs them nothing. Never fails the run.
+    FAIL    -- the cache is doing something wrong; the result cannot be trusted.
+    UNKNOWN -- the check could not run for want of data: the counter has not
+              incremented, the on-disk store is empty, or the input is a saved
+              snapshot. Neither pass nor fail; reported, and never read as a fault.
 
 Usage:
     kvvalidate.py [--metrics-url URL] [--fs-path DIR] [--history FILE]
-                 [--stride N] [--expected-active N] [--engine-pid PID] [--json]
+                  [--stride N] [--expected-active N] [--engine-pid PID] [--json]
+                  [--strict-exit]
 
-Exit 0 when all five invariants hold (warnings do not affect the exit code);
-exit 1 when any invariant fails.
+Exit status (the contract a script acts on):
+    0  -- no invariant failed. Includes the PASS-with-warnings and UNKNOWN
+         (pending) cases: a healthy freshly-booted engine is 0, never 1. This
+         is the default, so a monitor does not "cry wolf" on a cold boot.
+    1  -- at least one invariant FAILED. A real fault is always 1, and an UNKNOWN
+         (no-data) check never softens it: if anything failed, the run is 1.
+    2  -- only with --strict-exit: nothing failed but some checks are UNKNOWN
+         (no data yet). Lets a re-polling script distinguish "not broken" (0) from
+         "broken" (1) from "re-run later" (2). Without the flag, pending is 0.
 """
 
 import argparse
@@ -115,23 +136,40 @@ def get(m, name, **labels):
 # trap(s) it guards.
 # --------------------------------------------------------------------------- #
 def inv_lookup_partition(m):
-    """The lookup outcome counters partition `lookup_calls` exactly.
+    """The six terminal lookup-outcome counters partition `lookup_calls` exactly.
 
-    `served`, `zero_hit`, `short_window` and `deferred` are independently
-    incremented counters; their sum equaling `lookup_calls` is a real check, not
-    an identity. NOTE: `lookup_chunk_hit_total` is per-CHUNK (decode-inflated)
-    and is deliberately NOT part of this partition.
+    `_lookup` has exactly six exits, each incrementing one counter: SERVED,
+    SKIP_ZERO_HIT, SKIP_SHORT_WINDOW, SKIP_SHORT_RESULT, DEFERRED_BACKEND and
+    DEFERRED_LOADING. They are independently incremented, so their sum equaling
+    `lookup_calls` is a real check, not an identity. NOTE: `lookup_chunk_hit_total`
+    is per-CHUNK (decode-inflated) and is deliberately NOT part of this partition.
+
+    CORRECTION (2026-09-12): this check previously summed only FOUR of the six and
+    reported the shortfall as a constant "+32 drift", described as uninstrumented
+    exits in vLLM's own lookup path. That was wrong -- the missing count was exactly
+    `deferred_loading`, a named bucket this function did not read. Verified against
+    examples/metrics-snapshot-20260912.txt: 7,686 + 429 + 4,012 + 273,208 + 30 =
+    285,365 = lookup_calls, drift 0.0. The engine's accounting is exact; the gap was
+    the instrument's. `skip_short_result` has never fired on this box, and a counter
+    never incremented is never exported -- which is how the omission stayed hidden.
     """
-    served = get(m, "vllm:kv_offload_lookup_served_total")
-    zero = get(m, "vllm:kv_offload_lookup_skip_zero_hit_total")
-    short = get(m, "vllm:kv_offload_lookup_skip_short_window_total")
-    deferred = get(m, "vllm:kv_offload_lookup_deferred_backend_total")
+    served = get(m, "vllm:kv_offload_lookup_served_total") or 0.0
+    zero = get(m, "vllm:kv_offload_lookup_skip_zero_hit_total") or 0.0
+    short = get(m, "vllm:kv_offload_lookup_skip_short_window_total") or 0.0
+    deferred = get(m, "vllm:kv_offload_lookup_deferred_backend_total") or 0.0
+    defer_load = get(m, "vllm:kv_offload_lookup_deferred_loading_total") or 0.0
+    short_res = get(m, "vllm:kv_offload_lookup_skip_short_result_total") or 0.0
     calls = get(m, "vllm:kv_offload_lookup_calls_total")
-    if None in (served, zero, short, deferred, calls):
-        return _fail("lookup_partition", "missing lookup-outcome metric(s)",
-                    {"served": served, "zero_hit": zero, "short_window": short,
-                     "deferred": deferred, "lookup_calls": calls})
-    total = served + zero + short + deferred
+    # Absent outcome buckets are 0 (a never-incremented counter is never exported),
+    # so all six are summed with absent == 0. Only the authority (lookup_calls)
+    # must be present to run the check: it increments first, so if any bucket
+    # fired, the authority is present too. If the authority is absent, no lookups
+    # have been recorded yet -- that is UNKNOWN (no data), not a fault.
+    if calls is None:
+        return _unknown("lookup_partition",
+                       "no lookups recorded yet (lookup_calls has not incremented)",
+                       {"lookup_calls": None})
+    total = served + zero + short + deferred + defer_load + short_res
     # lookup_calls is the authority (it increments first); the partition sum may
     # lag it by a small margin under live traffic (non-atomic scrape). The
     # bound is proportional to in-flight work, not a magic constant. A drift
@@ -142,28 +180,81 @@ def inv_lookup_partition(m):
     # Which DIRECTION the drift goes decides how bad it is.
     #
     #   drift > 0  -- lookup_calls ran ahead of the outcome buckets, i.e. some lookups
-    #                 exited without recording any outcome. Measured on this box as a
-    #                 CONSTANT +32 across repeated scrapes at zero traffic, which rules
-    #                 out the non-atomic-scrape race (a race jitters; a constant cannot).
-    #                 These are real uninstrumented exits in vLLM's lookup path -- a gap
-    #                 in the engine's accounting, not a fault in the operator's cache,
-    #                 and it costs correctness nothing. WARN.
+    #                 exited without recording any outcome. With all six buckets summed
+    #                 this should now be 0 at rest; a CONSTANT positive drift across
+    #                 repeated scrapes at zero traffic rules out the non-atomic-scrape
+    #                 race (a race jitters; a constant cannot) and means a genuinely
+    #                 uninstrumented exit has appeared. It costs correctness nothing,
+    #                 but every miss-rate derived from these buckets is then incomplete
+    #                 by that amount. WARN.
     #
     #   drift < 0  -- the buckets sum to MORE than the calls that produced them, i.e. an
     #                 outcome was counted twice. That is corrupted accounting and every
     #                 rate derived from these counters is then suspect. FAIL.
     severity = "warn" if drift > 0 else "fail"
     detail = (f"served {served:.0f} + zero_hit {zero:.0f} + short_window {short:.0f} "
-              f"+ deferred {deferred:.0f} = {total:.0f} vs lookup_calls {calls:.0f} "
+              f"+ short_result {short_res:.0f} + deferred_backend {deferred:.0f} "
+              f"+ deferred_loading {defer_load:.0f} = {total:.0f} vs lookup_calls {calls:.0f} "
               f"(drift {drift:+.0f}, bound {tol:.0f} for {active:.0f} active)")
     if not ok and drift > 0:
         detail += (f" — {drift:+.0f} lookups recorded no outcome ({drift / calls * 100:.3f}% "
-                   f"of calls); an engine accounting gap, not a cache fault")
+                   f"of calls); a lookup exit with no counter — the buckets below "
+                   f"do not add up to the whole, so treat every rate as a lower bound")
     return _mk("lookup_partition", ok, detail,
                 {"served": served, "zero_hit": zero, "short_window": short,
-                 "deferred": deferred, "lookup_calls": calls, "sum": total,
+                 "short_result": short_res, "deferred_backend": deferred,
+                 "deferred_loading": defer_load, "lookup_calls": calls, "sum": total,
                  "drift": drift, "tolerance": tol, "active": active},
                 marker=marker, severity=severity)
+
+
+def inv_lookup_subpartition(m):
+    """The reason sub-counter sums to its parent (the two miss exits).
+
+    `zero_hit` and `short_result` each increment, on the same event, exactly
+    one reason sub-counter (`unresolved`; the `mandatory` reason is deferred
+    until a tier surfaces a correctness-forced-miss signal). So at rest:
+        zero_hit      == zero_hit_unresolved
+        short_result  == short_result_unresolved
+
+    The parent and a child increment back-to-back in the same `_lookup` call,
+    so a non-atomic scrape can only drift by the in-flight lookups; the bound
+    is proportional to active work (busy_tolerance), exactly like the top
+    partition. Absent sub-counters read as 0 (the absent-counter trap): a
+    counter never incremented is never exported. Pre-patch (the reason
+    sub-counter was never created), an absent `unresolved` with a non-zero
+    parent means the patch is not applied -- the check passes (the parent-only
+    `inv_lookup_partition` is the gate); it does not false-fail on a pre-patch
+    snapshot.
+    """
+    zero = get(m, "vllm:kv_offload_lookup_skip_zero_hit_total") or 0.0
+    short = get(m, "vllm:kv_offload_lookup_skip_short_result_total") or 0.0
+    z_unres = get(m, "vllm:kv_offload_lookup_zero_hit_unresolved_total")
+    s_unres = get(m, "vllm:kv_offload_lookup_short_result_unresolved_total")
+
+    z_suppress = (z_unres is None and zero > 0)
+    s_suppress = (s_unres is None and short > 0)
+    if z_suppress and s_suppress:
+        return _mk("lookup_subpartition", True,
+                   "reason sub-counters absent (pre-patch); pass",
+                   {"zero_hit": zero, "short_result": short}, marker="REGIME")
+    tol, marker, active = busy_tolerance(m, LOOKUP_INFLIGHT_HEADROOM)
+    z_drift = zero - (z_unres or 0.0)
+    s_drift = short - (s_unres or 0.0)
+    ok = (abs(z_drift) <= tol or z_suppress) and \
+         (abs(s_drift) <= tol or s_suppress)
+    detail = (f"zero_hit {zero:.0f} == {z_unres or 0:.0f} "
+              f"(drift {z_drift:+.0f}); short_result {short:.0f} == "
+              f"{s_unres or 0:.0f} (drift {s_drift:+.0f}) "
+              f"(bound {tol:.0f} for {active:.0f} active)")
+    if not ok:
+        detail += (f" \u2014 sub-counter undercounts its parent by "
+                   f"{max(abs(z_drift), abs(s_drift)):.0f}")
+    return _mk("lookup_subpartition", ok, detail,
+               {"zero_hit": zero, "zero_unresolved": z_unres or 0.0,
+                "short_result": short, "short_unresolved": s_unres or 0.0,
+                "zero_drift": z_drift, "short_drift": s_drift,
+                "tolerance": tol, "active": active}, marker=marker)
 
 
 def inv_cpu_equals_external(m):
@@ -179,9 +270,12 @@ def inv_cpu_equals_external(m):
     cpu = get(m, "vllm:kv_offload_tier_hit_tokens_total", tier="cpu")
     ext = get(m, "vllm:prompt_tokens_by_source_total", source="external_kv_transfer")
     xpc = get(m, "vllm:external_prefix_cache_hits_total")
-    if cpu is None or ext is None:
-        return _fail("cpu_equals_external", "missing cpu/external token metric",
-                    {"cpu_hit_tokens": cpu, "external_kv_transfer": ext})
+    # Absent == 0 for both: a never-incremented counter is never exported. On a
+    # fresh boot neither has fired, so this is 0 == 0 -- a true (if vacuous)
+    # hold, not a fault. A present value against an absent one (e.g. cpu 500 vs
+    # ext 0) is a genuine drift and still fails.
+    cpu = 0.0 if cpu is None else cpu
+    ext = 0.0 if ext is None else ext
     # Same non-atomic-scrape hazard as lookup_partition: both counters increment
     # on the same token-served event but are separate metric families, so under
     # live traffic the later-rendered one can lead by the in-flight work.
@@ -216,13 +310,16 @@ def inv_promotion_refused(m):
     noev = get(m, "vllm:kv_offload_promotion_refused_no_evictable_total", tier="fs")
     prot = get(m, "vllm:kv_offload_promotion_refused_protected_total", tier="fs")
     initiated = get(m, "vllm:kv_offload_promotion_initiated_total", tier="fs")
-    if initiated is None:
-        return _fail("promotion_refused", "missing promotion_initiated metric",
-                    {"refused": refused, "initiated": initiated})
+    # Absent == 0: a fresh boot has initiated no promotions, so "0 refusals out
+    # of 0" is a true (if vacuous) hold, not a fault. A non-zero refused count
+    # still fails regardless of initiated.
+    initiated = 0.0 if initiated is None else initiated
     ok = refused == 0
-    note = " (metric absent = 0)" if get(m, "vllm:kv_offload_promotion_refused_total",
-                                        tier="fs") is None else ""
-    detail = (f"refused {refused:.0f}{note} / initiated {initiated:.0f}  "
+    ref_note = " (metric absent = 0)" if get(m, "vllm:kv_offload_promotion_refused_total",
+                                            tier="fs") is None else ""
+    ini_note = " (metric absent = 0)" if get(m, "vllm:kv_offload_promotion_initiated_total",
+                                            tier="fs") is None else ""
+    detail = (f"refused {refused:.0f}{ref_note} / initiated {initiated:.0f}{ini_note}  "
              f"[no_evictable={0.0 if noev is None else noev:.0f}, "
              f"protected={0.0 if prot is None else prot:.0f}]")
     return _mk("promotion_refused", ok, detail,
@@ -271,20 +368,28 @@ def inv_disk_vs_engine(m, fs_path):
     allowance below, which is the pattern the counter invariants copy.
     """
     used = get(m, "vllm:kv_offload_tier_used_bytes", tier="fs")
+    used = 0.0 if used is None else used
     nfiles, nbytes, modal, _ = walk_fs(fs_path)
-    if used is None:
-        return _fail("disk_vs_engine", "missing tier_used_bytes{fs}",
-                    {"on_disk_bytes": nbytes, "files": nfiles, "engine_used": used})
     cross = nfiles * modal
-    ok = abs(nbytes - used) / used < 0.02
-    detail = (f"on-disk {nfiles:,} x {modal:,}B = {nbytes/1e9:.1f} GB "
-             f"vs engine tier_used_bytes {used/1e9:.1f} GB "
-             f"(file_count x block = {cross/1e9:.1f} GB, "
-             f"dev {abs(nbytes-used)/used*100:.2f}%)")
+    # Guard the denominator: an empty tier (used == 0) must agree with an empty
+    # disk, and a non-empty disk against a 0 gauge is a real mismatch. (The old
+    # code divided by `used` unguarded and would crash on a 0 gauge.)
+    if used <= 0:
+        ok = (nbytes == 0)
+        detail = (f"empty tier: on-disk {nfiles:,} files = {nbytes/1e9:.1f} GB vs "
+                 f"engine tier_used_bytes {used/1e9:.1f} GB"
+                 + ("" if ok else "  (disk is not empty but the engine reports 0)"))
+    else:
+        ok = abs(nbytes - used) / used < 0.02
+        detail = (f"on-disk {nfiles:,} x {modal:,}B = {nbytes/1e9:.1f} GB "
+                 f"vs engine tier_used_bytes {used/1e9:.1f} GB "
+                 f"(file_count x block = {cross/1e9:.1f} GB, "
+                 f"dev {abs(nbytes-used)/used*100:.2f}%)")
+    dev_pct = (abs(nbytes - used) / used * 100) if used > 0 else (0.0 if ok else None)
     return _mk("disk_vs_engine", ok, detail,
                {"on_disk_bytes": nbytes, "files": nfiles, "block_bytes": modal,
                 "file_x_block": cross, "engine_used_bytes": used,
-                "deviation_pct": abs(nbytes - used) / used * 100})
+                "deviation_pct": dev_pct})
 
 
 def inv_group_ratio(m, fs_path, stride):
@@ -302,7 +407,9 @@ def inv_group_ratio(m, fs_path, stride):
     """
     nfiles, _nb, _modal, per_group = walk_fs(fs_path)
     if not per_group:
-        return _fail("group_ratio", "no per-group .bin files found", {"groups": per_group})
+        return _unknown("group_ratio",
+                       "no .bin files on disk yet (the fs tier is empty)",
+                       {"groups": per_group})
     dense = max(per_group.values())
     sparse = min(per_group.values())
     ratio = dense / sparse
@@ -412,13 +519,28 @@ def _mk(name, ok, detail, values, marker="SOLID", severity="fail"):
               working?" must not be told FAIL for a defect in the engine's counters
               that costs them nothing. Reserve FAIL for incorrectness.
     """
-    return {"name": name, "pass": bool(ok), "detail": detail, "values": values,
-            "marker": marker, "severity": "fail" if ok else severity}
+    state = "pass" if ok else ("warn" if severity == "warn" else "fail")
+    return {"name": name, "pass": bool(ok), "state": state, "detail": detail,
+            "values": values, "marker": marker,
+            "severity": "fail" if ok else severity}
 
 
 def _fail(name, detail, values):
-    return {"name": name, "pass": False, "detail": f"BLOCKED: {detail}",
-            "values": values, "marker": "UNRESOLVED"}
+    """A check that ran and found a hard defect. (Kept for genuine faults; the
+    absent-metric cases now use _unknown, since absence is not a fault.)"""
+    return {"name": name, "pass": False, "state": "fail",
+            "detail": f"BLOCKED: {detail}", "values": values,
+            "marker": "UNRESOLVED", "severity": "fail"}
+
+
+def _unknown(name, detail, values):
+    """A check that could not run for want of data. Neither pass nor fail: the
+    counter has not incremented, the on-disk store is empty, or the input is a
+    saved snapshot. It is reported (marker UNRESOLVED, state UNKNOWN) and never
+    read as a fault, so a healthy freshly-booted engine does not turn red."""
+    return {"name": name, "pass": False, "state": "unknown",
+            "detail": f"not run: {detail}", "values": values,
+            "marker": "UNRESOLVED", "severity": "fail"}
 
 
 def tier_value_section(m):
@@ -674,8 +796,11 @@ def main():
                          "the divisor for the transfer estimate")
     ap.add_argument("--max-model-len", type=int, default=204800,
                     help="max_model_len, for the full-contexts capacity figure")
-    ap.add_argument("--maxseqs", type=int, default=4,
-                    help="max concurrent prefill sequences, bounds the prefill range")
+    ap.add_argument("--maxseqs", type=int, default=1,
+                    help="max concurrent prefill sequences (the engine max_num_seqs), "
+                         "bounds the prefill range. It is not exported on /metrics, so "
+                         "it must match the running engine -- a value above the truth "
+                         "inflates the prefill upper bound by exactly that factor")
     ap.add_argument("--concurrent-agents", type=int, default=2,
                     help="concurrent agents; the cpu-tier cliff fires below (this+1) contexts")
     ap.add_argument("--json", action="store_true", help="machine output")
@@ -683,8 +808,14 @@ def main():
                     help="markdown report, for pasting into an issue, forum or chat")
     ap.add_argument("--metrics-file", default=None,
                     help="read a saved /metrics snapshot instead of scraping the endpoint. "
-                         "The two invariants that count files on disk are skipped, since the "
-                         "filesystem they describe is not the one the snapshot came from.")
+                         "The two invariants that count files on disk are reported as not run "
+                         "(the filesystem they would walk is the live one, not the one the "
+                         "snapshot came from).")
+    ap.add_argument("--strict-exit", action="store_true",
+                    help="exit 2 when nothing failed but some checks are pending (no data yet), "
+                         "so a re-polling script can distinguish not-broken (0) / broken (1) / "
+                         "re-run-later (2). Default: pending is exit 0 (a cold boot never reads "
+                         "as a fault).")
     a = ap.parse_args()
 
     # auto-search for the history csv
@@ -714,16 +845,34 @@ def main():
 
     invariants = [
         inv_lookup_partition(m),
+        inv_lookup_subpartition(m),
         inv_cpu_equals_external(m),
         inv_promotion_refused(m),
     ]
     if not from_file:
         invariants += [inv_disk_vs_engine(m, a.fs_path),
-                       inv_group_ratio(m, a.fs_path, a.stride)]
-    # A warn-severity violation does not fail the run: the tool's headline answers
-    # "is my cache working?", and an engine accounting gap does not make it not work.
-    hard_fail = [i for i in invariants if not i["pass"] and i.get("severity") != "warn"]
-    soft_warn = [i for i in invariants if not i["pass"] and i.get("severity") == "warn"]
+                        inv_group_ratio(m, a.fs_path, a.stride)]
+    else:
+        # A saved snapshot makes the two on-disk invariants UNRUNNABLE -- the store
+        # they would walk is the live one, which has no relationship to a snapshot
+        # taken elsewhere. They are reported (state UNKNOWN), not silently dropped,
+        # so the reader sees that five checks exist and which two did not run.
+        reason = ("metrics were read from a saved snapshot, so the on-disk store "
+                  "it describes is not the live filesystem")
+        invariants += [_unknown("disk_vs_engine", reason, {}),
+                        _unknown("group_ratio", reason, {})]
+    # Verdict by state: only a hard FAIL fails the run. WARN and UNKNOWN (no data)
+    # never do -- a warn is an accounting defect that costs the user nothing, and
+    # an UNKNOWN check cannot run for want of data, which is not a fault. A real
+    # fault is never softened: if anything failed, status is "fail" regardless of
+    # how many checks are pending.
+    hard_fail = [i for i in invariants if i["state"] == "fail"]
+    soft_warn = [i for i in invariants if i["state"] == "warn"]
+    unknowns  = [i for i in invariants if i["state"] == "unknown"]
+    status = ("fail" if hard_fail
+              else "pending" if unknowns
+              else "warn" if soft_warn
+              else "pass")
     regime, rwarn = detect_regime(m, a.history)
     active, running, waiting, mwarn = detect_multiclient(m, a.expected_active)
     warnings = rwarn + mwarn + [f"{i['name']}: {i['detail']}" for i in soft_warn]
@@ -743,6 +892,9 @@ def main():
 
     result = {
         "ok": all_pass,
+        "status": status,
+        "pending": [i["name"] for i in unknowns],
+        "_strict_exit": bool(a.strict_exit),
         "metrics_file": (os.path.basename(a.metrics_file) if from_file else None),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "elapsed_s": round(time.time() - t0, 2),
@@ -763,17 +915,44 @@ def main():
     }
     if a.markdown:
         return _emit_markdown(result)
-    return _emit(result, a.json, all_pass)
+    return _emit(result, a.json)
 
 
-def _emit(result, as_json, all_pass=True):
+def _tag(i):
+    """The per-check label: PASS / WARN / FAIL / UNKNOWN."""
+    if i.get("state") == "unknown":
+        return "UNKNOWN"
+    if i["pass"]:
+        return "PASS"
+    return "WARN" if i.get("severity") == "warn" else "FAIL"
+
+
+def _exit_code(result):
+    """The script-facing contract: 0 not broken (incl. warnings + pending), 1 broken,
+    2 pending (only with --strict-exit). A real fault is always 1; an UNKNOWN check
+    never demotes a FAIL, and a cold boot (pending) is 0 by default so a monitor
+    does not cry wolf."""
+    st = result.get("status")
+    if st == "fail":
+        return 1
+    if st == "pending" and result.get("_strict_exit"):
+        return 2
+    return 0
+
+
+def _emit(result, as_json):
     if as_json:
         print(json.dumps(result, indent=2, default=str))
     else:
-        okc = "PASS" if result.get("ok") else "FAIL"
-        if result.get("ok") and any(i.get("severity") == "warn" and not i["pass"]
-                                    for i in result.get("invariants", [])):
+        st = result.get("status")
+        if st == "fail":
+            okc = "FAIL"
+        elif st == "pending":
+            okc = f"PASS ({len(result.get('pending', []))} checks not run — no data)"
+        elif st == "warn":
             okc = "PASS (with warnings)"
+        else:
+            okc = "PASS"
         print(f"kvvalidate — {okc}  ({result.get('timestamp')})")
         print(f"  endpoint: {result.get('metrics_url')}")
         print(f"  fs path : {result.get('fs_path')}   engine pid: "
@@ -781,7 +960,7 @@ def _emit(result, as_json, all_pass=True):
         print()
         print("  invariants")
         for i in result.get("invariants", []):
-            tag = "PASS" if i["pass"] else ("WARN" if i.get("severity") == "warn" else "FAIL")
+            tag = _tag(i)
             print(f"    [{tag}][{i.get('marker','SOLID'):<10}] "
                   f"{i['name']:<20} {i['detail']}")
         print()
@@ -805,10 +984,19 @@ def _emit(result, as_json, all_pass=True):
                 print(f"    {k:<22} {v:,.0f}" if v is not None
                       else f"    {k:<22} n/a")
             if sh:
-                print(f"    shares (derived): "
-                      f"local_compute {sh.get('local_compute', 0)*100:.1f}%  "
-                      f"local_cache_hit {sh.get('local_cache_hit', 0)*100:.1f}%  "
-                      f"external_kv_transfer {sh.get('external_kv_transfer', 0)*100:.1f}%")
+                if any(sh.get(k) is None
+                       for k in ("local_compute", "local_cache_hit",
+                                "external_kv_transfer")):
+                    # The total is exported but a per-source counter has not
+                    # incremented yet, so its share is 0 by absence -- not a
+                    # measured 0%. Say n/a rather than print a misleading 0.0%.
+                    print("    shares (derived): n/a (per-source counters not "
+                          "yet exported)")
+                else:
+                    print(f"    shares (derived): "
+                          f"local_compute {sh.get('local_compute')*100:.1f}%  "
+                          f"local_cache_hit {sh.get('local_cache_hit')*100:.1f}%  "
+                          f"external_kv_transfer {sh.get('external_kv_transfer')*100:.1f}%")
         tv = result.get("tier_value", {})
         if tv:
             print("  tier value (judged by load_bytes; wall clock = "
@@ -822,8 +1010,8 @@ def _emit(result, as_json, all_pass=True):
                   f"{tv.get('fs_hit_tokens_decode_inflated') or 0:,.0f} tokens / "
                   f"{tv.get('fs_hit_blocks_decode_inflated') or 0:,.0f} blocks)")
         _emit_performance(result.get("performance", {}),
-                         result.get("config", {}))
-    return 0 if all_pass else 1
+                          result.get("config", {}))
+    return _exit_code(result)
 
 
 def _fmt(v, spec=",.0f"):
@@ -839,10 +1027,15 @@ def _emit_markdown(result):
     the presentation differs. Every confidence marker is preserved, because a figure quoted
     without its marker is exactly the kind of number that gets repeated as fact.
     """
-    ok = result.get("ok")
-    warned = any(i.get("severity") == "warn" and not i["pass"]
-                 for i in result.get("invariants", []))
-    verdict = "PASS" if ok and not warned else ("PASS (with warnings)" if ok else "FAIL")
+    st = result.get("status")
+    if st == "fail":
+        verdict = "FAIL"
+    elif st == "pending":
+        verdict = f"PASS ({len(result.get('pending', []))} checks not run — no data)"
+    elif st == "warn":
+        verdict = "PASS (with warnings)"
+    else:
+        verdict = "PASS"
     out = []
     out.append(f"## KV-cache offload report — {verdict}")
     out.append("")
@@ -854,7 +1047,7 @@ def _emit_markdown(result):
     out.append("| | check | result |")
     out.append("|---|---|---|")
     for i in result.get("invariants", []):
-        tag = "PASS" if i["pass"] else ("WARN" if i.get("severity") == "warn" else "FAIL")
+        tag = _tag(i)
         detail = i["detail"].replace("|", "\\|")
         out.append(f"| {tag} | `{i['name']}` | {detail} |")
     out.append("")
@@ -872,10 +1065,12 @@ def _emit_markdown(result):
                 out.append(f"| {k} | {v:,.0f} | {v / total * 100:.1f}% |")
         out.append(f"| **total** | **{total:,.0f}** | |")
         out.append("")
-        served = total - pt.get("local_compute", 0)
-        out.append(f"**{served / total * 100:.1f}% of prompt tokens served without recomputation.** "
-                   f"A rising `local_cache_hit` share is the GPU cache doing its job, not the tier "
-                   f"failing -- read rates, not shares.")
+        lc = pt.get("local_compute")
+        if isinstance(lc, (int, float)):
+            served = total - lc
+            out.append(f"**{served / total * 100:.1f}% of prompt tokens served without recomputation.** "
+                       f"A rising `local_cache_hit` share is the GPU cache doing its job, not the tier "
+                       f"failing -- read rates, not shares.")
         out.append("")
 
     perf = result.get("performance") or {}
@@ -890,18 +1085,22 @@ def _emit_markdown(result):
             out.append("| tier | token rate | bandwidth | |")
             out.append("|---|---:|---:|---|")
             for r in rs:
-                out.append(f"| {r['tier']} | {r['tok_s']:,.0f} tok/s | {r['mb_s']:,.1f} MB/s "
+                out.append(f"| {r['tier']} | {_fmt(r.get('tok_s'))} tok/s | "
+                           f"{_fmt(r.get('mb_s'))} MB/s "
                            f"| `{r['marker']}` |")
             out.append("")
             out.append(f"_{rs[0].get('label','')}_")
             out.append("")
         bpt = perf.get("bytes_per_token")
         if bpt:
-            out.append(f"- **bytes/token** (measured): fs {bpt['fs']:,.0f} · cpu {bpt['cpu']:,.0f} "
+            out.append(f"- **bytes/token** (measured): fs {_fmt(bpt.get('fs'))} · "
+                       f"cpu {_fmt(bpt.get('cpu'))} "
                        f"`{bpt['marker']}` — this is what the sizing guidance is built on.")
         wd = perf.get("wait_diagnostic")
         if wd:
-            out.append(f"- **wait fraction** {wd['wait_fraction'] * 100:.1f}% of "
+            wf = wd.get("wait_fraction")
+            out.append(f"- **wait fraction** "
+                       f"{(f'{wf*100:.1f}%' if wf is not None else 'n/a')} of "
                        f"{wd['n_read_threads']} read threads `{wd['marker']}` — {wd['advice']}")
         ref = perf.get("latency_histogram_refusal")
         if isinstance(ref, dict) and ref.get("refused"):
@@ -923,12 +1122,12 @@ def _emit_markdown(result):
     if result.get("metrics_file"):
         out.append(f"Produced by `tools/kvvalidate.py --markdown --metrics-file "
                    f"{result['metrics_file']}` — a saved `/metrics` snapshot, so the two "
-                   f"on-disk invariants are not part of this report.")
+                   f"on-disk invariants are reported as not run.")
     else:
         out.append(f"Produced by `tools/kvvalidate.py --markdown` · engine pid "
                    f"`{result.get('engine_pid')}` · fs path `{result.get('fs_path')}`")
     print("\n".join(out))
-    return 0
+    return _exit_code(result)
 
 
 def _emit_performance(p, cfg):

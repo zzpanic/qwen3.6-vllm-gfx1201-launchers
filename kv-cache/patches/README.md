@@ -1,6 +1,16 @@
-# The nine house patches
+# The house patches
 
 These are **not standalone scripts.** Read this before you try to run one.
+
+## Which build applies which
+
+The **default** build applies three: `patch_offload_mixed_hit.py`,
+`patch_kv_offload_eagle_groups.py` and `patch_kv_offload_mamba_stride.py`. They are the
+ones that change what is served — a crash guard plus a cross-prompt correctness fix, the
+draft-group annotation this model needs, and the recurrent-state store stride that makes
+the RAM tier hold enough. Everything else here is instrumentation or fs-tier-only and is
+applied only by the **experimental** build (`KVCACHE_EXPERIMENTAL=1`). `APPLY-ORDER.txt`
+marks the three.
 
 ## What they are
 
@@ -16,7 +26,7 @@ is the intended failure mode, not a bug.
 
 ## They need `_patchlib`
 
-Every one of the nine begins:
+Every `patch_*.py` begins:
 
 ```python
 from _patchlib import apply
@@ -42,40 +52,42 @@ root the script expects. The launcher does all three for you; nothing else does.
 
 See `APPLY-ORDER.txt`. Two pairs are genuinely ordered:
 
-- `wallclock_reanchored` (8) re-anchors timing that `instrumentation` (2) installs, and on
+- `wallclock_reanchored` (in 8) re-anchors timing that `instrumentation` (2) installs, and on
   `offload_mixed_hit` (1)'s `_RADIANCE_ALLOW_MIXED_HIT` line.
-- `mamba_stride` (6) requires `eagle_groups` (5): while every group is flagged as
+- `mamba_stride` (5) requires `eagle_groups` (4): while every group is flagged as
   an EAGLE/MTP draft group, `storable_chunks()` drops each group's trailing chunk
   during decode and the store grid stops lining up with the hit window. It also
   anchors on `offload_mixed_hit` (1)'s `_RADIANCE_ASSERT_DUMPED` line.
 
 Both 1-anchors are trivially satisfied — 1 is FATAL and runs first.
 
-`fs_fanout` (7) is order-independent with the rest. Three patches touch
-`v1/kv_offload/tiering/fs/manager.py` — `instrumentation` (2), `fs_fanout` (7), and
-`tier_report` (8) — and they are order-independent because they anchor at different
+`fs_fanout` (6) is order-independent with the rest. Three patches touch
+`v1/kv_offload/tiering/fs/manager.py` — `instrumentation` (2), `fs_fanout` (6), and
+`tier_report` (7) — and they are order-independent because they anchor at different
 sites in it, not because any one is the sole editor.
 
-## Two of them are fatal; six only warn
+## Two of them are fatal; the rest only warn
 
 The container block runs under `set -e`. Patches 1 and 2 have **no `|| echo`
-fallback**, so a failure there is a hard boot failure, not a warning:
+fallback**, so a failure there is a hard boot failure, not a warning. The default
+build applies only 1 of the two:
 
 | # | Patch | On failure |
 |---|---|---|
 | 1 | `patch_offload_mixed_hit.py` | **FATAL** — engine does not boot |
 | 2 | `patch_kv_offload_instrumentation.py` | **FATAL** — engine does not boot |
 | 3 | `patch_kv_offload_lookup_outcomes.py` | warns; Phase A metrics absent |
-| 8 | `patch_kv_offload_wallclock_reanchored.py` | warns; timing stays per-batch rather than whole-job |
-| 5 | `patch_kv_offload_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
-| 6 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
-| 7 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
-| 8 | `patch_kv_offload_tier_report.py` | warns; no per-tier metrics, so `tools/tierreport.py` has no rows |
+| 4 | `patch_kv_offload_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
+| 5 | `patch_kv_offload_mamba_stride.py` | warns; every chunk stores all six Mamba groups |
+| 6 | `patch_kv_offload_fs_fanout.py` | warns; one fs job per promotion |
+| 7 | `patch_kv_offload_tier_report.py` | warns; no per-tier metrics, so `tools/tierreport.py` has no rows |
+| 8 | `apply-bundle.py` | warns; no promotion_* counters, timing stays per-batch |
+| 9–11 | lookup invalidation, deferral outcomes, miss reason | warns; each names what is missing |
 
 That split is deliberate. 1 and 2 are load-bearing — without patch 1 the engine
 asserts and dies the first time an external hit lands on a request that also hit
 the GPU prefix cache, and without the instrumentation an allocation failure is
-unattributable. The other six degrade to defined, previously-shipped behaviour.
+unattributable. The rest degrade to defined, previously-shipped behaviour.
 
 Patch 1 is also the one exception to "every behaviour change is gated" below. Its
 gate, `RADIANCE_OFFLOAD_MIXED_HIT=0`, selects a conservative fallback (decline the
@@ -113,8 +125,6 @@ Check each against current vLLM/radiance HEAD and delete it in favour of the
 upstream implementation wherever one now exists. Two already measure as directly
 applicable to this tree — PR #54327 (`tiering/fs/manager.py`, 100%) would retire
 the external reaper entirely, and PR #54743 supplies the filtered-group primitive
-patch 5 reinvents by hand. See `../docs/SETUP.md` §3a for the
-measured per-file applicability, and `../README.md` stage 2 for where this sits
-on the roadmap.
+patch 4 reinvents by hand.
 
 A house patch that duplicates merged upstream work is a liability, not an asset.

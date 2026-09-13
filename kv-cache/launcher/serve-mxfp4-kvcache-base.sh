@@ -16,9 +16,10 @@
 #     |                             kv-cache/ will either.
 #     v
 #   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
-#                                   plus the offload delta: the GPU -> /dev/shm ->
-#                                   /kvcache staging, the nine house patches in
-#                                   ../patches/, and the RADIANCE_* gates on them.
+#                                   plus the offload delta: GPU -> /dev/shm offload
+#                                   (and, experimental, the /kvcache disk tier),
+#                                   the house patches in ../patches/, and the
+#                                   KVOFF_MINIMAL and RADIANCE_* gates on them.
 #
 # The tuning defaults below are NOT maintained here. They are copied across from
 # startup-qwen3.8-27b-mxfp4.sh when the release is assembled, so the two engines
@@ -27,8 +28,8 @@
 # hardware, carry the same values over.
 #
 # The delta is seven items and nothing else: HOUSE resolution; the KVOFF_* knob
-# block; the /dev/shm fit check and RAM clamp; the fs-tier --kv-transfer-config
-# builder; the extra container mounts and RADIANCE_* env; the nine /house patch
+# block; the /dev/shm fit check and RAM clamp; the --kv-transfer-config
+# builder; the extra container mounts and RADIANCE_* env; the /house patch
 # lines in the prelude; and --kv-transfer-config on the serve line. See
 # ./README.md for the table.
 #
@@ -745,6 +746,53 @@ KVOFF_HASHSEED=${KVOFF_HASHSEED:-0}
 # confirmed a narrower chunk range than the load actually reads. Flip to 0 only as a kill
 # switch; it costs external hits and buys nothing the fix does not already give.
 KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
+# RADIANCE_LOOKUP_INVALIDATE: drop a cached `absent` lookup verdict when a store for
+# that key LANDS. Upstream's AsyncLookupManager caches per-key verdicts and re-checks
+# only when the entry is None, and the fs store path never tells it anything changed --
+# so a block we just wrote keeps reading as absent until every request referencing it
+# finishes. That is the long-context miss: hits drop to zero mid-conversation and come
+# back "shortly after" (when the request ends and the entry is finally cleared).
+# Drops rather than flips to present: the reaper deletes out-of-band, so a cached
+# `present` would age into a FALSE HIT -- a failed promotion and a full recompute.
+# 1 = fix on, 0 = upstream behaviour (default here). See kv-queue task 58; rehearsed
+# with a synthetic driver that reproduces the lie and shows it go to zero.
+#
+# 2026-09-12: DEFAULTED BACK TO 0 -- the measurement arm, not a verdict on the fix.
+# With it at 1 the tier answered only 8 of the 17 lookups that needed it; the 9 that
+# failed had deferred once or twice and given up in under 10 ms, while the 3 that
+# waited longer were all served. Chunk results were 42,300 HIT_PENDING against 130
+# MISS, so the blocks were present 99.8% of the time and the loss is entirely at the
+# resolution. This flag is the ONLY behavioural difference on the restore path from
+# the nine-patch set published in the public release, so 0 reproduces that release
+# and gives the A/B arm we never ran today. Aggregate cache hit was 87.5% before and
+# 87.9% after the reload that carried it, i.e. no measured effect either way yet.
+# Expect the stale `absent` back while this is 0 -- that is the defect task 58 fixes.
+# Revert to 1 if the tier's served/gave-up split gets worse rather than better.
+KVOFF_LOOKUP_INVALIDATE=${KVOFF_LOOKUP_INVALIDATE:-0}
+# KVOFF_MINIMAL: 1 = apply ONLY the three behavioural KV-offload patches and skip every
+# instrumentation patch. The three are mixed-hit (crash guard + the cross-nonce
+# correctness fix), eagle-groups (stop labelling all nine KV groups as MTP draft) and
+# mamba-stride (the capacity lever). Skipped: store-path instrumentation, lookup
+# outcomes, fs fanout, the tier report, the promotion-refusal bundle, and the task
+# 58/50/65 lookup patches.
+# What you keep: upstream external_prefix_cache_hits/queries, kv_offload_store_bytes,
+# and llama-swap per-request cache_tokens -- enough to see WHETHER the tier serves.
+# What you lose: kvvalidate.py and tierreport.py stop working entirely, and with them
+# every answer to WHY it did not serve. fs fanout is dropped too: it is behavioural, but
+# the disk measured ~117 MB/s with and without it, so it is 5 hunks for a measured no-win.
+# Rehearsed 2026-09-12 by kv-queue/rehearse-minimal.sh: 12 hunks land once, idempotent,
+# all touched files byte-compile, connector and both tier managers import. That proves
+# the set is COHERENT, not that it serves -- no engine was started.
+# 2026-09-13, pat: DEFAULT FLIPPED TO 1. The minimal set has run production since the
+# 2026-09-12 late reload and is working well, so it is the recommended configuration; the
+# full instrumented set is the EXPERIMENTAL build (KVCACHE_EXPERIMENTAL=1 on the kvcache
+# wrapper, which sets this back to 0 along with the disk tier).
+KVOFF_MINIMAL=${KVOFF_MINIMAL:-1}
+# RADIANCE_LOOKUP_STALE_WATCH: diagnostic only -- counts lookups that returned a cached
+# `absent` for a key whose file exists. DEFAULT OFF and it should stay off: it costs one
+# unbatched os.path.exists per MISS, and on a cold cache every lookup misses, so the
+# ~45-minute warm-up is exactly when it is most expensive on a device-bound tier.
+KVOFF_STALE_WATCH=${KVOFF_STALE_WATCH:-0}
 # RADIANCE_OFFLOAD_EAGLE_GROUPS: 1 = annotate the EAGLE/MTP draft KV group positionally on
 # the hybrid grouping path; 0 = upstream, which only does it for DeepSeek-V4 and therefore
 # not for us. DEFAULT IS 1. Without it no group is annotated, and the offload scheduler's
@@ -820,6 +868,11 @@ KVOFF_POLICY=${KVOFF_POLICY:-lru}
 # second appearance, so a prefix reused exactly twice is never served from cache.
 # Independent of KVOFF_POLICY; A/B them separately.
 KVOFF_STORE_THRESHOLD=${KVOFF_STORE_THRESHOLD:-0}
+# spec_name is the single knob that decides whether store_threshold is a capability or a
+# boot-killer. Default is TieringOffloadingSpec (see KVOFF_TIER_ARG below), which raises
+# ValueError on store_threshold>=2 (tiering/spec.py). Kept as a variable so the emit gate
+# below can switch on it instead of hard-coding the spec name.
+KVOFF_SPEC_NAME=${KVOFF_SPEC_NAME:-TieringOffloadingSpec}
 # Offload generated tokens too, not just the prompt.
 #
 # vLLM defaults offload_prompt_only to TRUE (v1/kv_offload/base.py:685), so only prompt
@@ -833,8 +886,9 @@ KVOFF_STORE_THRESHOLD=${KVOFF_STORE_THRESHOLD:-0}
 # HIT_PENDING (+49,980) almost exactly against recompute (+48,065) -- the data was not on
 # disk YET. Storing generated tokens is one of the two candidate causes.
 #
-# Costs write volume. Default here is vLLM's own default (true) so this changes nothing
-# unless set.
+# Costs write volume. Default here is FALSE (store generated tokens), which is NOT vLLM's
+# default -- this comment used to claim otherwise. Applies to the RAM-only tier too (see the
+# RAM-only block after the disk-tier wiring). Set true for upstream behaviour.
 KVOFF_PROMPT_ONLY=${KVOFF_PROMPT_ONLY:-false}
 KVOFF_TIER_ARG=""
 
@@ -1053,11 +1107,23 @@ if [[ -n "$KVOFF_DISK" ]]; then
   else
     KVOFF_BPC_JSON=""
     KVOFF_POLICY_JSON=""
+    KVOFF_ST_TG_LOG=""
     if [[ "$KVOFF_POLICY" != lru ]]; then
       KVOFF_POLICY_JSON=",\"eviction_policy\":\"$KVOFF_POLICY\""
     fi
-    if [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
-      KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"store_threshold\":$KVOFF_STORE_THRESHOLD"
+    # Gate store_threshold on spec support: TieringOffloadingSpec raises ValueError on
+    # store_threshold>=2 (tiering/spec.py), so emitting it for the pinned spec kills the
+    # boot. Emit only for a spec that supports it; for an unsupported spec, warn loudly
+    # (a named knob must not silently no-op) and boot at the spec default.
+    if [[ "$KVOFF_SPEC_NAME" != TieringOffloadingSpec ]]; then
+      if [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+        KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"store_threshold\":$KVOFF_STORE_THRESHOLD"
+        KVOFF_ST_TG_LOG=" store_threshold=$KVOFF_STORE_THRESHOLD"
+      fi
+    elif [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+      echo "[kv-offload] WARNING: KVOFF_STORE_THRESHOLD=$KVOFF_STORE_THRESHOLD is set, but" >&2
+      echo "[kv-offload]   spec_name=$KVOFF_SPEC_NAME does not support it (ValueError at boot," >&2
+      echo "[kv-offload]   tiering/spec.py). NOT emitted; booting at the spec default (0)." >&2
     fi
     if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
       KVOFF_BPC_JSON=",\"blocks_per_chunk\":$KVOFF_BLOCKS_PER_CHUNK"
@@ -1065,13 +1131,13 @@ if [[ -n "$KVOFF_DISK" ]]; then
     if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
       KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"offload_prompt_only\":false"
     fi
-    KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"TieringOffloadingSpec\"$KVOFF_BPC_JSON$KVOFF_POLICY_JSON,\"secondary_tiers\":[{\"type\":\"fs\",\"root_dir\":\"$KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR\",\"n_read_threads\":$KVOFF_DISK_RTHREADS,\"n_write_threads\":$KVOFF_DISK_WTHREADS}]}}"
+    KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"$KVOFF_SPEC_NAME\"$KVOFF_BPC_JSON$KVOFF_POLICY_JSON,\"secondary_tiers\":[{\"type\":\"fs\",\"root_dir\":\"$KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR\",\"n_read_threads\":$KVOFF_DISK_RTHREADS,\"n_write_threads\":$KVOFF_DISK_WTHREADS}]}}"
     mkdir -p "$KVOFF_DISK/$KVOFF_DISK_SUBDIR"
     echo "[kv-offload] L3 disk tier: $KVOFF_DISK -> $KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR (PYTHONHASHSEED=$KVOFF_HASHSEED," >&2
     if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
       echo "[kv-offload]   NON-DEFAULT blocks_per_chunk=$KVOFF_BLOCKS_PER_CHUNK" >&2
     fi
-    echo "[kv-offload]   CPU tier policy=$KVOFF_POLICY store_threshold=$KVOFF_STORE_THRESHOLD" >&2
+    echo "[kv-offload]   CPU tier policy=$KVOFF_POLICY$KVOFF_ST_TG_LOG" >&2
     if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
       echo "[kv-offload]   offload_prompt_only=FALSE -- generated tokens are written through too" >&2
     else
@@ -1079,6 +1145,27 @@ if [[ -n "$KVOFF_DISK" ]]; then
     fi
     echo "[kv-offload]   ${KVOFF_DISK_RTHREADS}r/${KVOFF_DISK_WTHREADS}w threads, $(df -h --output=size "$KVOFF_DISK" | tail -1 | tr -d ' ') volume, NO built-in eviction)" >&2
   fi
+fi
+# RAM-only (no disk tier): the CPU tier still takes KVOFF_POLICY, KVOFF_STORE_THRESHOLD and
+# KVOFF_PROMPT_ONLY. Without a config, --kv-offloading-size alone gives vLLM's defaults (LRU,
+# prompt tokens only), so turning the disk off would ALSO silently swap the eviction
+# policy and stop storing generated tokens -- two changes nobody asked for. All three keys
+# are read by the stock CPUOffloadingSpec (cpu/spec.py:118, base.py:597; "arc" is built in,
+# cpu/manager.py:33), so this needs no patch. Emitted only when a key is off its vLLM
+# default, so an all-default RAM tier is exactly what upstream would have built.
+# Also catches the fallbacks above that clear KVOFF_DISK (no such directory).
+if [[ -z "$KVOFF_TIER_ARG" && -z "$KVOFF_DISK" && "$EXTRA" == *--kv-offloading-size* ]]; then
+  KVOFF_RAM_JSON=""
+  [[ "$KVOFF_POLICY" != lru ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"eviction_policy\":\"$KVOFF_POLICY\""
+  if [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+    KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"store_threshold\":$KVOFF_STORE_THRESHOLD"
+  fi
+  [[ "$KVOFF_PROMPT_ONLY" != true ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"offload_prompt_only\":false"
+  [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"blocks_per_chunk\":$KVOFF_BLOCKS_PER_CHUNK"
+  if [[ -n "$KVOFF_RAM_JSON" ]]; then
+    KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"CPUOffloadingSpec\"$KVOFF_RAM_JSON}}"
+  fi
+  echo "[kv-offload] RAM-only tier (no disk): policy=$KVOFF_POLICY store_threshold=$KVOFF_STORE_THRESHOLD offload_prompt_only=$KVOFF_PROMPT_ONLY" >&2
 fi
 # ---------------------------------------------------------------------------
 # Cudagraph capture sizes; empty/none = vLLM's default list ([1,2,4] + multiples of 8).
@@ -1583,6 +1670,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   ${KVOFF_DISK:+-v "$KVOFF_DISK":"$KVOFF_DISK_MNT"} \
   ${KVOFF_DISK:+-e PYTHONHASHSEED="$KVOFF_HASHSEED"} \
   -e RADIANCE_OFFLOAD_MIXED_HIT="$KVOFF_MIXED_HIT" \
+  -e KVOFF_MINIMAL="$KVOFF_MINIMAL" \
+  -e RADIANCE_LOOKUP_INVALIDATE="$KVOFF_LOOKUP_INVALIDATE" \
+  -e RADIANCE_LOOKUP_STALE_WATCH="$KVOFF_STALE_WATCH" \
   -e RADIANCE_OFFLOAD_EAGLE_GROUPS="$KVOFF_EAGLE_GROUPS" \
   -e RADIANCE_MAMBA_STORE_STRIDE="$KVOFF_MAMBA_STRIDE" \
   -e RADIANCE_FS_FANOUT_TARGET_MB="$KVOFF_FS_FANOUT_MB" \
@@ -1609,6 +1699,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # House patch: lives in /house, not /patches. PYTHONPATH lets it import the ggz14
     # _patchlib the same way the in-repo patches do (script dir, not cwd, is sys.path[0]).
     PYTHONPATH=/patches python3 /house/patch_offload_mixed_hit.py
+    # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
+    # NOTE: no apostrophes anywhere in this bash -c body.
+    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
     # House patch: KV offload store-path instrumentation. Adds gauges only, no behaviour
     # change. Without it an allocation failure is unattributable and the lookup-delay
     # histogram tops out at 10 s. See kv-cache/cache-preemption-patch-plan.md R3.6.
@@ -1622,6 +1715,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # (metric names first, then the call sites that use them).
     PYTHONPATH=/patches python3 /house/patch_kv_offload_lookup_outcomes.py \
       || echo "[radiance] WARNING: lookup-outcome counters did not apply; Phase A metrics will be absent"
+    fi
     # House patch: annotate the EAGLE/MTP draft KV group positionally, so the offload
     # scheduler stops treating all nine groups as draft groups. Prerequisite for the stride
     # patch below: while every group is flagged eagle, storable_chunks() drops the trailing
@@ -1635,6 +1729,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # store, which costs prefix but stays correct.
     PYTHONPATH=/patches python3 /house/patch_kv_offload_mamba_stride.py \
       || echo "[radiance] WARNING: mamba store-cadence patch did NOT apply -- every chunk will store all six Mamba groups, whatever RADIANCE_MAMBA_STORE_STRIDE says"
+    # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
+    # NOTE: no apostrophes anywhere in this bash -c body.
+    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
     # House patch: R3.14 fs-tier job fanout, the port of upstream PR #49225. Order-independent
     # of the three above -- it touches a different file (v1/kv_offload/tiering/fs/manager.py)
     # and anchors nowhere near the cascade-backlog gauge the instrumentation patch adds there.
@@ -1680,6 +1777,33 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # promotion_* counters, so the warning names that explicitly.
     PYTHONPATH=/patches python3 /house/apply-bundle.py \
       || echo "[radiance] WARNING: promotion-refusal bundle did NOT apply -- no promotion_* counters"
+    # kv-queue task 58: invalidate the async-lookup cache when a fs store lands.
+    # LAST in the prelude. Its fs/manager.py anchors stand on the fs-fanout patch
+    # (_RADIANCE_FANOUT_MAX / _radiance_split), and it must not race the fs/manager.py
+    # hunk in the bundle, which re-points a region this patch does not anchor on.
+    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
+    # Non-fatal: without it the engine serves upstream behaviour, which is the stale
+    # `absent` -- so the warning names the user-visible consequence, not the patch.
+    PYTHONPATH=/patches python3 /house/patch_kv_offload_lookup_cache_invalidate.py \
+      || echo "[radiance] WARNING: lookup-cache invalidation did NOT apply -- a just-stored block can still read as absent, so long-context hits may drop to zero mid-conversation"
+    # kv-queue tasks 50 + 59v2, ordered by task 65. INSTRUMENTATION ONLY -- no behaviour
+    # change, no gate. They answer the question the counters could not: when a request
+    # recomputes a prefix we already hold, WHICH branch dropped it. Today the six lookup
+    # exits partition cleanly and still do not account for it, because a deferral that
+    # never resolves lands in no bucket and the transfer_jobs guard returns before
+    # LOOKUP_CALLS increments at all.
+    #   50  -- deferral lifecycle (total/served/gave_up/unresolved) + depth histogram,
+    #          plus transfer_jobs_deferred, the silent exit.
+    #   59v2 -- attributes the zero_hit and short_result misses to a reason.
+    # 50 and 59 as originally written COLLIDE in metrics.py in BOTH orders (proven by
+    # task 65 on a copy of the live tree); 59v2 is re-anchored so the pair is
+    # order-independent. Do NOT substitute the original out/59 patch.
+    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
+    PYTHONPATH=/patches python3 /house/patch_kv_offload_deferral_outcomes.py \
+      || echo "[radiance] WARNING: deferral-outcome counters did NOT apply -- a deferral that never resolves will stay invisible"
+    PYTHONPATH=/patches python3 /house/patch_kv_offload_miss_reason_v2.py \
+      || echo "[radiance] WARNING: miss-reason counters did NOT apply -- a miss will not name its cause"
+    fi
     python3 patch_topk_composite.py
     python3 patch_gdn_shared_build.py
     python3 patch_dflash_selector_topk.py

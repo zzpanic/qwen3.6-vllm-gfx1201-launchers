@@ -1,17 +1,17 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-12T01:38:59Z from the working
+Assembled by `make-dist.sh` on 2026-09-13T02:43:16Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
 |---|---|---|
 | `README.md` | kv-cache/ | **Start here.** Status, roadmap, architecture. |
-| `docs/` | kv-cache/ | Handover, operations runbook, implementation, known issues, future work, references, the correctness suite's specification, and the experimental record, and the register of closed decisions. |
-| `patches/` | kv-cache/ | The nine house patches, their apply order, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
+| `docs/` | kv-cache/ | `SETUP.md` — prerequisites, sizing, the reaper, the tools and the metric traps. |
+| `patches/` | kv-cache/ | The house patches, their apply order and which build applies each, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
 | `launcher/` | kv-cache/ + vllm/ | The KV-cache entry launcher and the base launcher it wraps. |
-| `ops/` | vllm/ | The mandatory reaper, its systemd units, the mount snippets. |
+| `ops/` | vllm/ | The reaper (mandatory for the experimental disk tier), its systemd units, the mount snippets. |
 | `bench/` | kv-cache/ | Harnesses, shipped for method. No result files. |
-| `tools/` | kv-cache/ | `tierreport.py` — the tier sizing/speed report, its fixture generator and its functional test; and `kvvalidate.py` — the live-load validator that names your regime and reports cache performance with confidence markers. Both are meant to be run for their numbers, on your own traffic. |
+| `tools/` | kv-cache/ | `kvwatch.py` — the live one-screen view, for either build; `tierreport.py` — the tier sizing/speed report; and `kvvalidate.py` — the live-load validator that names your regime and reports cache performance with confidence markers. All three are meant to be run for their numbers, on your own traffic. |
 
 Deliberately excluded: `baselines/`, all bench-history, and every result file.
 Single-machine numbers, some known polluted — ship the method, not the numbers.

@@ -1,9 +1,11 @@
 # Launchers — and the version gap you need to know about
 
 The entry launcher is **`startup-qwen3.8-27b-kvcache.sh`, at the repository
-root**, alongside the other `startup-*.sh` scripts. It is a thin wrapper: it sets
-the KV-cache environment, with the reasoning and the measured cost of every knob
-inline, and then execs a base launcher that actually serves the model.
+root**, alongside the other `startup-*.sh` scripts. It is a thin wrapper: it picks
+the build (`KVCACHE_EXPERIMENTAL`, default 0), sizes the RAM tier
+(`KVCACHE_TIER_GIB=auto`), sets the KV-cache environment with the reasoning and
+the measured cost of every knob inline, and then execs a base launcher that
+actually serves the model.
 
 `serve-mxfp4-kvcache-base.sh` in this directory is that base launcher.
 
@@ -13,7 +15,7 @@ inline, and then execs a base launcher that actually serves the model.
 build on — and this launcher already is it.**
 
 The repository root ships `startup-qwen3.8-27b-mxfp4.sh`: the plain MXFP4 entry,
-no disk tier, none of the nine house patches, and every knob in it carrying the
+no offload, none of the house patches, and every knob in it carrying the
 measurement that chose it. Get that serving first. It is the shorter path to a
 working engine, and if it does not serve, nothing in `kv-cache/` will either.
 
@@ -30,11 +32,11 @@ instance and the cache work:
 | # | Addition | Where |
 |---|---|---|
 | 1 | `HOUSE` resolution + existence check | beside `REPO` |
-| 2 | the `KVOFF_DISK*` / `KVOFF_*` knob block | with the other knobs |
+| 2 | the `KVOFF_DISK*` / `KVOFF_*` knob block, including `KVOFF_MINIMAL` | with the other knobs |
 | 3 | `/dev/shm` fit check and the RAM clamp for an explicit tier size | the offload sizing block |
-| 4 | the fs-tier `--kv-transfer-config` JSON builder | after the sizing block |
-| 5 | `-v $KVOFF_DISK`, `-v $HOUSE`, `PYTHONHASHSEED`, six `RADIANCE_*` gates | the container invocation |
-| 6 | nine `PYTHONPATH=/patches python3 /house/patch_*.py` lines | the patch prelude |
+| 4 | the `--kv-transfer-config` JSON builder — fs tier, or the RAM-only tier's eviction settings | after the sizing block |
+| 5 | `-v $KVOFF_DISK`, `-v $HOUSE`, `PYTHONHASHSEED`, the `KVOFF_MINIMAL` and `RADIANCE_*` gates | the container invocation |
+| 6 | the `PYTHONPATH=/patches python3 /house/...` lines — three unconditional, the rest inside `KVOFF_MINIMAL` guards | the patch prelude |
 | 7 | `${KVOFF_TIER_ARG:+--kv-transfer-config ...}` | the `vllm serve` arguments |
 
 Nothing else differs. If you want to add the cache to a launcher of your own,
@@ -56,7 +58,7 @@ Neither script is a fork of anyone's kernels. Both descend from **ggz14's
 `stilldeadcode/vllm-radiance:0.9.3`), which owns the MXFP4 GEMM, the R4D attention
 path and the DFlash2 drafter integration. What this repository contributes is the
 *arrangement* — which knobs, at which values, on this card — and, in the KV-cache
-case, the offload tiers and the nine patches in `../patches/`.
+case, the offload tiers and the house patches in `../patches/`.
 
 ## Porting to another machine
 

@@ -1,18 +1,38 @@
-1  patch_offload_mixed_hit.py
-2  patch_kv_offload_instrumentation.py
-3  patch_kv_offload_lookup_outcomes.py
-4  patch_kv_offload_eagle_groups.py          (upstream counterpart: PR #52047,
-                                              which does NOT cover this model -- see below)
-5  patch_kv_offload_mamba_stride.py
-6  patch_kv_offload_fs_fanout.py             (ported from PR #49225)
-7  patch_kv_offload_tier_report.py           (needs 2; instrumentation only)
-8  patch_kv_offload_wallclock_reanchored.py  (needs 2; re-anchors the timing it adds)
-9  patch_promotion_refusal_instrumentation.py (counters only; kept as a tripwire)
+WHICH BUILD APPLIES WHAT
+
+  DEFAULT build (KVOFF_MINIMAL=1, what startup-qwen3.8-27b-kvcache.sh runs unless told
+  otherwise) applies ONLY the three marked [default]. Every other patch here is
+  instrumentation, or fs-tier-only, and runs only in the EXPERIMENTAL build
+  (KVCACHE_EXPERIMENTAL=1, which sets KVOFF_MINIMAL=0).
+
+APPLY ORDER (the launcher runs them in exactly this order; skipped ones are skipped in place)
+
+ 1  patch_offload_mixed_hit.py                   [default]  FATAL on failure
+ 2  patch_kv_offload_instrumentation.py                     FATAL on failure
+ 3  patch_kv_offload_lookup_outcomes.py
+ 4  patch_kv_offload_eagle_groups.py             [default]  (upstream counterpart: PR #52047,
+                                                             which does NOT cover this model)
+ 5  patch_kv_offload_mamba_stride.py             [default]  needs 4
+ 6  patch_kv_offload_fs_fanout.py                           (ported from PR #49225)
+ 7  patch_kv_offload_tier_report.py                         needs 2; instrumentation only
+ 8  apply-bundle.py, which applies in turn:                 needs 7
+      patch_promotion_refusal_instrumentation.py            counters only; kept as a tripwire
+      patch_kv_offload_wallclock_reanchored.py              re-anchors timing 2 installs
+ 9  patch_kv_offload_lookup_cache_invalidate.py             anchors stand on 6
+10  patch_kv_offload_deferral_outcomes.py                   counters only
+11  patch_kv_offload_miss_reason_v2.py                      counters only
 
 This order is a dependency, not a preference. 7 extends the get_stats() that 2
 creates on the fs tier, and refuses to apply if 2 has not run -- it says so
-rather than failing on a missing anchor. 8 re-anchors timing that 2 installs, so it
-follows 2 for the same reason.
+rather than failing on a missing anchor. 8's wall-clock patch re-anchors timing
+that 2 installs, and both of 8's patches reference names 7 creates.
+
+9 invalidates the per-key async-lookup verdict when a fs store lands. Upstream caches
+an `absent` verdict and re-checks only when the entry is None; the fs store path never
+tells it anything changed, so a just-stored block keeps reading as absent until every
+referencing request finishes. Drops rather than flips to present: the reaper deletes
+out-of-band, so a cached `present` would age into a FALSE hit. Gated on
+RADIANCE_LOOKUP_INVALIDATE (default 0 = upstream behaviour).
 
 REMOVED 2026-09-12, deliberately, and not to be re-added:
   patch_kv_offload_serve_ready_prefix.py   built on the promotion-refusal thesis, which
@@ -20,11 +40,10 @@ REMOVED 2026-09-12, deliberately, and not to be re-added:
       tier). Its knob RADIANCE_OFFLOAD_PENDING_IS_MISS is gone with it; upstream's
       wait-for-it behaviour is what runs now.
   patch_promotion_refusal_fix.py           the "fix" for that same refuted thesis.
-The counters in 9 are kept on purpose: they are the evidence the thesis is dead, and the
+The counters in 8 are kept on purpose: they are the evidence the thesis is dead, and the
 tripwire if the CPU tier is ever shrunk.
 
 BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
 delete it in favour of the upstream implementation wherever one now exists. That is
-the note on upstreaming in README.md; PRs #54327 and #54743 already measure as directly
-applicable (see docs/SETUP.md). A house patch that duplicates merged
-upstream work is a liability, not an asset.
+the note on upstreaming in README.md. A house patch that duplicates merged upstream
+work is a liability, not an asset.

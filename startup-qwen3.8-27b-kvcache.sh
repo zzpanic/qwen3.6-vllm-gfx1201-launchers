@@ -5,10 +5,10 @@
 # WHAT THIS IS
 # ============================================================================
 # This is the KV-cache work as a SEPARATE, PUBLISHABLE ENTRY. Everything the
-# three-tier offload needs -- the tier sizes, the nine house patches, the
-# eviction policy, the fs tier, the stride, the GC contract -- is pinned HERE,
-# in one file, with the reasoning inline, rather than being spread across the
-# production entry's env block in config.yaml.
+# offload needs -- the tier size, the house patches, the eviction policy, the
+# stride, and (experimental build only) the fs tier and its GC contract -- is
+# pinned HERE, in one file, with the reasoning inline, rather than being spread
+# across the production entry's env block in config.yaml.
 #
 # It exists for two reasons:
 #
@@ -61,7 +61,7 @@
 #   2. CONTINUE THE REVIEW OF EXISTING WORK, AND WRITE AN IMPLEMENTATION PLAN.
 #      kv-cache-references.md is the review so far -- every PR, paper and blog
 #      assessed, each with a ruling. Continue it, then plan. This includes
-#      reconciling the nine house patches against current vLLM/radiance HEAD
+#      reconciling the house patches against current vLLM/radiance HEAD
 #      and DELETING each in favour of the upstream implementation wherever one
 #      exists (the eagle-groups fix has a counterpart in PR #52047 (NOT merged as #55390; #52047 does not cover this model); the fs
 #      fanout was ported from PR #49225). AVOID REIMPLEMENTATION -- a house
@@ -130,6 +130,34 @@
 #     re-measurement is `status-2026-09-10.md` section 4.
 #
 # ============================================================================
+# TWO BUILDS -- THE DEFAULT IS THE RECOMMENDED ONE
+# ============================================================================
+# KVCACHE_EXPERIMENTAL=0  (DEFAULT, RECOMMENDED)  GPU -> RAM.
+#     The CPU tier in /dev/shm and the THREE behavioural patches only:
+#     mixed-hit, eagle-groups, mamba-stride. No disk tier, so no reaper, no
+#     PYTHONHASHSEED pin and no filesystem to provision. No instrumentation
+#     patches either: the upstream series (external_prefix_cache_hits and
+#     _queries, kv_offload_store_bytes) show WHETHER the tier serves, never
+#     WHY it did not.
+#     This is the patch set the author's production entry has run since
+#     2026-09-12. That entry also has the disk tier on; this build keeps its
+#     patch set and CPU-tier eviction settings and drops the disk.
+#
+# KVCACHE_EXPERIMENTAL=1  GPU -> RAM -> disk.
+#     Adds the fs tier (KVCACHE_DISK, default /kvcache) and the full
+#     instrumented patch set: store-path and lookup-outcome counters, fs
+#     fanout, the tier report, the promotion-refusal tripwire, and the lookup
+#     invalidation/deferral/miss-reason patches. tools/kvvalidate.py and
+#     tools/tierreport.py need this build -- against the default they have
+#     nothing to read. The disk tier needs the reaper (section 6) and serves at
+#     roughly break-even with a recompute on ordinary storage.
+#
+# Individual knobs still win over the build switch: KVCACHE_DISK=/kvcache on the
+# default build gives the minimal patch set WITH a disk tier, which is exactly
+# what the production entry runs; KVOFF_MINIMAL=0 without the disk gives the
+# instrumented set RAM-only.
+#
+# ============================================================================
 # ONE GPU
 # ============================================================================
 # This entry takes the whole R9700, exactly like qwen3.8-27b-vllm. They cannot
@@ -164,6 +192,12 @@ fi
 
 [[ -x "$BASE_LAUNCHER" ]] || { echo "kvcache: base launcher not found or not executable: $BASE_LAUNCHER" >&2; exit 1; }
 
+KVCACHE_EXPERIMENTAL="${KVCACHE_EXPERIMENTAL:-0}"
+case "$KVCACHE_EXPERIMENTAL" in
+  0|1) ;;
+  *) echo "kvcache: KVCACHE_EXPERIMENTAL must be 0 or 1, got '$KVCACHE_EXPERIMENTAL'" >&2; exit 1 ;;
+esac
+
 # ---------------------------------------------------------------------------
 # 1. IDENTITY -- distinct container + served id.
 #
@@ -178,21 +212,52 @@ export SERVED="${SERVED:-qwen3.8-27b-kvcache}"
 # ---------------------------------------------------------------------------
 # 2. THE CPU PRIMARY TIER (L2) -- size in GiB.
 #
-# Set EXPLICITLY, not via KV_OFFLOAD=auto, and that is deliberate: `auto` sizes
-# from MemAvailable at boot, which depends on what else happened to be resident
-# at that moment. A benchmark entry whose tier size depends on boot timing is
-# useless. Explicit + clamped is reproducible.
+# DEFAULT: KVCACHE_TIER_GIB=auto, which computes the recommended minimum below
+# from MAXLEN and KV_MEM and caps it to what this box can hold. Set a number to
+# pin it instead.
 #
-# 24 GiB is the known-good size on this box (39.17 GiB guest). It holds roughly
-# 419,000 tokens at 61,440 bytes/token as stored -- about 12 prompts of 34k.
-# See kv-cache-operations.md §3 for the full sizing table and the OOM warning
-# before you raise it.
+# Deliberately NOT the base launcher's KV_OFFLOAD=auto: that sizes from
+# MemAvailable at boot, which depends on what else happened to be resident at
+# that moment. This auto reads only MemTotal, the /dev/shm mount size and the
+# launcher's own settings, so the same box and config always get the same tier.
+#
+# SIZING -- the one rule: the tier must hold AT LEAST 2.0x the smaller of
+#   (a) the GPU KV pool, in tokens ("GPU KV cache size" on the boot log), and
+#   (b) max-model-len (MAXLEN; Qwen3.8's native ceiling is 262,144).
+#     GPU pool 100k tokens               -> at least 200k tokens of RAM tier
+#     GPU pool 200k tokens               -> at least 400k
+#     GPU pool 300k, MAXLEN 262,144      -> at least 524,288 (2 x 256k)
+# Convert tokens to GiB at the OFFLOADED bytes/token, which is not the GPU's:
+# 61,440 B/token on this model (docs/SETUP.md shows how to derive yours).
+#
+# `auto` applies that rule: the GPU pool is KV_MEM / KVCACHE_GPU_BPT when KV_MEM
+# is pinned, and when it is not (KV_MEM=auto) MAXLEN alone is used, which can
+# only over-size. The result is rounded UP to a whole GiB and must fit
+#   min( /dev/shm size - 0.25 GiB,  MemTotal - KVOFF_RAM_RESERVE_GIB )
+# so the tier never takes the memory the engine, drafter and OS need.
+#
+# IF IT DOES NOT FIT, OFFLOAD IS DISABLED -- not shrunk. A tier below the
+# minimum is not the recommended configuration, so `auto` will not quietly build
+# one: the boot log says what did not fit and by how much, and the model serves
+# without offload. To run a smaller tier anyway, override the default with an
+# explicit KVCACHE_TIER_GIB=<GiB>; that takes the base launcher's explicit-size
+# path, which still refuses a size /dev/shm cannot hold and clamps to
+# MemTotal - KVOFF_RAM_RESERVE_GIB.
+#
+# On this stack: MAXLEN 204800 and KV_MEM 9.3 GB (a ~228k-token pool, so MAXLEN
+# binds): 2 x 204,800 x 61,440 B = 23.4 GiB -> 24 GiB, which the 28 GiB /dev/shm
+# and the 39 GiB guest both hold.
 #
 # THE TIER MUST FIT /dev/shm. It is pre-faulted (MADV_POPULATE_WRITE) and pinned
 # (cudaHostRegister); overshooting the tmpfs fails the START and on vLLM 0.27.1
 # it dies WITHOUT A LOG LINE. Keep /dev/shm a few GiB above the tier.
 # ---------------------------------------------------------------------------
-KVCACHE_TIER_GIB="${KVCACHE_TIER_GIB:-24}"
+KVCACHE_TIER_GIB="${KVCACHE_TIER_GIB:-auto}"
+# Bytes per token, offloaded and on the GPU. MODEL-SPECIFIC -- these are
+# Qwen3.8-27B MXFP4 / FP8 KV at mamba stride 8; docs/SETUP.md shows how to derive
+# yours from a boot log.
+KVCACHE_OFFLOAD_BPT="${KVCACHE_OFFLOAD_BPT:-61440}"
+KVCACHE_GPU_BPT="${KVCACHE_GPU_BPT:-40652}"
 
 # KVOFF_RAM_RESERVE_GIB: everything that is NOT the tier, plus headroom. The
 # base launcher clamps the tier down to (MemTotal - this) and says so loudly in
@@ -202,13 +267,56 @@ KVCACHE_TIER_GIB="${KVCACHE_TIER_GIB:-24}"
 # it is the only thing between a typo and an unbootable box.
 export KVOFF_RAM_RESERVE_GIB="${KVOFF_RAM_RESERVE_GIB:-15}"
 
+if [[ "$KVCACHE_TIER_GIB" == auto && "${EXTRA:-}" != *--kv-offloading-size* ]]; then
+  # (An explicit --kv-offloading-size in EXTRA is an override too, and skips this.)
+  # MAXLEN / KV_MEM as the base launcher will resolve them: the caller's value,
+  # else the base launcher's own default line.
+  _kvc_base_default() { sed -n "s/^$1=\${$1:-\([^}]*\)}.*/\1/p" "$BASE_LAUNCHER" | head -1; }
+  _kvc_maxlen="${MAXLEN:-$(_kvc_base_default MAXLEN)}"
+  _kvc_kvmem="${KV_MEM:-$(_kvc_base_default KV_MEM)}"
+  KVCACHE_TIER_GIB="$(python3 - "$_kvc_maxlen" "$_kvc_kvmem" "$KVCACHE_OFFLOAD_BPT" "$KVCACHE_GPU_BPT" \
+                        "$KVOFF_RAM_RESERVE_GIB" <<'PYSIZE'
+import math, os, re, sys
+maxlen, kvmem, obpt, gbpt, reserve = sys.argv[1:6]
+G = 2**30
+maxlen = int(maxlen); obpt = float(obpt); gbpt = float(gbpt)
+reserve = float(reserve)
+def log(msg): print("[kvcache] " + msg, file=sys.stderr)
+pool = int(float(kvmem) / gbpt) if re.fullmatch(r"[0-9.]+", kvmem or "") else None
+ctx = min(pool, maxlen) if pool else maxlen
+basis = ("min(GPU pool ~%s, MAXLEN %s)" % (format(pool, ","), format(maxlen, ","))) if pool \
+        else ("MAXLEN %s (KV_MEM not pinned, pool unknown before boot)" % format(maxlen, ","))
+need = 2 * ctx * obpt / G
+want = math.ceil(need)
+s = os.statvfs("/dev/shm"); shm = s.f_blocks * s.f_frsize / G
+mem = int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read()).group(1)) / 1048576
+cap_shm, cap_mem = shm - 0.25, mem - reserve
+cap = min(cap_shm, cap_mem)
+log("tier auto: 2 x %s x %d B/token = %.1f GiB recommended minimum -> %d GiB" % (basis, obpt, need, want))
+if want <= cap:
+    size = want
+else:
+    size = 0
+    if cap_shm <= cap_mem:
+        why = "/dev/shm is %.2f GiB, so at most %.2f GiB fits -- remount /dev/shm larger (docs/SETUP.md)" % (shm, cap_shm)
+    else:
+        why = "MemTotal %.2f GiB - reserve %.0f GiB leaves %.2f GiB -- this box needs more RAM" % (mem, reserve, cap_mem)
+    log("*** KV-CACHE OFFLOAD DISABLED: the recommended minimum does not fit this system.")
+    log("    needs %d GiB; %s." % (want, why))
+    log("    Serving WITHOUT offload. To run a smaller tier anyway, set KVCACHE_TIER_GIB=<GiB>.")
+print(size)
+PYSIZE
+)"
+fi
+
 # ---------------------------------------------------------------------------
-# 3. THE FS SECONDARY TIER (L3) -- the disk.
+# 3. THE FS SECONDARY TIER (L3) -- the disk. EXPERIMENTAL BUILD ONLY.
 #
-# Set KVCACHE_DISK="" to turn the disk tier off entirely and run RAM-only. That
-# is a supported configuration and costs nothing but capacity: the disk reads at
-# ~117 MB/s against a ~101 MB/s recompute break-even, i.e. only 1.16x, so
-# serving from disk is barely faster than recomputing. See operations §1.
+# OFF by default. KVCACHE_EXPERIMENTAL=1 turns it on at /kvcache; KVCACHE_DISK
+# names another path (and turns it on in either build); KVCACHE_DISK="" forces it
+# off. Off costs nothing but capacity: the disk reads at ~117 MB/s against a
+# ~101 MB/s recompute break-even, i.e. only 1.16x, so serving from disk is barely
+# faster than recomputing. See operations §1.
 #
 # THREE THINGS THAT WILL BITE (all verified in the 0.27.1 tree):
 #   1. PYTHONHASHSEED must be pinned. Block filenames are content hashes chained
@@ -223,7 +331,11 @@ export KVOFF_RAM_RESERVE_GIB="${KVOFF_RAM_RESERVE_GIB:-15}"
 #      spare RAM cannot act as a read cache in front of this tier. The only
 #      productive home for spare RAM is the primary tier.
 # ---------------------------------------------------------------------------
-export KVOFF_DISK="${KVCACHE_DISK-/kvcache}"
+if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then
+  export KVOFF_DISK="${KVCACHE_DISK-/kvcache}"
+else
+  export KVOFF_DISK="${KVCACHE_DISK:-}"
+fi
 
 # Its own block tree, NOT the production entry's `blocks`.
 #
@@ -246,12 +358,21 @@ export KVOFF_DISK_RTHREADS="${KVOFF_DISK_RTHREADS:-8}"
 export KVOFF_DISK_WTHREADS="${KVOFF_DISK_WTHREADS:-4}"
 
 # ---------------------------------------------------------------------------
-# 4. THE HOUSE PATCHES -- the eight, and why each is on.
+# 4. THE HOUSE PATCHES -- which apply, and why each is on.
 #
 # Applied at container start, in dependency order, from this directory (bind
 # mounted at /house). The upstream clone stays pristine. Each is gated by an
 # env var so it can be reverted without unpatching.
+#
+# KVOFF_MINIMAL decides the set: 1 = the three behavioural patches (a), (c), (d)
+# and nothing else; 0 = those plus every instrumentation patch and (e). It
+# follows the build switch unless you set it yourself.
 # ---------------------------------------------------------------------------
+if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then
+  export KVOFF_MINIMAL="${KVOFF_MINIMAL:-0}"
+else
+  export KVOFF_MINIMAL="${KVOFF_MINIMAL:-1}"
+fi
 
 # (a) mixed-hit guard. Stops OffloadingConnector killing the engine on a mixed
 #     local+external prefix hit. 1 = serve mixed hits = default = safe, 0 = decline = the retained kill switch.
@@ -277,7 +398,7 @@ export KVOFF_EAGLE_GROUPS="${KVOFF_EAGLE_GROUPS:-1}"
 #     RAM tier from 0.50x the GPU cache to 1.21x. Set 1 for exact-but-huge.
 export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-8}"
 
-# (e) fs fanout. Splits one promotion across up to N parallel read tasks
+# (e) fs fanout. EXPERIMENTAL (KVOFF_MINIMAL=0) only. Splits one promotion across up to N parallel read tasks
 #     (upstream does one task per job). Ported from PR #49225. It splits the
 #     work exactly 8 ways as designed -- and the disk still gives ~117 MB/s
 #     either way, because this device is the limit, not the concurrency. Kept
@@ -286,8 +407,8 @@ export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-8}"
 export KVOFF_FS_FANOUT_MB="${KVOFF_FS_FANOUT_MB:-256}"
 export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 
-# (f) + (g) instrumentation and lookup-outcomes are unconditional -- they only
-#     add metrics. They are what makes any of this diagnosable:
+# (f) + (g) instrumentation and lookup-outcomes. EXPERIMENTAL (KVOFF_MINIMAL=0)
+#     only -- they add metrics and nothing else. They are what makes any of this diagnosable:
 #     kv_offload_cpu_cache_evictable_perc and _free_perc are the two terms
 #     prepare_store() tests for admission; kv_offload_fs_inflight_jobs is the
 #     cascade backlog that pins the CPU tier shut.
@@ -296,7 +417,7 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 #     evictable blocks, so it means "fraction pinned by in-flight transfers" and
 #     reads 0.0 at idle with hundreds of GB on the fs tier.
 
-# (h) tier report metrics -- also unconditional, also metrics-only. Adds the 19
+# (h) tier report metrics -- also experimental-only, also metrics-only. Adds the 19
 #     per-tier `vllm:kv_offload_tier_*` series (load/store bytes, tokens and
 #     latency histograms per tier, capacity, occupancy, reads-before-evict,
 #     eviction-to-reuse, prefill stall) that `tools/tierreport.py` reads to
@@ -309,6 +430,10 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 
 # ---------------------------------------------------------------------------
 # 5. THE CPU TIER EVICTION POLICY.
+#
+# Applies to BOTH builds: without a disk tier the base launcher still passes the
+# policy to vLLM's stock CPU spec, so turning the disk off does not quietly fall
+# back to LRU.
 #
 # ARC, not LRU. The tier holds ~22 prompts, and LRU's classic failure is exactly
 # our access pattern: write one prompt, read a dozen others, and the first is
@@ -329,9 +454,11 @@ export KVOFF_POLICY="${KVOFF_POLICY:-arc}"
 export KVOFF_STORE_THRESHOLD="${KVOFF_STORE_THRESHOLD:-0}"
 
 # ---------------------------------------------------------------------------
-# 6. THE GARBAGE COLLECTOR -- MANDATORY, NOT OPTIONAL.
+# 6. THE GARBAGE COLLECTOR -- MANDATORY WHENEVER THE DISK TIER IS ON.
 #
-# The fs tier writes and never deletes (see §3.2). Two layers:
+# The default RAM-only build needs only the first layer, which the base launcher
+# runs on every start. The fs tier writes and never deletes (see §3.2), so with
+# it on both layers are required:
 #   * startup: the base launcher reports orphan containers and reaps
 #     unreferenced /dev/shm regions, fuser-gated.
 #   * runtime: kvcache-reap.sh on a systemd timer, 5-minute cadence, 2-stage
@@ -364,15 +491,21 @@ fi
 # theirs wins and we add nothing.
 # ---------------------------------------------------------------------------
 EXTRA="${EXTRA:-}"
-if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
+if [[ "$EXTRA" != *--kv-offloading-size* && "$KVCACHE_TIER_GIB" != 0 ]]; then
   EXTRA="$EXTRA --kv-offloading-size $KVCACHE_TIER_GIB --kv-offloading-backend ${KVOFF_BACKEND:-native}"
 fi
 export EXTRA
 
-echo "[kvcache] entry=$SERVED container=$NAME" >&2
-echo "[kvcache]   CPU tier ${KVCACHE_TIER_GIB} GiB, policy=${KVOFF_POLICY}, reserve=${KVOFF_RAM_RESERVE_GIB} GiB" >&2
+if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then _kvc_build="EXPERIMENTAL (GPU -> RAM -> disk, instrumented)"
+else _kvc_build="default (GPU -> RAM, minimal patch set)"; fi
+echo "[kvcache] entry=$SERVED container=$NAME build=$_kvc_build" >&2
+if [[ "$EXTRA" == *--kv-offloading-size* ]]; then
+  echo "[kvcache]   CPU tier $(sed -n 's/.*--kv-offloading-size[= ]*\([0-9.]*\).*/\1/p' <<<"$EXTRA") GiB, policy=${KVOFF_POLICY}, reserve=${KVOFF_RAM_RESERVE_GIB} GiB" >&2
+else
+  echo "[kvcache]   CPU tier OFF -- no KV-cache offload this boot" >&2
+fi
 echo "[kvcache]   fs tier ${KVOFF_DISK:-<off>}${KVOFF_DISK:+/$KVOFF_DISK_SUBDIR}" >&2
-echo "[kvcache]   mamba_stride=${KVOFF_MAMBA_STRIDE} eagle_groups=${KVOFF_EAGLE_GROUPS}" >&2
+echo "[kvcache]   patches: KVOFF_MINIMAL=${KVOFF_MINIMAL} mamba_stride=${KVOFF_MAMBA_STRIDE} eagle_groups=${KVOFF_EAGLE_GROUPS}" >&2
 echo "[kvcache]   base launcher: $BASE_LAUNCHER" >&2
 
 exec "$BASE_LAUNCHER" "$@"
