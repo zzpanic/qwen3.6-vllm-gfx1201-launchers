@@ -29,9 +29,10 @@ R3.15 bug was found. The script reads the RUNNING engine's files through
 `/proc/<pid>/root`, not the copies on the host, because those are the ones that
 can disagree. On the default build it reports FAILs that are not real, because the
 counters it compares are not exported; there, read the boot log instead — the
-`[kvcache]` lines name the build, and each of the two non-fatal default patches
-prints a `[radiance] WARNING` if it did not apply (the third, mixed-hit, stops the
-boot).
+      `[kvcache]` lines name the build, and each of the five non-fatal default patches
+      (eagle-group, mamba-stride, reconcile re-ask, swa-align/touch-all, last-block
+      align) prints a `[radiance] WARNING` if it did not apply (the sixth, mixed-hit,
+      stops the boot).
 
 ## The mounts
 

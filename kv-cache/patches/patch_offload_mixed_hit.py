@@ -123,7 +123,7 @@ TARGET = SP / "vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler
 apply(
     TARGET,
     "class SchedulerOffloadConfig(NamedTuple):",
-    """_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "1") == "1"
+    """_RADIANCE_ALLOW_MIXED_HIT = os.environ.get("RADIANCE_OFFLOAD_MIXED_HIT", "0") == "1"
 _RADIANCE_ASSERT_DUMPED = False
 
 

@@ -45,6 +45,18 @@
 # cross. If the target cannot be met without crossing it, the script says so and
 # stops, rather than delete young blocks.
 #
+# CORRECTED 2026-09-19 (read in the live image + measured): the ENGINE KILLER claim
+# above is wrong for the TieringOffloadingSpec tier we run. The GPU only ever loads
+# from the CPU tier; a failed fs read fails the PROMOTION (fs -> CPU), and
+# cpu/manager.py complete_store(success=False) drops the half-written CPU block, so
+# worker.py:361 is never reached from a disk failure. What it DID do: the request
+# kept a cached `present` verdict and re-promoted the missing file forever -- a hung
+# request, not a dead engine (bow-20260919/tools/badfile_test.py: 240 s, 294 failed
+# reads). kv-cache/patch_kv_offload_fs_failed_load.py (KVOFF_FS_FAILED_LOAD_FORGET=1)
+# turns that into a recompute of the block. With it live, deleting a young block
+# costs a recompute, and a FULL volume costs every store -- so Stage C below crosses
+# MIN_AGE_MIN when the volume is nearly full. The floor still governs normal running.
+#
 # Ordering is oldest-mtime-first. The tier writes each block once and never
 # modifies it (io.py short-circuits on os.path.exists), so mtime is insertion
 # time: FIFO, which for a prefix cache approximates LRU at zero I/O cost. True
@@ -64,6 +76,8 @@ MIN_AGE_MIN=${KVCACHE_MIN_AGE_MIN:-90}      # HARD FLOOR: nothing younger is eve
 MAX_AGE_HOURS=${KVCACHE_MAX_AGE_HOURS:-0}   # 0 = age rule OFF, capacity alone governs; >0 = also delete anything older
 TARGET_PCT=${KVCACHE_TARGET_PCT:-65}        # and keep %use at or below this
 MAX_DELETE=${KVCACHE_MAX_DELETE:-4000}      # per-run cap so no cycle runs long; next cycle continues
+EMERGENCY_PCT=${KVCACHE_EMERGENCY_PCT:-90}  # above this after Stage B, Stage C crosses MIN_AGE_MIN (0 = never)
+EMERGENCY_MIN_AGE_MIN=${KVCACHE_EMERGENCY_MIN_AGE_MIN:-1}  # Stage C still spares blocks written in the last minute
 TMP_AGE_MIN=${KVCACHE_TMP_AGE_MIN:-60}      # orphaned *.tmp older than this go too
 DRY=${DRY_RUN:-}
 
@@ -132,6 +146,29 @@ if [ "$cur" -gt "$TARGET_PCT" ] && [ "$capped" -eq 0 ]; then
   [ -z "$DRY" ] && [ "$cur" -gt "$TARGET_PCT" ] && floor_hit=1
 fi
 
+# --- Stage C: emergency. The floor held and the volume is still nearly full, so
+# --- stores are about to fail (ENOSPC) for everything. Delete oldest-first below
+# --- the floor, down to the target, sparing only the last EMERGENCY_MIN_AGE_MIN.
+# --- 2026-09-19: synthetic three-session load wrote ~80 GB in 15 min and left the
+# --- 94 GB volume at 100% with every block younger than the 15-min floor.
+emergency=0
+cur=$(pct)
+if [ "$EMERGENCY_PCT" -gt 0 ] && [ "$cur" -gt "$EMERGENCY_PCT" ] && [ "$capped" -eq 0 ]; then
+  emergency=1
+  while IFS= read -r -d '' -u 3 line; do
+    if [ "$removed" -ge "$MAX_DELETE" ]; then capped=1; break; fi
+    f=${line#* }
+    [ -f "$f" ] || continue
+    rm_one "$f"
+    if [ $(( removed % 200 )) -eq 0 ]; then
+      cur=$(pct)
+      [ "$cur" -le "$TARGET_PCT" ] && break
+    fi
+  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$EMERGENCY_MIN_AGE_MIN" -printf '%T@ %p\0' | sort -z -n)
+  cur=$(pct)
+  [ -z "$DRY" ] && [ "$cur" -le "$TARGET_PCT" ] && floor_hit=0
+fi
+
 # Directory fan-out is <hhh>/<hh>_g<group>/, so emptied dirs accumulate. Only
 # reachable when something was actually deleted, which is when they appear.
 if [ -z "$DRY" ] && [ "$removed" -gt 0 ]; then
@@ -149,6 +186,7 @@ else
   echo "kvcache-reap: removed $removed block(s) [${aged} by age, $((removed - aged)) for capacity]; now ${now}% used"
 fi
 [ "$capped" -eq 1 ] && echo "kvcache-reap: stopped at the ${MAX_DELETE}-block per-run cap; the next cycle continues where this one left off"
+[ "$emergency" -eq 1 ] && echo "kvcache-reap: EMERGENCY stage ran (volume was above ${EMERGENCY_PCT}% with every block under ${MIN_AGE_MIN} min); deleted below the floor, sparing the last ${EMERGENCY_MIN_AGE_MIN} min" >&2
 if [ "$floor_hit" -eq 1 ]; then
   echo "kvcache-reap: WARNING ${now}% used is still above the ${TARGET_PCT}% target, but every remaining block is" >&2
   echo "kvcache-reap:   younger than ${MIN_AGE_MIN} min. NOT deleting those -- recent blocks are the engine's hot set," >&2

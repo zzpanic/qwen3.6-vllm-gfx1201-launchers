@@ -117,7 +117,7 @@ apply(
     # Gating it on model_version leaves every other speculative model unannotated,
     # which trips the offload scheduler's flag-them-all fallback. Setting
     # RADIANCE_OFFLOAD_EAGLE_GROUPS=0 restores the DeepSeek-only gate.
-    if os.environ.get("RADIANCE_OFFLOAD_EAGLE_GROUPS", "1") != "1" and not any(
+    if os.environ.get("RADIANCE_OFFLOAD_EAGLE_GROUPS", "0") != "1" and not any(
         getattr(spec, "model_version", None) == "deepseek_v4"
         for spec in kv_cache_spec.values()
     ):

@@ -34,7 +34,7 @@ We are paying to cache 70 states so that we can read exactly one.
 
 WHAT THIS CHANGES
 
-Keep every Nth Mamba snapshot (N = RADIANCE_MAMBA_STORE_STRIDE, default 8), and
+Keep every Nth Mamba snapshot (N = RADIANCE_MAMBA_STORE_STRIDE, default 1 = off), and
 round the servable hit window down to the same boundary so we only ever ask for a
 snapshot we actually kept. Two halves, and they must agree:
 
@@ -131,7 +131,7 @@ apply(
 # radiance R3.13: keep every Nth Mamba/GDN snapshot rather than one per chunk. A Mamba group
 # holds a single recurrent state and the load path reads exactly one chunk of it, but the
 # store path writes 27 MB per group per chunk. 1 disables the patch entirely.
-_RADIANCE_MAMBA_STRIDE = max(1, int(os.environ.get("RADIANCE_MAMBA_STORE_STRIDE", "8")))''',
+_RADIANCE_MAMBA_STRIDE = max(1, int(os.environ.get("RADIANCE_MAMBA_STORE_STRIDE", "1")))''',
     sentinel="_RADIANCE_MAMBA_STRIDE",
     label="1 scheduler: RADIANCE_MAMBA_STORE_STRIDE knob",
 )
@@ -198,4 +198,4 @@ apply(
 )
 
 print(f"[radiance] R3.13 applied -- stride "
-      f"{os.environ.get('RADIANCE_MAMBA_STORE_STRIDE', '8')} (1 = off)")
+      f"{os.environ.get('RADIANCE_MAMBA_STORE_STRIDE', '1')} (1 = off)")

@@ -1,49 +1,69 @@
-WHICH BUILD APPLIES WHAT
-
-  DEFAULT build (KVOFF_MINIMAL=1, what startup-qwen3.8-27b-kvcache.sh runs unless told
-  otherwise) applies ONLY the three marked [default]. Every other patch here is
-  instrumentation, or fs-tier-only, and runs only in the EXPERIMENTAL build
-  (KVCACHE_EXPERIMENTAL=1, which sets KVOFF_MINIMAL=0).
-
-APPLY ORDER (the launcher runs them in exactly this order; skipped ones are skipped in place)
-
- 1  patch_offload_mixed_hit.py                   [default]  FATAL on failure
- 2  patch_kv_offload_instrumentation.py                     FATAL on failure
- 3  patch_kv_offload_lookup_outcomes.py
- 4  patch_kv_offload_eagle_groups.py             [default]  (upstream counterpart: PR #52047,
-                                                             which does NOT cover this model)
- 5  patch_kv_offload_mamba_stride.py             [default]  needs 4
- 6  patch_kv_offload_fs_fanout.py                           (ported from PR #49225)
- 7  patch_kv_offload_tier_report.py                         needs 2; instrumentation only
- 8  apply-bundle.py, which applies in turn:                 needs 7
-      patch_promotion_refusal_instrumentation.py            counters only; kept as a tripwire
-      patch_kv_offload_wallclock_reanchored.py              re-anchors timing 2 installs
- 9  patch_kv_offload_lookup_cache_invalidate.py             anchors stand on 6
-10  patch_kv_offload_deferral_outcomes.py                   counters only
-11  patch_kv_offload_miss_reason_v2.py                      counters only
-
-This order is a dependency, not a preference. 7 extends the get_stats() that 2
-creates on the fs tier, and refuses to apply if 2 has not run -- it says so
-rather than failing on a missing anchor. 8's wall-clock patch re-anchors timing
-that 2 installs, and both of 8's patches reference names 7 creates.
-
-9 invalidates the per-key async-lookup verdict when a fs store lands. Upstream caches
-an `absent` verdict and re-checks only when the entry is None; the fs store path never
-tells it anything changed, so a just-stored block keeps reading as absent until every
-referencing request finishes. Drops rather than flips to present: the reaper deletes
-out-of-band, so a cached `present` would age into a FALSE hit. Gated on
-RADIANCE_LOOKUP_INVALIDATE (default 0 = upstream behaviour).
-
-REMOVED 2026-09-12, deliberately, and not to be re-added:
-  patch_kv_offload_serve_ready_prefix.py   built on the promotion-refusal thesis, which
-      was refuted by measurement (0 refusals across 5,416 promotions at a 100%-full CPU
-      tier). Its knob RADIANCE_OFFLOAD_PENDING_IS_MISS is gone with it; upstream's
-      wait-for-it behaviour is what runs now.
-  patch_promotion_refusal_fix.py           the "fix" for that same refuted thesis.
-The counters in 8 are kept on purpose: they are the evidence the thesis is dead, and the
-tripwire if the CPU tier is ever shrunk.
-
-BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
-delete it in favour of the upstream implementation wherever one now exists. That is
-the note on upstreaming in README.md. A house patch that duplicates merged upstream
-work is a liability, not an asset.
+ WHICH BUILD APPLIES WHAT
+ 
+   DEFAULT build (KVOFF_MINIMAL=1, what startup-qwen3.8-27b-kvcache.sh runs unless told
+   otherwise) applies ONLY the six marked [default]: the crash guard plus the behavioural
+   fixes (draft-group annotation, store stride, reconcile re-ask, swa-align/touch-all and
+   last-block align). Every other patch here is instrumentation or fs-tier-only, and runs
+   only in the EXPERIMENTAL build (KVCACHE_EXPERIMENTAL=1, which sets KVOFF_MINIMAL=0).
+ 
+ APPLY ORDER (the launcher runs them in exactly this order; skipped ones are skipped in place)
+ 
+  1  patch_offload_mixed_hit.py                   [default]  FATAL on failure
+  2  patch_offload_instrumentation.py                     FATAL on failure (experimental only)
+  3  patch_offload_lookup_metrics.py                        experimental only
+  4  patch_eagle_groups.py                      [default]  (upstream counterpart: PR #52047,
+                                                              which does NOT cover this model)
+  5  patch_mamba_stride.py                     [default]  needs 4
+  6  patch_reconcile_reask.py                 [default]  behavioural; outside KVOFF_MINIMAL
+  7  patch_swa_align_touch.py                 [default]  behavioural; outside KVOFF_MINIMAL
+  8  patch_sched_align_last_block.py          [default]  behavioural; outside KVOFF_MINIMAL
+  9  patch_offload_debug_instrument.py                    experimental only
+ 10  patch_offload_fs_fanout.py                        (ported from PR #49225; experimental only)
+ 11  patch_offload_tier_report.py                     needs 2; instrumentation only (experimental)
+ 12  patch_offload_promotion_wallclock.py             needs 11; counters + re-anchored timing
+ 13  patch_lookup_invalidate.py                       anchors stand on 10; experimental only
+ 14  patch_fs_failed_load.py                        anchors on 10 and 13; experimental only
+ 15  patch_offload_miss_deferral_metrics.py           counters only; order-independent (task 65)
+ 
+ This order is a dependency, not a preference. 11 extends the get_stats() that 2
+ creates on the fs tier, and refuses to apply if 2 has not run -- it says so
+ rather than failing on a missing anchor. 12's wall-clock hunk re-anchors timing
+ that 2 installs, and both of 12's hunks reference names 11 creates (12 is the merged
+ promotion-refusal + wall-clock bundle, promotion hunk first). 13 and 14 stand on
+ 10's fs/manager.py anchors.
+ 
+ 13 invalidates the per-key async-lookup verdict when a fs store lands. Upstream caches
+ an `absent` verdict and re-checks only when the entry is None; the fs store path never
+ tells it anything changed, so a just-stored block keeps reading as absent until every
+ referencing request finishes. Drops rather than flips to present: the reaper deletes
+ out-of-band, so a cached `present` would age into a FALSE hit. Gated on
+ RADIANCE_LOOKUP_INVALIDATE (default 0 = upstream behaviour).
+ 
+ 14 forgets the lookup verdict of keys whose fs load FAILED (the 2026-09-19 hang fix):
+ without it a reaped or unreadable block makes its request retry a file that is gone
+ until the client gives up. Gated on RADIANCE_FS_FAILED_LOAD_FORGET (default 1 = on).
+ 
+ 6 (reconcile re-ask) asks the offload tier again from a lowered boundary after the stock
+ hit_diverged fallback drops a GPU attention hit with no Mamba state, instead of recomputing
+ the whole prompt. Gated on RADIANCE_RECONCILE_REASK (default 1 = on). The re-ask MEMO
+ sub-path was removed 2026-09-19 (it crashed EngineCore).
+ 
+ 8 (last-block align) stops the prompt's final chunk at its last full block boundary so
+ every cached block is computed in the same aligned chunk a cold prefill uses -- without it
+ a cached multi-turn resume can differ from a cold prefill in the low bits. Gated on
+ RADIANCE_ALIGN_PROMPT_LAST_BLOCK (default 1 = on).
+ 
+ REMOVED 2026-09-12 / 2026-09-19, deliberately, and not to be re-added:
+   patch_offload_split_pool.py              dead in both builds since 2026-09-19 (KVOFF_SPLIT_POOL_SHARE off).
+   the re-ask MEMO sub-path of reconcile_reask  dead since 2026-09-19 (KVOFF_REASK_MEMO=0; it crashed EngineCore).
+   patch_kv_offload_serve_ready_prefix.py   built on the promotion-refusal thesis, which
+       was refuted by measurement (0 refusals across 5,416 promotions at a 100%-full CPU
+       tier). Its knob RADIANCE_OFFLOAD_PENDING_IS_MISS is gone with it.
+   patch_promotion_refusal_fix.py           the "fix" for that same refuted thesis.
+ The promotion-refusal counters in 12 are kept on purpose: they are the evidence the
+ thesis is dead, and the tripwire if the CPU tier is ever shrunk.
+ 
+ BEFORE YOU USE ANY OF THESE: check each against current vLLM/radiance HEAD and
+ delete it in favour of the upstream implementation wherever one now exists. That is
+ the note on upstreaming in README.md. A house patch that duplicates merged upstream
+ work is a liability, not an asset.
