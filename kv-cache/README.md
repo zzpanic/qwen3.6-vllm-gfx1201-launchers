@@ -1,140 +1,134 @@
 # KV-cache offload for a GDN hybrid on a single AMD card
 
-**KV-cache offload for Qwen3.8-27B** (Gated-DeltaNet hybrid, MXFP4 weights, FP8 KV), served by
-vLLM 0.27.1 / radiance 0.9.3 on one **AMD Radeon AI PRO R9700** (gfx1201 / RDNA4, 32 GB, TP=1), at
-a 204,800-token context. It comes in two options from one launcher: **GPU → RAM** (the default) and
-**GPU → RAM → disk** (experimental).
+KV-cache offload for hybrid (Gated-DeltaNet + attention + drafter) models on one card,
+GPU → RAM → disk. Served by vLLM 0.27.1 / radiance 0.9.3 on one AMD Radeon AI PRO R9700
+(gfx1201 / RDNA4, 32 GB, TP=1) — here, Qwen3.8-27B (Gated-DeltaNet hybrid, MXFP4 weights,
+FP8 KV) at a 204,800-token context. It exists so that when **more than one client shares a
+slot** (`--max-num-seqs`), a returning client's prefix is **loaded back from RAM (or disk)
+instead of reprocessed**: the prefix is kept off the card, and on the next turn it is restored
+rather than recomputed.
 
-## Why: more than one client per slot
+## Why this build: bit-identical, not fast
 
-A slot is one sequence the engine serves at a time (`--max-num-seqs`). When **more than one client
-shares a slot**, they take turns, and each turn can push another client's prefix out of the GPU
-cache. Without offload, that client **reprocesses its whole prefix** on its next turn. With offload,
-the prefix is kept off the card and **loaded back instead of reprocessed**.
+This build does not chase peak speed; it is focused on **bit-identical KV-cache serving**. That
+means a cached turn produces the **same tokens and the same logprobs** as a cold prefill of the
+same prompt — a bar stricter than upstream promises. It holds **serially** (one turn at a time);
+it is not expected under concurrent batches, where the batch shape changes the numerics.
 
 ## Two options
 
 Both run from `startup-qwen3.8-27b-kvcache.sh`; one variable chooses between them.
 
-### Option 1 — GPU → RAM (default)
-
 ```bash
-./startup-qwen3.8-27b-kvcache.sh
+./startup-qwen3.8-27b-kvcache.sh                    # option 1 (default)
+KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2 (experimental)
+DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh        # print the command, run nothing
 ```
-
-- **What it is:** a RAM tier in `/dev/shm` behind the GPU prefix cache, plus three behavioural
-  patches: mixed-hit, eagle-groups, mamba-stride.
-- **What it needs:** `/dev/shm` big enough for the RAM tier. The launcher sizes the tier (see
-  [Sizing](#sizing)) and turns offload off, saying why, if it does not fit.
-- **Tools:** `tools/kvwatch.py`.
-
-### Option 2 — GPU → RAM → disk (experimental)
-
-```bash
-KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh
-```
-
-- **What it is:** the same RAM tier with a disk tier behind it, plus the full instrumented patch set.
-- **What it needs:** `/dev/shm` as above, a dedicated filesystem (`KVCACHE_DISK`, default
-  `/kvcache`), and the **reaper** — the disk tier never deletes on its own.
-- **Tools:** `tools/kvwatch.py`, `tools/kvvalidate.py`, `tools/tierreport.py`.
 
 | | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk (experimental) |
 |---|---|---|
 | select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
-| house patches | 3 behavioural | those 3 + instrumentation + two disk-tier patches |
-| needs | `/dev/shm` for the RAM tier | that, plus a filesystem and the reaper |
+| house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |
+| needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
 | tools | `kvwatch.py` | `kvwatch.py`, `kvvalidate.py`, `tierreport.py` |
 
-## What you can expect
+Option 1 is the release default (`KVOFF_MINIMAL=1`, no disk tier). Option 2 adds the disk tier
+and the full instrumented set; `kvvalidate.py` is option 2 only — its counters are not exported
+on option 1, and it reports false FAILs there.
 
-**Both options:** the RAM tier reads at **337,408 tok/s (11.8 GB/s)** (measured on option 2).
+**Sizing — one rule.** The RAM tier holds **at least 2 × the smaller of the GPU KV pool and
+max-model-len**, both in tokens. The GPU pool is the `GPU KV cache size` line in the boot log;
+Qwen3.8's max-model-len tops out at 262,144.
 
-**Both options — the floor:** a prefix under **13,184 tokens** gets no offload hit, because the
-recurrent-state snapshots are kept every 8th chunk.
-
-**Option 2:** the disk tier read at 3,868 tok/s (228 MB/s, ordinary SATA SSD); whether that beats a
-recompute is not settled. One long run on this option — 31.9M prompt tokens of agent coding work,
-2–3 agents, ~14 h, saturated:
-
-| | share of prompt tokens |
+| smaller of GPU pool and max-model-len | RAM tier, at least |
 |---|---|
-| GPU prefix cache | 64.5% |
-| offload tiers (RAM + disk) | 17.5% |
-| **served without recompute** | **82.0%** |
-| recomputed | 18.0% |
+| 100k | 200k tokens |
+| 200k | 400k tokens |
+| 262,144 (e.g. a 300k pool) | 524,288 tokens |
 
-Its raw `/metrics` ships in `examples/`; reproduce the report with:
+`KVCACHE_TIER_GIB=auto` applies this and checks it against `/dev/shm` and system RAM (keeping
+15 GiB back). **If it does not fit, offload is disabled for that boot and the log says why.**
+Set `KVCACHE_TIER_GIB=<GiB>` to override. (Convert at the *offloaded* bytes/token — not the
+on-chip figure — per [`docs/SETUP.md`](docs/SETUP.md).)
 
-```bash
-python3 kv-cache/tools/kvvalidate.py --markdown --metrics-file kv-cache/examples/metrics-snapshot-20260912.txt
-```
+## The tier table
 
-Full output: [`examples/EXAMPLE-REPORT.md`](examples/EXAMPLE-REPORT.md).
+Sample output of `tools/kvtable.py` — **2026-09-19, lifetime since the 18:57 boot; light traffic
+(the fs tier served 1,648 tokens)**. Produce your own with
+`python3 kv-cache/tools/kvtable.py --url <engine>/metrics`.
 
-## Correctness
+|  | L0 GPU | L1 RAM | L2 SSD | recompute |
+|---|---|---|---|---|
+| Served, lifetime | 85.8% | 6.5% | 0.0% | 7.7% |
+| Capacity | 229k tok (8.7 GiB) | 22.0 GiB | 93.9 GiB | - |
+| Bytes per token | 40 KB | 35 KB | 32 KB | - |
+| Moves data | in place | RAM → GPU at 12.0 GB/s | SSD → RAM at 1.0 GB/s | - |
+| Tokens/s equivalent | - | ~334k | 29k | 2k |
+| vs recompute | - | 173x | 15x | 1x |
+| Batch latency p50 / p99 | - | 0.25 s / 0.50 s | 0.03 s / 0.50 s | - |
+| How full | always | 22 of 22 GiB | 61 of 94 GiB | - |
 
-`bench/correctbench.py` compares cached output against a cold recompute: a negative control (CT5),
-cold / GPU / disk / mixed hits on one long prompt (CT1), cross-prompt isolation (CT2, CT3), chunk
-boundaries (CT4) and the recurrent-state stride (CT6). It uses the disk tier, so it runs on option 2.
+## Checking exactness yourself
 
-Last run: CT1, CT2, CT5 and CT6 passed; CT3 and CT4 failed only on probes that shared the card with
-another request, and CT3 passed on a re-run on a quiet card. **Run it on a quiet card** — a
-co-tenant request can change a near-tie token with no cache involved.
-
-## Sizing
-
-**One rule: the RAM tier holds at least 2× the smaller of the GPU KV pool and max-model-len**, both
-in tokens. The GPU pool is the `GPU KV cache size` line in the boot log; Qwen3.8's max-model-len
-tops out at 262,144.
-
-| smaller of GPU pool and max-model-len | RAM tier, at least | at 61,440 B/token |
-|---|---|---|
-| 100k | 200k tokens | 11.4 GiB |
-| 200k | 400k tokens | 22.9 GiB |
-| 262,144 (e.g. a 300k pool at Qwen3.8's max) | 524,288 tokens | 30.0 GiB |
-
-Convert at the *offloaded* bytes per token, which is not the GPU's: 61,440 B here, against 40,652 B
-on-chip. Both are model-specific; [`docs/SETUP.md`](docs/SETUP.md) shows how to derive yours.
-
-The launcher applies it in both options: `KVCACHE_TIER_GIB=auto` computes the minimum from `MAXLEN`
-and `KV_MEM` (24 GiB on this stack) and checks it against `/dev/shm` and system RAM, keeping 15 GiB
-back. **If it does not fit, offload is disabled for that boot and the log says why.** Set
-`KVCACHE_TIER_GIB=<GiB>` to override.
-
-## Getting started
+`turnbench` is the gate: 3 sessions × 7 turns, every **cached** turn compared token-for-token and
+logprob-for-logprob against a **cold twin** of the same prompt. On the production config it is
+**PASS 21/21 exact** (logprobs bit-identical, spec counters equal). Run it on a quiet card — a
+co-tenant request can flip a near-tie token with no cache involved. One command:
 
 ```bash
-git clone https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers
-cd qwen3.6-vllm-gfx1201-launchers
-DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh                         # option 1: prints the command, runs nothing
-DRY_RUN=1 KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh  # option 2: same
+python3 kv-cache/bench/turnbench.py --yes
 ```
 
-If that prints a sane command the launcher is wired correctly; the boot log's `[kvcache]` lines
-name the option and the tier size. Then read [`docs/SETUP.md`](docs/SETUP.md).
+## The patch set
 
-**Watching it — both options:**
+Anchored against vLLM 0.27.1 + radiance 0.9.3, applied at container start in a real dependency
+order. Every behaviour change sits behind an env gate whose **unset state is stock vLLM**; nothing
+hard-codes a model name, group index or block size. **Default = the 6 "always"; experimental = all 15.**
 
-```bash
-watch -n 5 python3 kv-cache/tools/kvwatch.py
-```
+| # | patch | does | scope |
+|---|---|---|---|
+| 1 | `patch_offload_mixed_hit` | mixed GPU / tier hit accounting | default |
+| 2 | `patch_offload_instrumentation` | per-tier load/store metrics | exp |
+| 3 | `patch_offload_lookup_metrics` | lookup-outcome counters | exp |
+| 4 | `patch_eagle_groups` | annotate the eagle / draft KV groups | default |
+| 5 | `patch_mamba_stride` | recurrent-state store stride (4) | default |
+| 6 | `patch_reconcile_reask` | reconcile a re-asked turn (memo off) | default |
+| 7 | `patch_swa_align_touch` | sliding-window align / touch | default |
+| 8 | `patch_sched_align_last_block` | align the prompt's last block — **upstream candidate** | default |
+| 9 | `patch_offload_debug_instrument` | debug hooks | exp |
+| 10 | `patch_offload_fs_fanout` | fs read fan-out | exp |
+| 11 | `patch_offload_tier_report` | tier-report metrics | exp |
+| 12 | `patch_offload_promotion_wallclock` | promotion + wall-clock timing | exp |
+| 13 | `patch_lookup_invalidate` | lookup invalidation (off by default) | exp |
+| 14 | `patch_fs_failed_load` | forget a failed disk load — **upstream candidate** | exp |
+| 15 | `patch_offload_miss_deferral_metrics` | miss / deferral counters | exp |
 
-Hit rates, bytes loaded and stored, and recent requests with how much of each was cached. It reads
-through llama-swap on `:1234`; otherwise set `KVWATCH_METRICS=http://127.0.0.1:<port>/metrics`.
+The two marked rows are generic vLLM fixes, not model-specific. The intended destination is
+**upstream vLLM**: check each patch against current HEAD and drop it wherever upstream has since
+implemented it.
 
-**Checking it — option 2:** `python3 kv-cache/tools/kvvalidate.py` checks the cache's invariants
-against a live endpoint and names the regime it is in. **Do not run it against option 1** — the
-counters it compares are not exported there, and it reports FAILs that are not real.
+## How this differs from ggz14
 
-## What this is
+A deliberate re-configuration of ggz14's TP=1 stack — this launcher is a house copy of its
+`serve-mxfp4.sh`, and it **does not adopt ggz14's single-GPU profile**. Only the settings that
+matter (ggz14 column = `serve-mxfp4.sh` TP=1 single-GPU profile at `980f891`):
 
-Anchored patches against vLLM 0.27.1 + radiance 0.9.3, applied at container start: three in
-option 1, the full set in option 2 — see [`patches/APPLY-ORDER.txt`](patches/APPLY-ORDER.txt). The
-intended destination is upstream vLLM: check each patch against current HEAD and drop it wherever
-upstream has since implemented it.
+| setting | ggz14 (TP=1 profile) | here | why |
+|---|---|---|---|
+| KV offload tier | none (no `--kv-transfer-config` at all) | GPU → RAM (→ disk) | **this is the point** |
+| mamba ssm dtype | fp16 (conv bf16) | **fp32 ssm** | a tier can't round-trip a 16-bit temporal state |
+| context (`--max-model-len`) | 65,536 | 204,800 | extra context is gold; fits the cold pin |
+| `--max-num-seqs` | 8 | 2 | single-user agentic; serialises eviction |
+| prefill chunk (`--max-num-batched-tokens`) | 4,096 | 2,048 | smallest activation transient |
+| `--gpu-memory-utilization` | 0.98 | 0.97 | 0.98 → profiling → device-lost without a pin (the pin overrides it regardless) |
+| `--kv-cache-memory` | auto → profile pin 6,535,819,798 | explicit pin 9,300,000,000 | no cold/warm gap |
+| GDN_LAZY | 1 | 0 | profile default, not adopted |
+| draft sampling | greedy | probabilistic | +10% acceptance, measured, no cost |
+| generation temp | 0.7 | 1.0 | model-card preset; 0.7 was benchmark-chasing |
+| capture sizes | `[1 … 64]` | `[1,2,4,8,16]` | capture only small-M decode shapes |
 
-**Author:** zzpanic — [github.com/zzpanic](https://github.com/zzpanic). Reproductions on other
-hardware are wanted more than anything else here: if you run this on a different card, please open
-an issue with your boot log's `[kvcache]` lines and the `External prefix cache hit rate` it reaches
-— or, on option 2, `tools/kvvalidate.py` output.
+## Evidence scope
+
+Everything here was measured on **radiance 0.9.3 / vLLM 0.27.1 on one R9700**. **Stock vLLM does
+not run this model on this card** (the RDNA4 path is the radiance overlay + libr4d), so there is
+no stock control arm; any contribution must say so up front.
