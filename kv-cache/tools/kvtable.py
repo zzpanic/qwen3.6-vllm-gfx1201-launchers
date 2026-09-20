@@ -374,8 +374,8 @@ def build_table(r):
                    f_gib(cpu["cap_bytes"]) if cpu and cpu["cap_bytes"] else "-",
                    f_gib(fs["cap_bytes"]) if fs and fs["cap_bytes"] else "-",
                    "-"))
-    rows.append(row("Bytes per token",
-                   f_kib(r["gpu_bpt"]) if r["gpu_bpt"] else "-",
+    rows.append(row("Bytes moved per hit token",
+                   "-",
                    f_kib(cpu["bytes_per_token"]) if cpu and cpu["bytes_per_token"] else "-",
                    f_kib(fs["bytes_per_token"]) if fs and fs["bytes_per_token"] else "-",
                    "-"))
@@ -448,11 +448,15 @@ def main(argv=None):
         print()
         print("_Lifetime since boot; includes all traffic since the engine "
               "started._")
+    print("_A hit MOVES less than the tier STORES: it reads every attention chunk but only "
+          "one recurrent snapshot per stride. Divide a tier's capacity by the tokens it holds "
+          "for storage density (the figure the sizing rule uses), not this row._")
     for n in r["notes"]:
         print("_Note: %s_" % n)
     if r["missing"]:
         print()
-        print("_No tier-labelled metrics (public default, KVOFF_MINIMAL=1). "
+        print("_No tier-labelled metrics: either this build has no tier-report patch "
+              "(the RAM-only default), or no tier traffic has happened yet since boot. "
               "Missing series: %s. The L1/L2 split and per-tier rates are "
               "unavailable; GPU and recompute rows use the standard counters._"
               % ", ".join("vllm:kv_offload_tier_" + m for m in r["missing"]))

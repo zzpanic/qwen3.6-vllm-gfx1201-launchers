@@ -30,7 +30,7 @@ DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh        # print the command, run nothi
 | select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
 | house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
-| tools | `kvwatch.py` | `kvwatch.py`, `kvvalidate.py`, `tierreport.py` |
+| tools | `kvwatch.py`, `kvtable.py` | those, plus `kvvalidate.py` and `tierreport.py` |
 
 Option 1 is the release default (`KVOFF_MINIMAL=1`, no disk tier). Option 2 adds the disk tier
 and the full instrumented set; `kvvalidate.py` is option 2 only — its counters are not exported
@@ -54,14 +54,14 @@ on-chip figure — per [`docs/SETUP.md`](docs/SETUP.md).)
 ## The tier table
 
 Sample output of `tools/kvtable.py` — **2026-09-19, lifetime since the 18:57 boot; light traffic
-(the fs tier served 1,648 tokens)**. Produce your own with
+(the fs tier served 1,648 tokens, so its columns are one block's worth of evidence)**. Produce your own with
 `python3 kv-cache/tools/kvtable.py --url <engine>/metrics`.
 
 |  | L0 GPU | L1 RAM | L2 SSD | recompute |
 |---|---|---|---|---|
 | Served, lifetime | 85.8% | 6.5% | 0.0% | 7.7% |
 | Capacity | 229k tok (8.7 GiB) | 22.0 GiB | 93.9 GiB | - |
-| Bytes per token | 40 KB | 35 KB | 32 KB | - |
+| Bytes moved per hit token | - | 35 KB | 32 KB | - |
 | Moves data | in place | RAM → GPU at 12.0 GB/s | SSD → RAM at 1.0 GB/s | - |
 | Tokens/s equivalent | - | ~334k | 29k | 2k |
 | vs recompute | - | 173x | 15x | 1x |
