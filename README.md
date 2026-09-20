@@ -308,9 +308,9 @@ It comes in two options from the same launcher:
 |---|---|---|
 | run | `./startup-qwen3.8-27b-kvcache.sh` | `KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh` |
 | tiers | RAM tier in `/dev/shm` | the same RAM tier + a disk tier |
-| patches | 3 behavioural | those 3 + instrumentation + two disk-tier patches |
+| patches | the 6 behavioural | those 6 + instrumentation + the disk-tier patches (15 in all) |
 | needs | RAM for the tier | that, plus a filesystem and the reaper |
-| tools | `kvwatch.py` | `kvwatch.py`, `kvvalidate.py`, `tierreport.py` |
+| tools | `kvwatch.py`, `kvtable.py` | those, plus `kvvalidate.py` and `tierreport.py` |
 
 In both, the RAM tier is sized automatically to at least 2× the smaller of the GPU KV pool and
 max-model-len; if that does not fit, offload turns itself off and the boot log says why
