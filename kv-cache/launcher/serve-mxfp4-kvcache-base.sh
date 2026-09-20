@@ -170,7 +170,7 @@ REPO="$(realpath -m "${REPO:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")
 # upstream clone ignored by ~/ai's .gitignore -- so those files were tracked by nothing and a
 # `git clean` in that checkout would have deleted them with no copy anywhere. They now live in
 # a tracked directory and ride their own mount; $REPO stays pristine.
-HOUSE="$(realpath -m "${HOUSE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/../patches}")"  # STAGE COPY (rel-20260919): house patches from kv-cache-stage
+HOUSE="$(realpath -m "${HOUSE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/../patches}")"
 [ -d "$HOUSE" ] || die "HOUSE=$HOUSE does not exist (house patches + KV bench live there)"
 # Hardware detection: how many usable AMD GPUs there are, which HIP indices they are, what TP
 # fits them and the model's head counts, and whether a KV pin has been measured for them. Sets

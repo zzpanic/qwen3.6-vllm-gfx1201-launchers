@@ -396,19 +396,19 @@ export KVOFF_MIXED_HIT="${KVOFF_MIXED_HIT:-1}"
 #     [8], not all nine. Upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
 export KVOFF_EAGLE_GROUPS="${KVOFF_EAGLE_GROUPS:-1}"
 
- # (d) mamba stride N=4. THE CAPACITY LEVER: keep every 4th recurrent-state
- #     snapshot. Was 8 until 2026-09-19, when the fs tier landed and it dropped to
- #     4 (pat's sizing rule: without a disk tier the RAM tier must hold >= 2x the
- #     GPU pool; with one, stride 4). What is served stays EXACT. Set 1 to store
- #     every snapshot (the original, higher-byte behaviour).
- export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-4}"
+# (d) mamba stride N=4. THE CAPACITY LEVER: keep every 4th recurrent-state
+#     snapshot. Was 8 until 2026-09-19, when the fs tier landed and it dropped to
+#     4 (pat's sizing rule: without a disk tier the RAM tier must hold >= 2x the
+#     GPU pool; with one, stride 4). What is served stays EXACT. Set 1 to store
+#     every snapshot (the original, higher-byte behaviour).
+export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-4}"
 
- # (d2) prompt-only offload. THE EXACTNESS FIX: with it off, decode-completed blocks
- #      are offloaded and a cached multi-turn resume differs from a cold prefill
- #      (42/42 turns). true = only prefill-completed blocks are offloaded, so cached
- #      == cold. The base launcher's default is false (upstream); production runs
- #      true, so the wrapper sets it explicitly.
- export KVOFF_PROMPT_ONLY="${KVOFF_PROMPT_ONLY:-true}"
+# (d2) prompt-only offload. THE EXACTNESS FIX: with it off, decode-completed blocks
+#      are offloaded and a cached multi-turn resume differs from a cold prefill
+#      (42/42 turns). true = only prefill-completed blocks are offloaded, so cached
+#      == cold. The base launcher's default is false (upstream); production runs
+#      true, so the wrapper sets it explicitly.
+export KVOFF_PROMPT_ONLY="${KVOFF_PROMPT_ONLY:-true}"
 
 # (e) fs fanout. EXPERIMENTAL (KVOFF_MINIMAL=0) only. Splits one promotion across up to N parallel read tasks
 #     (upstream does one task per job). Ported from PR #49225. It splits the
