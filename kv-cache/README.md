@@ -71,13 +71,19 @@ Sample output of `tools/kvtable.py` — **2026-09-19, lifetime since the 18:57 b
 ## Checking exactness yourself
 
 `turnbench` is the gate: 3 sessions × 7 turns, every **cached** turn compared token-for-token and
-logprob-for-logprob against a **cold twin** of the same prompt. On the production config it is
-**PASS 21/21 exact** (logprobs bit-identical, spec counters equal). Run it on a quiet card — a
-co-tenant request can flip a near-tie token with no cache involved. One command:
+logprob-for-logprob against a **cold twin** of the same prompt. Both builds pass it
+**21/21 exact** (logprobs bit-identical, spec counters equal): option 1 (RAM only) and option 2
+(RAM + disk). Run it on a quiet card — a co-tenant request can flip a near-tie token with no
+cache involved. One command:
 
 ```bash
 python3 kv-cache/bench/turnbench.py --yes
+# against something other than the launcher's own entry:
+TURNBENCH_BASE=http://127.0.0.1:8000 python3 kv-cache/bench/turnbench.py --yes
 ```
+
+A corrupt or truncated block on the disk tier is not fatal: the read fails, that one block is
+recomputed, and the block is re-stored intact.
 
 ## The patch set
 

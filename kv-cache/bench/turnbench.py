@@ -62,8 +62,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tierbench as T       # noqa: E402
 import equivbench as E      # noqa: E402
 
-BASE = os.environ.get("TURNBENCH_BASE", "http://127.0.0.1:1234/upstream/qwen3.8-27b-vllm")
-OUT_DIR = os.environ.get("TURNBENCH_OUT", "$HOME/audit/stress/turnbench")
+BASE = os.environ.get("TURNBENCH_BASE", "http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache")
+OUT_DIR = os.environ.get("TURNBENCH_OUT", os.path.expanduser("~/audit/stress/turnbench"))
 CORPUS = os.environ.get("TURNBENCH_CORPUS", "/usr/lib/python3.12")
 RUN = "%x" % (int(time.time()) & 0xFFFFFF)
 SYSTEM = ("You are a careful code assistant working through a codebase one file at a time. "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tierbench -- deterministic KV tier attribution bench for qwen3.8-27b-vllm.
+"""tierbench -- deterministic KV tier attribution bench for qwen3.8-27b-kvcache.
 
 WHY THIS EXISTS
 ---------------
@@ -79,9 +79,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ---------------------------------------------------------------- configuration
 
-MODEL = os.environ.get("TIERBENCH_MODEL", "qwen3.8-27b-vllm")
+MODEL = os.environ.get("TIERBENCH_MODEL", "qwen3.8-27b-kvcache")
 CONTAINER = os.environ.get("TIERBENCH_CONTAINER", "qwen38-27b-vllm")
-OUT_DIR = os.environ.get("TIERBENCH_OUT", "$HOME/audit/stress/tierbench")
+OUT_DIR = os.environ.get("TIERBENCH_OUT", os.path.expanduser("~/audit/stress/tierbench"))
 
 # Endpoints tried in order. The llama-swap proxy path is stable across restarts; the
 # direct upstream port is not (it moves with the entry), so it is only the fallback.

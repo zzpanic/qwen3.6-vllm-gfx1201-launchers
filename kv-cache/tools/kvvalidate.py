@@ -782,7 +782,7 @@ def detect_engine_pid(arg):
 def main():
     ap = argparse.ArgumentParser(description="validate the KV-offload fs tier")
     ap.add_argument("--metrics-url",
-                   default="http://127.0.0.1:1234/upstream/qwen3.8-27b-vllm/metrics")
+                   default="http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache/metrics")
     ap.add_argument("--fs-path", default="/kvcache/blocks")
     ap.add_argument("--history", default=None,
                    help="metrics-history.csv for regime trend (auto-searched if omitted)")
@@ -821,7 +821,7 @@ def main():
     # auto-search for the history csv
     if a.history is None:
         for cand in ("metrics-history.csv",
-                     "$HOME/work/kv-queue/metrics-history.csv"):
+                     os.path.expanduser("~/work/kv-queue/metrics-history.csv")):
             if os.path.exists(cand):
                 a.history = cand
                 break

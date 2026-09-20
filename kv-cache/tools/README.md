@@ -35,7 +35,7 @@ style, plus a table on stdout. It answers three questions in plain language:
 
 ## It needs patch 2
 
-`patches/patch_kv_offload_tier_report.py` adds the 19 `tier`-labelled series the
+`patches/patch_offload_tier_report.py` (patch 11) adds the 19 `tier`-labelled series the
 report reads. Without it the tool still runs, still reports the prompt-token
 source split and the recompute baseline, and says exactly what is missing and
 why -- but there is no per-tier row, because the engine unlabelled

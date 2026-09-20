@@ -52,7 +52,7 @@
 # worker.py:361 is never reached from a disk failure. What it DID do: the request
 # kept a cached `present` verdict and re-promoted the missing file forever -- a hung
 # request, not a dead engine (bow-20260919/tools/badfile_test.py: 240 s, 294 failed
-# reads). kv-cache/patch_kv_offload_fs_failed_load.py (KVOFF_FS_FAILED_LOAD_FORGET=1)
+# reads). kv-cache/patches/patch_fs_failed_load.py (KVOFF_FS_FAILED_LOAD_FORGET=1)
 # turns that into a recompute of the block. With it live, deleting a young block
 # costs a recompute, and a FULL volume costs every store -- so Stage C below crosses
 # MIN_AGE_MIN when the volume is nearly full. The floor still governs normal running.

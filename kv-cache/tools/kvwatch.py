@@ -31,6 +31,7 @@ TWO TRAPS BUILT INTO THE DISPLAY
    was thread-summed and overstated wall clock about 7x). The derived MB/s is
    printed with a `~` and must not be quoted as a measured device rate.
 """
+import os
 import json, os, re, sys, time, urllib.request
 
 METRICS = os.environ.get(

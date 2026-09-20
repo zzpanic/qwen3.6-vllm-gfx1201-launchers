@@ -932,7 +932,7 @@ KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
 # 0 = stock behaviour exactly. Added 2026-09-17 for pattern A in
 # kv-cache/miss-analysis-20260917/README.md: 8 of the 14 real misses since the 09-15 boot
 # recomputed a prefix whose Mamba snapshots the tier already held (~270 s of prefill).
-# See kv-cache/patch_offload_reconcile_reask.py. Either value logs a `reconcile` event per
+# See kv-cache/patches/patch_reconcile_reask.py. Either value logs a `reconcile` event per
 # fallback to the debug_instrument sink, with what the GPU held per KV group.
 #   KVOFF_REASK_MIN_DROP_BLOCKS: only re-ask when the fallback dropped at least this many
 #     blocks. 2 leaves the normal one-block per-turn shortfall alone.
@@ -962,7 +962,7 @@ KVOFF_REASK_MEMO_TTL_S=${KVOFF_REASK_MEMO_TTL_S:-5}
 # as attention already is, so the tier does not evict a prefix's Mamba/drafter snapshots
 # while its attention survives (pattern B). 0 = stock _touch. Upstream fixed the same thing
 # in PR #51787 (not backportable to 0.27.1).
-# Both added 2026-09-17; see kv-cache/patch_offload_swa_align_touch.py.
+# Both added 2026-09-17; see kv-cache/patches/patch_swa_align_touch.py.
 # RADIANCE_TOUCH_POSITION_ORDER (2026-09-18, needs TOUCH_ALL_GROUPS=1): 1 = one touch per request
 # with every group's keys sorted by chunk position, so eviction removes whole positions from a
 # conversation's tail. 0 = touch group by group, which evicts all g0 Mamba snapshots first and
@@ -999,7 +999,7 @@ KVOFF_LOOKUP_INVALIDATE=${KVOFF_LOOKUP_INVALIDATE:-0}
 # request re-promotes a file io.py already deleted, forever -- measured 2026-09-19: one block
 # truncated, request hung 240 s to client timeout, 294 failed reads. The trigger in production
 # is the reaper deleting a block between a lookup and its promotion. 1 = fix (default), 0 =
-# upstream behaviour. Patch: kv-cache/patch_kv_offload_fs_failed_load.py.
+# upstream behaviour. Patch: kv-cache/patches/patch_fs_failed_load.py.
 KVOFF_FS_FAILED_LOAD_FORGET=${KVOFF_FS_FAILED_LOAD_FORGET:-1}
 # RADIANCE_ALIGN_PROMPT_LAST_BLOCK: stop the prompt's final prefill chunk at its last full
 # block boundary. Upstream exempts the final chunk from block alignment, so a prompt ending
@@ -1040,7 +1040,7 @@ KVOFF_STALE_WATCH=${KVOFF_STALE_WATCH:-0}
 # ("draft attention groups [0, 1, 2, 3, 4, 5, 6, 7, 8] detected"). That withholds the newest
 # chunk of every conversation from the store for the whole of a decode and shortens every
 # servable prefix by a chunk, nine times over. Verify after a restart: the line must read
-# "[8]". See kv-cache/patch_kv_offload_eagle_groups.py and upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
+# "[8]". See kv-cache/patches/patch_eagle_groups.py and upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
 KVOFF_EAGLE_GROUPS=${KVOFF_EAGLE_GROUPS:-1}
 # RADIANCE_MAMBA_STORE_STRIDE: keep every Nth Mamba/GDN snapshot instead of one per chunk.
 # 1 = off (upstream). DEFAULT IS 4. A Mamba group holds ONE recurrent state and the load
@@ -1050,7 +1050,7 @@ KVOFF_EAGLE_GROUPS=${KVOFF_EAGLE_GROUPS:-1}
 # of 115,360: 1.21x the GPU cache instead of 0.50x. That is what lets a conversation still
 # be in RAM on the follow-up turn, and a CPU hit costs 1-2 s against the measured 64.26 s
 # fs->CPU promotion. It costs prefix: hits are truncated down to an N-chunk (13,184-token)
-# boundary. See kv-cache/patch_kv_offload_mamba_stride.py, plan R3.13.
+# boundary. See kv-cache/patches/patch_mamba_stride.py, plan R3.13.
 KVOFF_MAMBA_STRIDE=${KVOFF_MAMBA_STRIDE:-4}
 # RADIANCE_SPLIT_POOL_SHARE (R3.16, 2026-09-19): store the drafter group at its real size.
 # EMPTY = off (upstream: one pool of uniform rows). The CPU tier is row-bound, and g8 (the
@@ -1082,7 +1082,7 @@ fi
 # already 27,000,832 bytes, so 32 would give a fanout of 2 (and 1 as soon as a second job is
 # in flight). 256 MiB gives 8 batches for a promotion and 4 for a store -- the whole pool.
 # Set KVOFF_FS_FANOUT_MAX=1 to restore upstream one-task-per-job exactly, without unpatching.
-# See kv-cache/patch_kv_offload_fs_fanout.py, plan R3.14.
+# See kv-cache/patches/patch_offload_fs_fanout.py, plan R3.14.
 KVOFF_FS_FANOUT_MB=${KVOFF_FS_FANOUT_MB:-256}
 KVOFF_FS_FANOUT_MAX=${KVOFF_FS_FANOUT_MAX:-0}
 # KVOFF_BLOCKS_PER_CHUNK: connector 'blocks_per_chunk' -- how many KV blocks share one
@@ -1098,11 +1098,12 @@ KVOFF_BLOCKS_PER_CHUNK=${KVOFF_BLOCKS_PER_CHUNK:-}
 # rewritten when the geometry changes, so a differing blocks_per_chunk must not share a root.
 KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-blocks}
 
-# KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the 16 GiB /dev/shm region).
+# KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
 #   lru  = vLLM's default (cpu/manager.py:45, cpu/spec.py:133).
 #   arc  = Adaptive Replacement Cache: T1 (recency) + T2 (frequency) with B1/B2
 #          ghost lists that retune the split on every hit.
-# Why this matters here: the tier holds ~508k tokens, about 13 prompts of 34k. Under
+# Why this matters here: the tier holds a few hundred thousand tokens -- about 339k at this
+# stride and size, a handful of long prompts. Under
 # LRU a single sweep of new material walks the whole tier out -- exactly the pattern
 # measured 2026-09-08, where p1..p10 fully evicted p0. ARC is scan-resistant: one-shot
 # blocks land in T1 and are evicted from there, while a prefix that has been hit twice
@@ -2008,7 +2009,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # of recomputing the prompt. RADIANCE_RECONCILE_REASK=0 is stock behaviour. After
     # debug_instrument so its reconcile events land in that sink. Non-fatal: hunks apply
     # helper, call site, logging, so a failure part-way leaves stock behaviour or the fix
-    # without per-group logging. See kv-cache/patch_offload_reconcile_reask.py.
+    # without per-group logging. See kv-cache/patches/patch_reconcile_reask.py.
     # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
     PYTHONPATH=/patches python3 /house/patch_reconcile_reask.py \
       || echo "[radiance] WARNING: reconcile re-ask did NOT apply -- a GPU attention hit with no Mamba state will still recompute the whole prompt"
@@ -2017,7 +2018,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # group like attention in the eviction policy (pattern B). Each hunk has a kill switch
     # (RADIANCE_SWA_STORE_MAMBA_ALIGN, RADIANCE_TOUCH_ALL_GROUPS). Non-fatal: on failure the
     # tier keeps storing every drafter chunk and stock _touch.
-    # See kv-cache/patch_offload_swa_align_touch.py.
+    # See kv-cache/patches/patch_swa_align_touch.py.
     PYTHONPATH=/patches python3 /house/patch_swa_align_touch.py \
       || echo "[radiance] WARNING: swa-align/touch-all did NOT apply -- every drafter chunk stored, stock touch"
     # House patch 2026-09-19: stop the prompt final chunk at its last full block boundary, so

@@ -10,6 +10,7 @@ Stdlib only. Method (reproduced, not the numbers):
   Capacities come from the metrics (cache_config_info / capacity_bytes), never
   from constants. Nothing is model- or config-specific."""
 
+import os
 import argparse
 import json
 import re
