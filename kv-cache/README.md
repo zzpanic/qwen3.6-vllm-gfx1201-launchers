@@ -68,6 +68,31 @@ Sample output of `tools/kvtable.py` — **2026-09-19, lifetime since the 18:57 b
 | Batch latency p50 / p99 | - | 0.25 s / 0.50 s | 0.03 s / 0.50 s | - |
 | How full | always | 22 of 22 GiB | 61 of 94 GiB | - |
 
+## Measured: RAM tier vs disk tier
+
+Measured on ggz14's own single-GPU build (`serve-tp1.sh` defaults at `dfdfa38`: fp16 ssm cache,
+MAXSEQS 3, 220k context, 248,235-token GPU pool) with this patch set applied, which is how it is
+offered upstream in [ggz14/radiance-vllm-mxfp4#52](https://codeberg.org/ggz14/radiance-vllm-mxfp4/pulls/52).
+Only the tier changes: RAM only (16 GiB) vs RAM + disk. The workload is `turnbench.py`: three
+agent-style sessions growing to ~110k tokens each, served round-robin, so together they outgrow the
+GPU pool from turn 4 on. Times are whole requests (prefill plus 320 generated tokens); "no cache" is
+the same request replayed with a fresh cache salt. Brackets: tokens served from the tier.
+
+| turn | prompt | no cache | RAM only | RAM + disk |
+|---|--:|--:|--:|--:|
+| B4 | 65,981 | 30.7 s | 12.8 s (49k) | 12.8 s (49k) |
+| A5 | 80,895 | 37.8 s | 15.1 s (63k) | 15.2 s (63k) |
+| C5 | 81,756 | 38.8 s | 13.2 s (67k) | 13.3 s (67k) |
+| A6 | 95,502 | 46.7 s | 15.5 s (77k) | 15.5 s (77k) |
+| B6 | 95,278 | 46.9 s | 21.6 s (67k) | 16.6 s (77k) |
+| C6 | 96,116 | 47.2 s | 27.9 s (53k) | 18.0 s (77k) |
+| A7 | 110,063 | 51.1 s | 44.2 s (21k) | 14.9 s (92k) |
+| B7 | 108,878 | 51.8 s | 42.4 s (28k) | 16.5 s (92k) |
+| C7 | 110,553 | 52.9 s | 49.6 s (11k) | 15.5 s (95k) |
+
+A 16 GiB RAM tier carries the sessions until they outgrow it (turn 6 here); the disk tier keeps
+every later turn near 15 s. All 21 turns served cleanly in both modes.
+
 ## Checking exactness yourself
 
 `turnbench` is the gate: 3 sessions × 7 turns, every **cached** turn compared token-for-token and
