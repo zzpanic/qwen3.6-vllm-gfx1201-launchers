@@ -21,11 +21,11 @@ Both run from `startup-qwen3.8-27b-kvcache.sh`; one variable chooses between the
 
 ```bash
 ./startup-qwen3.8-27b-kvcache.sh                    # option 1 (default)
-KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2 (experimental)
+KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2
 DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh        # print the command, run nothing
 ```
 
-| | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk (experimental) |
+| | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk |
 |---|---|---|
 | select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
 | house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |

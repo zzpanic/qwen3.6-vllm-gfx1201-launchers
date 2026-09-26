@@ -1,6 +1,6 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-26T10:08:56Z from the working
+Assembled by `make-dist.sh` on 2026-09-26T10:12:57Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
