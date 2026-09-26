@@ -6,7 +6,7 @@
 # ============================================================================
 # This is the KV-cache work as a SEPARATE, PUBLISHABLE ENTRY. Everything the
 # offload needs -- the tier size, the house patches, the eviction policy, the
-# stride, and (experimental build only) the fs tier and its GC contract -- is
+# stride, and (disk build only) the fs tier and its GC contract -- is
 # pinned HERE, in one file, with the reasoning inline, rather than being spread
 # across the production entry's env block in config.yaml.
 #
@@ -34,8 +34,8 @@
 # ============================================================================
 # This is a WORKING, CORRECT, UNOPTIMISED implementation delivered as a patch
 # stack. It makes KV-cache offload work -- to RAM by default, and to disk in the
-# experimental build -- on a GDN hybrid model on a single consumer AMD card
-# (gfx1201 / RDNA4), and it is measured doing so (on the experimental build):
+# disk build -- on a GDN hybrid model on a single consumer AMD card
+# (gfx1201 / RDNA4), and it is measured doing so (on the disk build):
 # 82.0% of prompt tokens were served without recomputation
 # over ~14 h of real agent work, and an 85,696-token disk hit was bit-identical
 # to a cold recompute. The defects that were found are not still open -- they
@@ -134,7 +134,7 @@
 # ============================================================================
 # TWO BUILDS -- THE DEFAULT IS THE RECOMMENDED ONE
 # ============================================================================
-# KVCACHE_EXPERIMENTAL=0  (DEFAULT, RECOMMENDED)  GPU -> RAM.
+# KVCACHE_DISK_TIER=0  (DEFAULT, RECOMMENDED)  GPU -> RAM.
 #     The CPU tier in /dev/shm and the THREE behavioural patches only:
 #     mixed-hit, eagle-groups, mamba-stride. No disk tier, so no reaper, no
 #     PYTHONHASHSEED pin and no filesystem to provision. No instrumentation
@@ -145,7 +145,7 @@
 #     2026-09-12. That entry also has the disk tier on; this build keeps its
 #     patch set and CPU-tier eviction settings and drops the disk.
 #
-# KVCACHE_EXPERIMENTAL=1  GPU -> RAM -> disk.
+# KVCACHE_DISK_TIER=1  GPU -> RAM -> disk.
 #     Adds the fs tier (KVCACHE_DISK, default /kvcache) and the full
 #     instrumented patch set: store-path and lookup-outcome counters, fs
 #     fanout, the tier report, the promotion-refusal tripwire, and the lookup
@@ -195,10 +195,11 @@ fi
 
 [[ -x "$BASE_LAUNCHER" ]] || { echo "kvcache: base launcher not found or not executable: $BASE_LAUNCHER" >&2; exit 1; }
 
-KVCACHE_EXPERIMENTAL="${KVCACHE_EXPERIMENTAL:-0}"
-case "$KVCACHE_EXPERIMENTAL" in
+# KVCACHE_EXPERIMENTAL is the old name for KVCACHE_DISK_TIER and is still accepted.
+KVCACHE_DISK_TIER="${KVCACHE_DISK_TIER:-${KVCACHE_EXPERIMENTAL:-0}}"
+case "$KVCACHE_DISK_TIER" in
   0|1) ;;
-  *) echo "kvcache: KVCACHE_EXPERIMENTAL must be 0 or 1, got '$KVCACHE_EXPERIMENTAL'" >&2; exit 1 ;;
+  *) echo "kvcache: KVCACHE_DISK_TIER must be 0 or 1, got '$KVCACHE_DISK_TIER'" >&2; exit 1 ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -313,9 +314,9 @@ PYSIZE
 fi
 
 # ---------------------------------------------------------------------------
-# 3. THE FS SECONDARY TIER (L3) -- the disk. EXPERIMENTAL BUILD ONLY.
+# 3. THE FS SECONDARY TIER (L3) -- the disk. DISK BUILD ONLY.
 #
-# OFF by default. KVCACHE_EXPERIMENTAL=1 turns it on at /kvcache; KVCACHE_DISK
+# OFF by default. KVCACHE_DISK_TIER=1 turns it on at /kvcache; KVCACHE_DISK
 # names another path (and turns it on in either build); KVCACHE_DISK="" forces it
 # off. Off costs nothing but capacity: the disk reads at ~229 MB/s wall clock,
 # and whether that beats recomputing is unresolved -- somewhere between 0.55x and
@@ -334,7 +335,7 @@ fi
 #      spare RAM cannot act as a read cache in front of this tier. The only
 #      productive home for spare RAM is the primary tier.
 # ---------------------------------------------------------------------------
-if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then
+if [[ "$KVCACHE_DISK_TIER" == 1 ]]; then
   export KVOFF_DISK="${KVCACHE_DISK-/kvcache}"
 else
   export KVOFF_DISK="${KVCACHE_DISK:-}"
@@ -371,7 +372,7 @@ export KVOFF_DISK_WTHREADS="${KVOFF_DISK_WTHREADS:-4}"
 # and nothing else; 0 = those plus every instrumentation patch and (e). It
 # follows the build switch unless you set it yourself.
 # ---------------------------------------------------------------------------
-if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then
+if [[ "$KVCACHE_DISK_TIER" == 1 ]]; then
   export KVOFF_MINIMAL="${KVOFF_MINIMAL:-0}"
 else
   export KVOFF_MINIMAL="${KVOFF_MINIMAL:-1}"
@@ -410,7 +411,7 @@ export KVOFF_MAMBA_STRIDE="${KVOFF_MAMBA_STRIDE:-4}"
 #      true, so the wrapper sets it explicitly.
 export KVOFF_PROMPT_ONLY="${KVOFF_PROMPT_ONLY:-true}"
 
-# (e) fs fanout. EXPERIMENTAL (KVOFF_MINIMAL=0) only. Splits one promotion across up to N parallel read tasks
+# (e) fs fanout. Disk build (KVOFF_MINIMAL=0) only. Splits one promotion across up to N parallel read tasks
 #     (upstream does one task per job). Ported from PR #49225. It splits the
 #     work exactly 8 ways as designed -- and measured no faster either way,
 #     because this device is the limit, not the concurrency. Kept
@@ -419,7 +420,7 @@ export KVOFF_PROMPT_ONLY="${KVOFF_PROMPT_ONLY:-true}"
 export KVOFF_FS_FANOUT_MB="${KVOFF_FS_FANOUT_MB:-256}"
 export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 
-# (f) + (g) instrumentation and lookup-outcomes. EXPERIMENTAL (KVOFF_MINIMAL=0)
+# (f) + (g) instrumentation and lookup-outcomes. Disk build (KVOFF_MINIMAL=0)
 #     only -- they add metrics and nothing else. They are what makes any of this diagnosable:
 #     kv_offload_cpu_cache_evictable_perc and _free_perc are the two terms
 #     prepare_store() tests for admission; kv_offload_fs_inflight_jobs is the
@@ -429,7 +430,7 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 #     evictable blocks, so it means "fraction pinned by in-flight transfers" and
 #     reads 0.0 at idle with hundreds of GB on the fs tier.
 
-# (h) tier report metrics -- also experimental-only, also metrics-only. Adds the 19
+# (h) tier report metrics -- also disk-build only, also metrics-only. Adds the 19
 #     per-tier `vllm:kv_offload_tier_*` series (load/store bytes, tokens and
 #     latency histograms per tier, capacity, occupancy, reads-before-evict,
 #     eviction-to-reuse, prefill stall) that `tools/tierreport.py` reads to
@@ -450,7 +451,7 @@ export KVOFF_FS_FANOUT_MAX="${KVOFF_FS_FANOUT_MAX:-0}"
 # ARC, not LRU. The tier holds ~22 prompts, and LRU's classic failure is exactly
 # our access pattern: write one prompt, read a dozen others, and the first is
 # evicted before it is ever reused. We measured that and misread it as an
-# experimental artifact for some time. ARC (T1 recency + T2 frequency + B1/B2
+# measurement artifact for some time. ARC (T1 recency + T2 frequency + B1/B2
 # ghost lists) is scan-resistant and costs no extra RAM or CPU.
 #
 # This is also the correct resolution of the "turn it over to ZFS as an ARC"
@@ -508,7 +509,7 @@ if [[ "$EXTRA" != *--kv-offloading-size* && "$KVCACHE_TIER_GIB" != 0 ]]; then
 fi
 export EXTRA
 
-if [[ "$KVCACHE_EXPERIMENTAL" == 1 ]]; then _kvc_build="EXPERIMENTAL (GPU -> RAM -> disk, instrumented)"
+if [[ "$KVCACHE_DISK_TIER" == 1 ]]; then _kvc_build="DISK (GPU -> RAM -> disk, instrumented)"
 else _kvc_build="default (GPU -> RAM, minimal patch set)"; fi
 echo "[kvcache] entry=$SERVED container=$NAME build=$_kvc_build" >&2
 if [[ "$EXTRA" == *--kv-offloading-size* ]]; then

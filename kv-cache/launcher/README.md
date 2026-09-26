@@ -2,7 +2,7 @@
 
 The entry launcher is **`startup-qwen3.8-27b-kvcache.sh`, at the repository
 root**, alongside the other `startup-*.sh` scripts. It is a thin wrapper: it picks
-the build (`KVCACHE_EXPERIMENTAL`, default 0), sizes the RAM tier
+the build (`KVCACHE_DISK_TIER`, default 0), sizes the RAM tier
 (`KVCACHE_TIER_GIB=auto`), sets the KV-cache environment with the reasoning and
 the measured cost of every knob inline, and then execs a base launcher that
 actually serves the model.

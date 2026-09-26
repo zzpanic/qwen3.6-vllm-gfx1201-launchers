@@ -21,13 +21,13 @@ Both run from `startup-qwen3.8-27b-kvcache.sh`; one variable chooses between the
 
 ```bash
 ./startup-qwen3.8-27b-kvcache.sh                    # option 1 (default)
-KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2
+KVCACHE_DISK_TIER=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2
 DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh        # print the command, run nothing
 ```
 
 | | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk |
 |---|---|---|
-| select with | nothing | `KVCACHE_EXPERIMENTAL=1` |
+| select with | nothing | `KVCACHE_DISK_TIER=1` |
 | house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
 | tools | `kvwatch.py`, `kvtable.py` | those, plus `kvvalidate.py` and `tierreport.py` |
@@ -114,7 +114,7 @@ recomputed, and the block is re-stored intact.
 
 Anchored against vLLM 0.27.1 + radiance 0.9.3, applied at container start in a real dependency
 order. Every behaviour change sits behind an env gate whose **unset state is stock vLLM**; nothing
-hard-codes a model name, group index or block size. **Default = the 6 "always"; experimental = all 15.**
+hard-codes a model name, group index or block size. **Default = the 6 "always"; disk build = all 15.**
 
 | # | patch | does | scope |
 |---|---|---|---|

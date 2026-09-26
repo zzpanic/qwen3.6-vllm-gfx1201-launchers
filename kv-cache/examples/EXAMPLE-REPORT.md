@@ -1,7 +1,7 @@
 # Example: what a working cache looks like
 
 A real report from this box, over ~14 hours of agent coding work on one R9700, on the
-**experimental** build (GPU → RAM → disk, instrumented) — the run the README's prompt-token shares
+**disk** build (GPU → RAM → disk, instrumented) — the run the README's prompt-token shares
 come from. The raw `/metrics` snapshot it was generated from ships beside it as
 [`metrics-snapshot-20260912.txt`](metrics-snapshot-20260912.txt), so you can reproduce this exact
 output without the hardware:
@@ -11,7 +11,7 @@ python3 kv-cache/tools/kvvalidate.py --markdown --metrics-file kv-cache/examples
 ```
 
 Run it against your own endpoint with `python3 kv-cache/tools/kvvalidate.py --markdown` and compare. That
-needs the experimental build too: on the default build the counters it compares are not exported,
+needs the disk build too: on the default build the counters it compares are not exported,
 so it reports FAILs that are not real. Use `watch -n 5 python3 kv-cache/tools/kvwatch.py` there instead.
 
 > **Read the regime line first.** This report says `saturated` — the RAM tier is full and the disk

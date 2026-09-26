@@ -1,9 +1,9 @@
 # Operations files
 
-## The reaper is MANDATORY for the experimental disk tier
+## The reaper is MANDATORY for the disk tier
 
 The default build has no disk tier and needs none of this section. With
-`KVCACHE_EXPERIMENTAL=1` (or any `KVCACHE_DISK`), the fs tier writes and **never deletes**: `tiering/fs/manager.py` has no
+`KVCACHE_DISK_TIER=1` (or any `KVCACHE_DISK`), the fs tier writes and **never deletes**: `tiering/fs/manager.py` has no
 capacity, quota or TTL parameter and exposes no eviction hook. Without an
 external reaper the filesystem fills until it is full.
 
@@ -22,7 +22,7 @@ anything else stored there is paid for by deleting cache blocks.
 ## After every reload: check it is serving
 
     watch -n 5 python3 ../tools/kvwatch.py   # either build: hit rates and bytes moved
-    python3 ../tools/kvvalidate.py           # experimental build ONLY: the patches are live
+    python3 ../tools/kvvalidate.py           # disk build ONLY: the patches are live
 
 `kvvalidate.py` is read-only and takes about a second. The patches are applied at
 container start from the mounted source directory, so a stale mount, a failed hunk

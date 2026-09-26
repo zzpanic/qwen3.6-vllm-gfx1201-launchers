@@ -1,6 +1,6 @@
 # Release manifest
 
-Assembled by `make-dist.sh` on 2026-09-26T10:12:57Z from the working
+Assembled by `make-dist.sh` on 2026-09-26T10:17:23Z from the working
 tree at `<repo>`.
 
 | Path | Source | What it is |
@@ -9,7 +9,7 @@ tree at `<repo>`.
 | `docs/` | kv-cache/ | `SETUP.md` — prerequisites, sizing, the reaper, the tools and the metric traps. |
 | `patches/` | kv-cache/ | The house patches, their apply order and which build applies each, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
 | `launcher/` | kv-cache/ + vllm/ | The KV-cache entry launcher and the base launcher it wraps. |
-| `ops/` | vllm/ | The reaper (mandatory for the experimental disk tier), its systemd units, the mount snippets. |
+| `ops/` | vllm/ | The reaper (mandatory for the disk tier), its systemd units, the mount snippets. |
 | `bench/` | kv-cache/ | Harnesses, shipped for method, including `turnbench.py` -- the cached-vs-cold exactness gate. No result files. |
 | `tools/` | kv-cache/ | `kvwatch.py` — the live one-screen view, for either build; `tierreport.py` — the tier sizing/speed report; and `kvvalidate.py` — the live-load validator that names your regime and reports cache performance with confidence markers. All three are meant to be run for their numbers, on your own traffic.; and `kvtable.py` -- the tier table in the README, printed live from /metrics. |
 
@@ -32,7 +32,7 @@ nested, so paths inside them do not always match paths here:
 | `<repo>/kv-cache/kvvalidate.py` | `kv-cache/tools/` |
 | `<repo>/ggz14-mxfp4` | ggz14's clone, `radiance-vllm-mxfp4/` beside the repo (see the root README's Quick start) |
 | `<repo>/benchmarks/`, `bench-history/` | not shipped — the working record stays in the source tree |
-| `<repo>/kv-cache/kv-cache-historical.md`, `cache-preemption-patch-plan.md`, `kv-cache-closed-decisions.md`, `status-*.md` | not shipped — the experimental record; this repository publishes the result, not the route to it |
+| `<repo>/kv-cache/kv-cache-historical.md`, `cache-preemption-patch-plan.md`, `kv-cache-closed-decisions.md`, `status-*.md` | not shipped — the research record; this repository publishes the result, not the route to it |
 
 **This is a working, correct, unoptimised implementation.** Read `README.md` for what is
 measured, and `docs/SETUP.md` for what is not yet done.

@@ -4,9 +4,9 @@ Every command here runs from the repository root. Each change says how to verify
 and how to undo it.
 
 There are two options (see the README), called builds in the launcher and the patch notes:
-**option 1, the default build** — GPU → RAM with three patches — and **option 2, the experimental
-build** — `KVCACHE_EXPERIMENTAL=1`, which adds a disk tier and the instrumentation. Everything not
-marked *experimental* applies to both.
+**option 1, the default build** — GPU → RAM with six patches — and **option 2, the disk
+build** — `KVCACHE_DISK_TIER=1`, which adds a disk tier and the instrumentation. Everything not
+marked *disk build* applies to both.
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ marked *experimental* applies to both.
 - `/dev/shm` **larger than the RAM tier**. The tier is a shared-memory region; if `/dev/shm` cannot
   hold it the boot dies with no log line at all. The kernel default is half of RAM; check it against
   the tier size below.
-- *Experimental only:* a filesystem for the disk tier. Ordinary SATA SSD is fine — the tier reads
+- *Disk build only:* a filesystem for the disk tier. Ordinary SATA SSD is fine — the tier reads
   at 228 MB/s and is device-bound, so a faster disk helps and a slower one is the limit.
 
 ```bash
@@ -55,10 +55,10 @@ stored per chunk. Here every stored block is 27,000,832 B for 1,648 tokens = 16,
 group, and a chunk stores 2 attention groups + 1 draft group + 6 Mamba groups at the 1-in-8 stride:
 16,384 × (2 + 1 + 6/8) = 61,440 B/token.
 
-## The reaper — *experimental*, and then required
+## The reaper — *disk build*, and then required
 
 Nothing bounds the disk tier's growth on its own. **Install the reaper before serving the
-experimental build**, or the filesystem fills. The default build has no disk tier and does not
+disk build**, or the filesystem fills. The default build has no disk tier and does not
 need it.
 
 ```bash
@@ -78,21 +78,21 @@ mid-test and produce a failure that is not real.
 ```bash
 DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh                         # prints the container command, runs nothing
 ./startup-qwen3.8-27b-kvcache.sh                                   # serve, default build
-KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh            # serve, experimental build
+KVCACHE_DISK_TIER=1 ./startup-qwen3.8-27b-kvcache.sh            # serve, disk build
 ```
 
 | setting | meaning |
 |---|---|
-| `KVCACHE_EXPERIMENTAL` | `0` (default) GPU → RAM, three patches; `1` adds the disk tier and the instrumentation |
+| `KVCACHE_DISK_TIER` | `0` (default) GPU → RAM, six patches; `1` adds the disk tier and the instrumentation |
 | `KVCACHE_TIER_GIB` | RAM tier, GiB. `auto` (default) applies the sizing rule above |
-| `KVCACHE_DISK` | disk tier path. Defaults to `/kvcache` on the experimental build, unset on the default |
+| `KVCACHE_DISK` | disk tier path. Defaults to `/kvcache` on the disk build, unset on the default |
 
 Confirm it came up — the `[kvcache]` lines name the build and the tier size:
 ```bash
 sudo journalctl -u llama-swap --since "10 min ago" --no-pager | grep -E '\[kvcache\]|kv-offload'
 ```
 
-*Experimental:* to start over, stop the server, `rm -rf` the tier directory, start it again.
+*Disk build:* to start over, stop the server, `rm -rf` the tier directory, start it again.
 Nothing on disk needs migrating between versions — the tier is a cache and is always safe to delete
 cold.
 
@@ -111,7 +111,7 @@ entry through llama-swap on `:1234`; point it elsewhere with
 `KVWATCH_METRICS=http://127.0.0.1:<port>/metrics`. The per-request table needs llama-swap and is
 skipped without it. The first refresh shows no rates — it has nothing to difference against yet.
 
-**`tools/kvvalidate.py`** — *experimental build.* Read-only, stdlib-only, no GPU, one HTTP read.
+**`tools/kvvalidate.py`** — *disk build.* Read-only, stdlib-only, no GPU, one HTTP read.
 Against a live busy endpoint it re-establishes five invariants, **names the regime you are in
 before you draw a conclusion**, and marks every performance figure `SOLID`, `REGIME` or
 `UNRESOLVED`. **Do not run it against the default build:** the counters it compares are not
@@ -134,9 +134,9 @@ those buckets is then a lower bound rather than a measurement. A negative drift 
 was counted twice, which makes the accounting unusable. Either way the number to chase is the
 exit, not the counter.
 
-**`tools/tierreport.py`** — *experimental build.* Tier sizing and read rates from the live counters.
+**`tools/tierreport.py`** — *disk build.* Tier sizing and read rates from the live counters.
 
-**`bench/correctbench.py`** — *experimental build*, since it serves from the disk tier. The
+**`bench/correctbench.py`** — *disk build*, since it serves from the disk tier. The
 correctness gates. CT5 is a negative control and gates the rest; nothing else runs unless a
 deliberately corrupted output is correctly flagged.
 
@@ -156,7 +156,7 @@ On either build, whether the tier serves is
 `external_prefix_cache_hits_total / external_prefix_cache_queries_total`, and what it moved is
 `kv_offload_load_bytes_total` and `kv_offload_store_bytes_total`.
 
-*Experimental:* token read rate for a tier is
+*Disk build:* token read rate for a tier is
 `kv_offload_tier_hit_tokens_total{t} / kv_offload_tier_load_seconds_total{t}`.
 
 **Never** use `kv_offload_tier_load_latency_seconds_sum` as a duration — it is thread-summed and

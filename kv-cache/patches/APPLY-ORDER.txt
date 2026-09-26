@@ -4,25 +4,25 @@
    otherwise) applies ONLY the six marked [default]: the crash guard plus the behavioural
    fixes (draft-group annotation, store stride, reconcile re-ask, swa-align/touch-all and
    last-block align). Every other patch here is instrumentation or fs-tier-only, and runs
-   only in the EXPERIMENTAL build (KVCACHE_EXPERIMENTAL=1, which sets KVOFF_MINIMAL=0).
+   only in the DISK build (KVCACHE_DISK_TIER=1, which sets KVOFF_MINIMAL=0).
  
  APPLY ORDER (the launcher runs them in exactly this order; skipped ones are skipped in place)
  
   1  patch_offload_mixed_hit.py                   [default]  FATAL on failure
-  2  patch_offload_instrumentation.py                     FATAL on failure (experimental only)
-  3  patch_offload_lookup_metrics.py                        experimental only
+  2  patch_offload_instrumentation.py                     FATAL on failure (disk build only)
+  3  patch_offload_lookup_metrics.py                        disk build only
   4  patch_eagle_groups.py                      [default]  (upstream counterpart: PR #52047,
                                                               which does NOT cover this model)
   5  patch_mamba_stride.py                     [default]  needs 4
   6  patch_reconcile_reask.py                 [default]  behavioural; outside KVOFF_MINIMAL
   7  patch_swa_align_touch.py                 [default]  behavioural; outside KVOFF_MINIMAL
   8  patch_sched_align_last_block.py          [default]  behavioural; outside KVOFF_MINIMAL
-  9  patch_offload_debug_instrument.py                    experimental only
- 10  patch_offload_fs_fanout.py                        (ported from PR #49225; experimental only)
- 11  patch_offload_tier_report.py                     needs 2; instrumentation only (experimental)
+  9  patch_offload_debug_instrument.py                    disk build only
+ 10  patch_offload_fs_fanout.py                        (ported from PR #49225; disk build only)
+ 11  patch_offload_tier_report.py                     needs 2; instrumentation only (disk build)
  12  patch_offload_promotion_wallclock.py             needs 11; counters + re-anchored timing
- 13  patch_lookup_invalidate.py                       anchors stand on 10; experimental only
- 14  patch_fs_failed_load.py                        anchors on 10 and 13; experimental only
+ 13  patch_lookup_invalidate.py                       anchors stand on 10; disk build only
+ 14  patch_fs_failed_load.py                        anchors on 10 and 13; disk build only
  15  patch_offload_miss_deferral_metrics.py           counters only; order-independent (task 65)
  
  This order is a dependency, not a preference. 11 extends the get_stats() that 2

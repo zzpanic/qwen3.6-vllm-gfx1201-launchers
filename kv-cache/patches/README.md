@@ -11,7 +11,7 @@ These are **not standalone scripts.** Read this before you try to run one.
  recurrent-state store stride that makes the RAM tier hold enough, reconcile re-ask (stop
  recomputing prefixes the tier holds), the swa-align/touch-all eviction fix, and the
  last-block align (cached == cold). Everything else here is instrumentation or fs-tier-only
- and is applied only by the **experimental** build (`KVCACHE_EXPERIMENTAL=1`).
+ and is applied only by the **disk** build (`KVCACHE_DISK_TIER=1`).
  `APPLY-ORDER.txt` marks the six.
 
 ## What they are
@@ -73,12 +73,12 @@ root the script expects. The launcher does all three for you; nothing else does.
 
  The container block runs under `set -e`. Patches 1 and 2 have **no `|| echo`
  fallback**, so a failure there is a hard boot failure, not a warning. The default
- build applies only 1 of the two (2 is experimental-only):
+ build applies only 1 of the two (2 is disk-build only):
  
  | # | Patch | On failure |
  |---|---|---|
  | 1 | `patch_offload_mixed_hit.py` | **FATAL** — engine does not boot |
- | 2 | `patch_offload_instrumentation.py` | **FATAL** — engine does not boot (experimental only) |
+ | 2 | `patch_offload_instrumentation.py` | **FATAL** — engine does not boot (disk build only) |
  | 3 | `patch_offload_lookup_metrics.py` | warns; Phase A metrics absent |
  | 4 | `patch_eagle_groups.py` | warns; all nine KV groups treated as draft groups |
  | 5 | `patch_mamba_stride.py` | warns; every chunk stores all six Mamba groups |

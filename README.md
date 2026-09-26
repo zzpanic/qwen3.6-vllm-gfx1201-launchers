@@ -306,7 +306,7 @@ It comes in two options from the same launcher:
 
 | | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk |
 |---|---|---|
-| run | `./startup-qwen3.8-27b-kvcache.sh` | `KVCACHE_EXPERIMENTAL=1 ./startup-qwen3.8-27b-kvcache.sh` |
+| run | `./startup-qwen3.8-27b-kvcache.sh` | `KVCACHE_DISK_TIER=1 ./startup-qwen3.8-27b-kvcache.sh` |
 | tiers | RAM tier in `/dev/shm` | the same RAM tier + a disk tier |
 | patches | the 6 behavioural | those 6 + instrumentation + the disk-tier patches (15 in all) |
 | needs | RAM for the tier | that, plus a filesystem and the reaper |
@@ -334,7 +334,7 @@ going:
 | --- | --- |
 | `startup-qwen3.8-27b-mxfp4.sh` | **current.** Every measurement in `benchmarks/` dated 2026-09-05 is this one. |
 | `startup-qwen3.8-27b-int4.sh` | **maintained fallback** (int4 W4A16). Same model, better-understood path, measurably slower. Kept because it is what to fall back to when a radiance bump breaks the MXFP4 stack — that has happened. |
-| `startup-qwen3.8-27b-kvcache.sh` | **current, with KV-cache offload.** The MXFP4 build plus prefix-cache offload, in two options: GPU → RAM (default) or GPU → RAM → disk (`KVCACHE_EXPERIMENTAL=1`). See [kv-cache/README.md](kv-cache/README.md). |
+| `startup-qwen3.8-27b-kvcache.sh` | **current, with KV-cache offload.** The MXFP4 build plus prefix-cache offload, in two options: GPU → RAM (default) or GPU → RAM → disk (`KVCACHE_DISK_TIER=1`). See [kv-cache/README.md](kv-cache/README.md). |
 | `startup-qwen3.6-27b-vllm.sh` | **historical.** Qwen3.6 is superseded by Qwen3.8 on the same architecture; kept for the reasoning and the tile table, not because you should serve it. |
 | `startup-qwen3.6-35b-vllm.sh` | **historical.** As above, plus the MoE-specific findings (why MTP is off at that size). |
 

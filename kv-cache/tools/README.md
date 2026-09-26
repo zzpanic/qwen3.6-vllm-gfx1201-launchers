@@ -14,7 +14,7 @@ on `:1234`; set `KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` to read vLLM
 directly (the per-request table needs llama-swap and is skipped without it). The
 first refresh prints no rates -- it has nothing to difference against yet.
 
-The two tools below need the **experimental** build (`KVCACHE_EXPERIMENTAL=1`):
+The two tools below need the **disk** build (`KVCACHE_DISK_TIER=1`):
 the counters they read are added by its instrumentation patches. Do not run
 `kvvalidate.py` against the default build -- it still runs, but reads the missing
 counters as zero and reports FAILs (`cpu_equals_external`, `disk_vs_engine`) that

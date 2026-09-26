@@ -17,7 +17,7 @@
 #     v
 #   THIS FILE                       serve-mxfp4-kvcache-base.sh. The same launcher
 #                                   plus the offload delta: GPU -> /dev/shm offload
-#                                   (and, experimental, the /kvcache disk tier),
+#                                   (and, on the disk build, the /kvcache disk tier),
 #                                   the house patches in ../patches/, and the
 #                                   KVOFF_MINIMAL and RADIANCE_* gates on them.
 #
@@ -1025,7 +1025,7 @@ KVOFF_ALIGN_LAST_BLOCK=${KVOFF_ALIGN_LAST_BLOCK:-1}
 # the set is COHERENT, not that it serves -- no engine was started.
 # 2026-09-13, pat: DEFAULT FLIPPED TO 1. The minimal set has run production since the
 # 2026-09-12 late reload and is working well, so it is the recommended configuration; the
-# full instrumented set is the EXPERIMENTAL build (KVCACHE_EXPERIMENTAL=1 on the kvcache
+# full instrumented set is the DISK build (KVCACHE_DISK_TIER=1 on the kvcache
 # wrapper, which sets this back to 0 along with the disk tier).
 KVOFF_MINIMAL=${KVOFF_MINIMAL:-1}
 # RADIANCE_LOOKUP_STALE_WATCH: diagnostic only -- counts lookups that returned a cached
