@@ -5,7 +5,7 @@ WHY THIS EXISTS
 Every state-cache gate we had was single-turn. Lazy GDN passed reaskbench seven times and still
 corrupted chat from turn 5 -- its failure needs MULTI-TURN traffic at a high prefix-cache hit rate
 (upstream: 73-77% hits vs ~8% in single-shot gates). And the tier's value has never been measured
-on the workload it exists for: pat's "three long context agents at the same time". One harness
+on the workload it exists for: three long-context agents at the same time. One harness
 closes both holes. It is also the gate any recurrent-state precision change (fp16 ssm) must pass.
 
 WHAT IT DOES
@@ -16,7 +16,7 @@ standard library (deterministic; sha256 of every file used is recorded in the re
   --exact (default)  SEQUENTIAL, one request in flight at a time, so batch shape cannot move
                      numerics.
     CACHED phase     round-robin A1 B1 C1 A2 B2 C2 ... each session under its own cache_salt.
-                     Three sessions outgrow the 228,737-token GPU pool by the later rounds, so the
+                     Three sessions outgrow a ~230-250k-token GPU pool by the later rounds, so the
                      early turns are GPU hits and the later ones come back from the CPU tier --
                      both paths, inside real multi-turn conversations.
     COLD phase       every CACHED request is replayed with the IDENTICAL messages under a fresh
@@ -53,6 +53,7 @@ import hashlib
 import json
 import os
 import sys
+import sysconfig
 import threading
 import time
 import urllib.error
@@ -62,9 +63,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tierbench as T       # noqa: E402
 import equivbench as E      # noqa: E402
 
-BASE = os.environ.get("TURNBENCH_BASE", "http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache")
-OUT_DIR = os.environ.get("TURNBENCH_OUT", os.path.expanduser("~/audit/stress/turnbench"))
-CORPUS = os.environ.get("TURNBENCH_CORPUS", "/usr/lib/python3.12")
+# Unset: the first endpoint tierbench finds (llama-swap entry, then the standalone port).
+BASE = os.environ.get("TURNBENCH_BASE", "")
+OUT_DIR = os.environ.get("TURNBENCH_OUT", "turnbench-out")
+CORPUS = os.environ.get("TURNBENCH_CORPUS", sysconfig.get_paths()["stdlib"])
 RUN = "%x" % (int(time.time()) & 0xFFFFFF)
 SYSTEM = ("You are a careful code assistant working through a codebase one file at a time. "
           "Answer concisely and specifically; quote function names exactly.")
@@ -85,7 +87,7 @@ SPEC = {"drafts": "vllm:spec_decode_num_drafts_total",
 # ------------------------------------------------------------------------------ requests
 def ask(messages, tag, salt, max_tokens):
     """equivbench.ask with a message list and thinking off; same record, so E.compare works."""
-    payload = {"model": T.MODEL, "messages": messages, "max_tokens": max_tokens,
+    payload = {"model": T.SERVED, "messages": messages, "max_tokens": max_tokens,
                "temperature": 0, "logprobs": True, "top_logprobs": E.TOP_LOGPROBS,
                "cache_salt": salt, "stream": False,
                "chat_template_kwargs": {"enable_thinking": False}}
@@ -382,6 +384,8 @@ def verdict_exact(rows):
 
 
 def main():
+    global BASE
+    BASE = BASE or T.detect_endpoint()
     ap = argparse.ArgumentParser()
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true",
@@ -415,7 +419,7 @@ def main():
             row.append("%d:+%dk=%dk(%d files)" % (t, n // 1000, cum // 1000, len(names)))
         T.log("  session %s  %s" % (s, "  ".join(row)))
     last = sum(sum(n for _, n, _ in plan[s]) for s in sessions)
-    T.log("  all sessions at the last turn ~%s tokens (GPU pool 228,737; tier ~488k)"
+    T.log("  all sessions at the last turn ~%s tokens (compare with the boot log's GPU KV cache size)"
           % "{:,}".format(last))
     if a.dry_run or not a.yes:
         T.log("dry run -- pass --yes to send")

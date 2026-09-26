@@ -8,8 +8,8 @@ activity). It never writes to the engine and names no state change.
 
 WHERE IT READS FROM (environment overrides)
   KVWATCH_METRICS   engine /metrics. Default: the qwen3.8-27b-kvcache entry through
-                    llama-swap on :1234. To read vLLM directly, use
-                    http://127.0.0.1:<port>/metrics.
+                    llama-swap on :1234, falling back to the launcher run standalone
+                    at http://127.0.0.1:$PORT/metrics (PORT default 8080).
   KVWATCH_ACTIVITY  llama-swap's per-request activity feed. Optional: without
                     llama-swap the RECENT REQUESTS table is simply not printed.
   KVWATCH_REQUESTS  how many recent requests to list (default 8).
@@ -37,6 +37,9 @@ import json, os, re, sys, time, urllib.request
 METRICS = os.environ.get(
     "KVWATCH_METRICS",
     "http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache/metrics")
+# Without an explicit KVWATCH_METRICS, a standalone launch (no llama-swap) is the fallback.
+FALLBACKS = [] if "KVWATCH_METRICS" in os.environ else [
+    "http://127.0.0.1:%s/metrics" % os.environ.get("PORT", "8080")]
 ACTIVITY = os.environ.get("KVWATCH_ACTIVITY",
                           "http://127.0.0.1:1234/api/metrics/activity")
 STATE = os.environ.get("KVWATCH_STATE", "/tmp/kvwatch-%d.json" % os.getuid())
@@ -85,10 +88,17 @@ def pct(hit, q):
 
 def main():
     now = time.time()
-    try:
-        m = parse(get(METRICS))
-    except Exception as e:
-        print("kvwatch: cannot read %s\n  %s" % (METRICS, e))
+    global METRICS
+    m, err = None, None
+    for url in [METRICS] + FALLBACKS:
+        try:
+            m = parse(get(url))
+            METRICS = url
+            break
+        except Exception as e:
+            err = err or e
+    if m is None:
+        print("kvwatch: cannot read %s\n  %s" % (" or ".join([METRICS] + FALLBACKS), err))
         return 1
     acts = []
     try:

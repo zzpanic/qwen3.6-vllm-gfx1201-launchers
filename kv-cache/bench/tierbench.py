@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""tierbench -- deterministic KV tier attribution bench for qwen3.8-27b-kvcache.
+"""tierbench -- deterministic KV tier attribution bench.
 
 WHY THIS EXISTS
 ---------------
-`~/audit/stress/harness.py` established that an offload read-back costs ~78 s against
+An earlier stress harness established that an offload read-back costs ~78 s against
 2.15 s for a GPU hit, but it could not say WHICH tier served the read-back. Its EVICT-1
 phase pushed 27.19 GB through a 16 GiB CPU primary tier, so the prefix was always evicted
 all the way to the filesystem: its RE-READ-CPU, RE-READ-FS and RE-READ-FS2 phases were
@@ -19,8 +19,7 @@ Four tier states, one prefix, measured the same way:
     FS    evicted from CPU, still on disk     -> the ~78 s case
 
 plus an optional CONCURRENT phase that reproduces the multi-client regime (several long
-conversations converging on the 138-block pool) which is where the 151 preemptions in
-`~/vllm-kv-cache-offload-reuse.md` came from.
+conversations converging on the 138-block pool), the regime where preemptions were seen.
 
 WHAT "DETERMINISTIC" MEANS HERE
 -------------------------------
@@ -69,6 +68,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -80,14 +80,21 @@ from concurrent.futures import ThreadPoolExecutor
 # ---------------------------------------------------------------- configuration
 
 MODEL = os.environ.get("TIERBENCH_MODEL", "qwen3.8-27b-kvcache")
-CONTAINER = os.environ.get("TIERBENCH_CONTAINER", "qwen38-27b-vllm")
-OUT_DIR = os.environ.get("TIERBENCH_OUT", os.path.expanduser("~/audit/stress/tierbench"))
+# The model id the server validates. It is the llama-swap entry key in our config, but an
+# upstream build serves whatever its own --served-model-name says, and llama-swap forwards the
+# id verbatim -- so a bench pointed at someone else's entry needs the two separately. Read it
+# from <endpoint>/v1/models when in doubt; a mismatch 404s AFTER the model is loaded.
+SERVED = os.environ.get("TIERBENCH_SERVED", MODEL)
+CONTAINER = os.environ.get("TIERBENCH_CONTAINER", os.environ.get("NAME", "qwen38-27b-kvcache"))
+# podman if present, else docker (RUNTIME overrides) -- the same choice the launcher makes.
+RUNTIME = os.environ.get("RUNTIME") or ("podman" if shutil.which("podman") else "docker")
+OUT_DIR = os.environ.get("TIERBENCH_OUT", "tierbench-out")
 
 # Endpoints tried in order. The llama-swap proxy path is stable across restarts; the
 # direct upstream port is not (it moves with the entry), so it is only the fallback.
-ENDPOINT_CANDIDATES = [
+ENDPOINT_CANDIDATES = ([os.environ["TIERBENCH_BASE"]] if os.environ.get("TIERBENCH_BASE") else []) + [
     "http://127.0.0.1:1234/upstream/" + MODEL,
-    "http://127.0.0.1:5804",
+    "http://127.0.0.1:%s" % os.environ.get("PORT", "8080"),   # the launcher run standalone
 ]
 
 PER_REQ_TIMEOUT = 900          # a cold 200k-token prefill is minutes, not seconds
@@ -200,7 +207,7 @@ def detect_capacity():
         source = "boot log (%s)" % CONTAINER
         try:
             r = subprocess.run(
-                ["podman", "logs", CONTAINER],
+                [RUNTIME, "logs", CONTAINER],
                 capture_output=True, text=True, timeout=120,
             )
             out = r.stdout + r.stderr
@@ -215,6 +222,13 @@ def detect_capacity():
             cpu_blocks = m.group(1)
     if not gpu_tokens:
         raise Abort("could not detect GPU KV cache size; set TIERBENCH_GPU_TOKENS")
+    if not cpu_blocks and source != "env":
+        # A build with no KV offload at all is a legitimate target -- it is the control arm
+        # any before/after comparison needs. Only insist on a CPU tier size when the engine
+        # actually has a tier whose size we failed to read.
+        if not re.search(r"OffloadingConnector|OffloadingSpec|kv-offloading-size", out):
+            cpu_blocks = "0"
+            source += " (no offload tier configured)"
     if not cpu_blocks:
         raise Abort("could not detect CPU primary tier size; set TIERBENCH_CPU_BLOCKS")
     return {"gpu_tokens": int(gpu_tokens), "cpu_blocks": int(cpu_blocks), "source": source}
@@ -222,7 +236,8 @@ def detect_capacity():
 
 # ---------------------------------------------------------------- tier geometry
 
-FS_ROOT = os.environ.get("TIERBENCH_FS_ROOT", "/kvcache/blocks")
+FS_ROOT = os.environ.get("TIERBENCH_FS_ROOT",
+                         os.path.join(os.environ.get("KVCACHE_DISK", "/kvcache"), "blocks"))
 
 
 def detect_geometry():
@@ -284,7 +299,7 @@ def detect_geometry():
 # this model is 144 KiB/token, because 6 of its 9 KV groups are fixed-size Mamba/GDN state
 # rather than attention KV. A band that excludes the true value is a trap, not a guard.
 BPT_MIN, BPT_MAX = 8 * 1024, 512 * 1024
-BPT_FALLBACK = 31 * 1024   # ~/audit/stress/results/results.md: 2.796 GB for a ~90k prefix
+BPT_FALLBACK = 31 * 1024   # measured: 2.796 GB for a ~90k-token prefix
 
 
 def derive_bytes_per_token(m, geom=None):
@@ -399,7 +414,7 @@ class Sizer(object):
 
     def count(self, text):
         r = http(self.base + "/tokenize",
-                 {"model": MODEL, "prompt": text}, timeout=120)
+                 {"model": SERVED, "prompt": text}, timeout=120)
         return r["count"]
 
     def build(self, salt, tag, target_tokens):
@@ -422,7 +437,7 @@ def chat(base, text, tag, max_tokens=MAX_TOKENS):
     """Streamed so TTFT separates the prefill stall from decode. The whole thesis is that
     the ~78 s is prefill-side; a bench that only reports wall time cannot show that."""
     payload = {
-        "model": MODEL,
+        "model": SERVED,
         "messages": [{"role": "user", "content": text}],
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -655,7 +670,7 @@ def write_report(path_md, path_json, meta, results):
 
     L = []
     L.append("# tierbench -- %s\n" % meta["started"])
-    L.append("Model `%s`, salt `%s`, endpoint `%s`.  \n" % (MODEL, meta["salt"], meta["endpoint"]))
+    L.append("Model `%s`, salt `%s`, endpoint `%s`.  \n" % (SERVED, meta["salt"], meta["endpoint"]))
     L.append("Capacities from %s: GPU %s tokens, CPU primary %s blocks.  \n"
              % (meta["capacity"]["source"],
                 "{:,}".format(meta["capacity"]["gpu_tokens"]),

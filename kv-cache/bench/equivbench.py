@@ -40,7 +40,7 @@ and four comparisons:
     coldA vs coldB   the NOISE FLOOR. Two recomputes of the same tokens. Any
                      disagreement here is the decode pipeline, not the cache.
     coldB vs gpu     does resuming from cached KV change the answer at all?
-    coldB vs fs      the question pat asked, against the same-chain recompute.
+    coldB vs fs      the question that matters, against the same-chain recompute.
     coldA vs fs      the same question against an independent recompute.
 
 Comparison is token-level, not string-level: `logprobs: true` returns the emitted token
@@ -84,7 +84,7 @@ def ask(base, text, tag, cache_salt, max_tokens=MAX_TOKENS):
     it makes the logprobs arrive in fragments that have to be reassembled. Tier
     attribution comes from `cached_tokens` and the metric deltas, not from TTFT."""
     payload = {
-        "model": T.MODEL,
+        "model": T.SERVED,
         "messages": [{"role": "user", "content": text}],
         "max_tokens": max_tokens,
         "temperature": 0,

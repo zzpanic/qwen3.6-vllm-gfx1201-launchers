@@ -145,11 +145,11 @@ def classify_mixed(d):
 
 
 def engine_log_since(ts):
-    """Engine log since a timestamp. podman, not the vLLM logger, because the failure this
+    """Engine log since a timestamp. The container runtime, not the vLLM logger, because the failure this
     is watching for KILLS the process that would otherwise report it."""
     try:
         p = subprocess.run(
-            ["podman", "logs", "--since", ts, T.CONTAINER],
+            [T.RUNTIME, "logs", "--since", ts, T.CONTAINER],
             capture_output=True, text=True, timeout=60)
         return (p.stdout or "") + (p.stderr or "")
     except Exception as e:

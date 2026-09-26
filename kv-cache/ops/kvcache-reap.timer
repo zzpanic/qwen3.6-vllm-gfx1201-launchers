@@ -1,14 +1,13 @@
 [Unit]
 Description=Periodic reap of the vLLM fs KV secondary tier
-Documentation=file://$HOME/vllm-kv-cache-offload-reuse.md
+Documentation=https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers/blob/master/kv-cache/README.md
 
 [Timer]
-# The tier writes ~45 MB/s worst case, so 512 GB of headroom is hours, not
-# minutes -- but a 5-minute cadence keeps each reap small and its I/O idle-class
-# rather than one large stall.
-OnBootSec=5min
-OnUnitActiveSec=5min
-AccuracySec=1min
+# Every minute keeps each reap small and its I/O idle-class: under agentic load the tier can
+# write tens of GB in minutes, and a slower cadence lets one reap become a large stall.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
 
 [Install]
 WantedBy=timers.target

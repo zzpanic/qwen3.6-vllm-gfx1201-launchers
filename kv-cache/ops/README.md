@@ -12,9 +12,12 @@ external reaper the filesystem fills until it is full.
     sudo systemctl daemon-reload
     sudo systemctl enable --now kvcache-reap.timer
 
-`MIN_AGE=90min` is a **hard safety floor, not a tuning knob**. Reaping a block
-that is in flight kills EngineCore outright — there is no load-failure recovery
-path in this connector. Never lower it; never hand-delete a young block.
+It keeps the filesystem at or below 70% (`KVCACHE_TARGET_PCT`), oldest blocks first, and
+leaves blocks younger than 15 minutes (`KVCACHE_MIN_AGE_MIN`) alone unless the volume passes
+90%, because a full volume fails every store. A deleted block costs a recompute of that block
+(with `patch_fs_failed_load.py` applied), not a crash. It works from `df` on the filesystem that
+holds `KVCACHE_ROOT` (default `/kvcache/blocks`), so **give the tier its own filesystem**:
+anything else stored there is paid for by deleting cache blocks.
 
 ## After every reload: check it is serving
 
