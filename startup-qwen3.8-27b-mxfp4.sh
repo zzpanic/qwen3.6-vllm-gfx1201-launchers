@@ -70,7 +70,8 @@ Everything is an environment variable; these are the ones worth knowing.
 
   MODELS=~/ai/models-mxfp4  directory holding the checkpoints (bind-mounted at /models)
   PORT=<--port value>       listen port; the --port argument (llama-swap) wins over this
-  IMAGE=...:0.9.3           container image (CACHE is keyed to it -- move both together)
+  IMAGE=...:0.9.3           container image (every build cache is keyed on its image ID, so a
+                            new image or a re-pull under the same tag rebuilds by itself)
   RUNTIME=podman|docker     container runtime (auto-detected)
   CHAT_TEMPLATE=./qwen-fixed-v22.3.jinja
                             chat template; must be readable on the host
@@ -97,6 +98,9 @@ Everything is an environment variable; these are the ones worth knowing.
   MIN_M=0                   M above which the W4A8 kernel takes over from aiter (0 = always)
   AUTO_R4D=1                build the pinned libr4d on first run (cached); 0 uses the image's
   R4D_SO=<dir>              use your own libr4d checkout instead of building one
+  ARCH=<auto>               GPU arch the kernels are built for; read from the KFD topology
+  BOOT_OVERLAY=<dir>|0      pre-patched site-packages, built automatically on a miss (used only
+                            when its meta matches this boot exactly; 0 = off)
   EXTRA="--enforce-eager"   extra `vllm serve` flags (same as passing them as arguments)
   DRY_RUN=1                 print the container command instead of running it
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
@@ -313,7 +317,8 @@ if [ "$SGATES" = 1 ]; then CACHE_SUF="$CACHE_SUF-sg"; fi
 # cache dir because the fill kernel leaves the graph.
 EOUT=${RADIANCE_GDN_EMPTY_OUT:-0}
 if [ "$EOUT" = 1 ]; then CACHE_SUF="$CACHE_SUF-eo"; fi
-CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-093$CACHE_SUF}
+# CACHE itself is set after preflight (see "cache identity"): its default is keyed on the
+# image ID, which is only known once preflight has pulled the image.
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4
@@ -587,6 +592,19 @@ case "$CHAT_TEMPLATE" in
 esac
 
 preflight
+
+# ---------------------------------------------------------------- build caches
+# Every build cache here is keyed on everything its artifact was built from -- image ID (not
+# tag), GPU arch, source content, flags -- so any upstream change rebuilds instead of silently
+# reusing a stale artifact. The machinery lives in startup-cache/ (see its README.md) and is
+# shared by any launcher: this sets IMG_KEY, ARCH and STARTUP_CACHE_KEY ("$IMG_KEY-$ARCH"),
+# verifies the boot overlay, and fills STARTUP_CACHE_RUN_ARGS for the container run below.
+# ARCH=<gfx...> overrides the detected arch; BOOT_OVERLAY=0 disables the overlay.
+STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
+# shellcheck source=startup-cache/startup-cache.sh
+. "$STARTUP_CACHE/startup-cache.sh"
+CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
+
 # A libr4d checkout DIRECTORY whose r4d.so is copied over the image's at container start. Leave
 # unset and it is built for you (see AUTO_R4D just below); set it to use your own checkout.
 # Needed because the GDN overflow fixes are upstream (StillDeadcode/libr4d PR #1, merged) but the
@@ -602,11 +620,13 @@ R4D_PIN=${R4D_PIN:-b9e42ab}
 R4D_CACHE=${R4D_CACHE:-$HOME/.cache/radiance-libr4d}
 # r4d_radiance_extras.patch carries this repo's libr4d additions on top of the pinned commit:
 # the 8-bit prefill attention legs (R4D_ATTN_FP8) and the fused GDN decode step
-# (RADIANCE_GDN_FUSED_UPDATE). The build cache key carries a suffix so patched and stock builds
-# coexist; bump the suffix whenever the patch content changes, or a stale build serves silently.
+# (RADIANCE_GDN_FUSED_UPDATE). The build cache key is everything the build is made from: the
+# pinned commit, a content hash of the patch (so an edited patch rebuilds with no suffix to
+# remember to bump), the image (its hipcc builds it) and the GPU arch (build.sh's GFX_ARCH).
 R4D_PATCH="$REPO/r4d_radiance_extras.patch"
 R4D_KEY="$R4D_PIN"
-if [ -f "$R4D_PATCH" ]; then R4D_KEY="$R4D_PIN-rx5"; fi   # rx5: fused_update zeroes the pad rows (o_rows arg)
+if [ -f "$R4D_PATCH" ]; then R4D_KEY="$R4D_PIN-p$(sha256sum "$R4D_PATCH" | cut -c1-8)"; fi
+R4D_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"
 if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
   if [ ! -f "$R4D_CACHE/$R4D_KEY/r4d.so" ]; then
     echo "[radiance] building libr4d $R4D_KEY in $IMAGE -- one time, a few minutes"
@@ -614,11 +634,11 @@ if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
     mkdir -p "$R4D_CACHE/.build"
     git clone -q https://codeberg.org/StillDeadcode/libr4d.git "$R4D_CACHE/.build"
     git -C "$R4D_CACHE/.build" checkout -q "$R4D_PIN"
-    if [ "$R4D_KEY" != "$R4D_PIN" ]; then
+    if [ -f "$R4D_PATCH" ]; then
       git -C "$R4D_CACHE/.build" apply "$R4D_PATCH"
     fi
     "$RUNTIME" run --rm --entrypoint bash -v "$R4D_CACHE/.build":/work:z -w /work \
-      "$IMAGE" -c ./build.sh
+      -e GFX_ARCH="$ARCH" "$IMAGE" -c ./build.sh
     # publish only after a successful build, so an interrupted one is not cached as good
     mv "$R4D_CACHE/.build" "$R4D_CACHE/$R4D_KEY"
   fi
@@ -1255,14 +1275,14 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # drop --override-generation-config and --chat-template.
 # AITER JIT directory. aiter compiles its core module on import; without this
 # it lands in ephemeral site-packages and rebuilds (~15s) every boot. Point
-# it at /cache so the build persists. Versioned by image tag: aiter does not
-# validate sources, only GPU arch, so a stale .so from an older image would
-# load silently — a new tag starts fresh.
-# No automatic cleanup: each new image tag leaves its aiter-jit-<tag>/ behind
-# (likewise old fp8so/ keys; pycache/ revalidates on mtime). Prune by hand
+# it at /cache so the build persists. Keyed on STARTUP_CACHE_KEY (image ID +
+# arch): aiter does not validate sources, only GPU arch, so a stale .so from an
+# older image would load silently -- a new image, even re-pulled under the same
+# tag, starts fresh.
+# No automatic cleanup: each new image leaves its aiter-jit-<key>/ behind
+# (likewise old hipso/ keys; pycache/ revalidates on mtime). Prune by hand
 # (rm -rf the stale dir under /cache) when rotating images.
-# shellcheck disable=SC2001
-AITER_JIT_TAG="${AITER_JIT_TAG:-$(echo "$IMAGE" | sed 's|.*/||; s|[^A-Za-z0-9._-]|-|g')}"
+AITER_JIT_TAG="${AITER_JIT_TAG:-$STARTUP_CACHE_KEY}"
 # STARTUP NOISE, defaults set 2026-09-05 at pat's request. Both are read by the image's
 # entrypoint, not by this script, so they only take effect if forwarded with -e below.
 #   RADIANCE_RUN_BWTEST=0    skips the GPU topology + bandwidth sweep at startup. Upstream
@@ -1346,6 +1366,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor -e TRITON_CACHE_DIR=/cache/triton \
   -e AITER_ROOT_DIR=/cache/aiter -e TRITON_CACHE_AUTOTUNING=1 \
   -e AITER_JIT_DIR=/cache/aiter-jit-"$AITER_JIT_TAG" -e AITER_JIT_TAG="$AITER_JIT_TAG" \
+  "${STARTUP_CACHE_RUN_ARGS[@]}" \
   -e PYTHONPYCACHEPREFIX=/cache/pycache -e PYTHONDONTWRITEBYTECODE= \
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
@@ -1359,6 +1380,13 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     set -e
     SP=/opt/vllm/lib/python3.12/site-packages
     cd /patches
+    # Boot overlay (startup-cache/overlay-apply.sh): copies in the host-verified, pre-patched
+    # site-packages delta, or leaves BOOT_OVERLAY_APPLIED empty and the prelude below runs.
+    # startup-cache/build-boot-overlay.sh extracts and hashes the lines between the BEGIN/END
+    # markers: keep the markers, and keep that block to site-packages patching only.
+    . /startup-cache/overlay-apply.sh "$SP"
+    if [ -z "$BOOT_OVERLAY_APPLIED" ]; then
+    # BEGIN patch prelude
     python3 patch_quark_mxfp4.py
     python3 patch_ar_maxbytes.py
     python3 patch_topk_triton_rows.py
@@ -1383,21 +1411,14 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     cp radiance_mxfp4.py radiance_gdn.py radiance_rmsquant.py radiance_drafthead.py \
        radiance_verifyhead.py radiance_gdnmerge.py radiance_aroverlap.py radiance_topk.py \
        radiance_arnq.py "$SP"/
-    # Skip the hipcc rebuild when sources are unchanged: the .so is
-    # byte-identical for identical inputs, and /cache persists across boots
-    # (same pattern as R4D_CACHE above). Saves ~14s per start. Keyed on
-    # source hash + arch + image tag: the .hip ships inside the image, so the
-    # same source under a different hipcc/pybind11 must not reuse an old .so.
-    FP8_KEY="$(sha256sum radiance_mxfp4_fp8.hip | cut -d " " -f1)-gfx1201-$AITER_JIT_TAG"
-    if [ -f "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" ]; then
-      cp "/cache/fp8so/$FP8_KEY/radiance_mxfp4_fp8.so" "$SP"/radiance_mxfp4_fp8.so
-      echo "[radiance] fp8.so from cache ($FP8_KEY)"
-    else
-      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $(python3 -m pybind11 --includes) \
-        radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
-      mkdir -p "/cache/fp8so/$FP8_KEY"
-      cp "$SP"/radiance_mxfp4_fp8.so "/cache/fp8so/$FP8_KEY/"
+    # END patch prelude
     fi
+    # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~14s per start): the .so is
+    # byte-identical for identical inputs, and /cache persists across boots. Keyed on source,
+    # flags, arch and image ID by startup-cache/hip-so-cache.sh -- the same source under a
+    # different hipcc/pybind11 must not reuse an old .so.
+    bash /startup-cache/hip-so-cache.sh radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
+      -O3 -w -std=c++17 -fPIC -shared $(python3 -m pybind11 --includes)
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
     # rebuild, the Dockerfile supports the same substitution through R4D_REPO / R4D_VERSION.

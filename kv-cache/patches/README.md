@@ -92,6 +92,7 @@ root the script expects. The launcher does all three for you; nothing else does.
  | 13 | `patch_lookup_invalidate.py` | warns; a just-stored block can read as absent (long-context hits drop) |
  | 14 | `patch_fs_failed_load.py` | warns; a reaped/unreadable disk block can hang the request that needs it |
  | 15 | `patch_offload_miss_deferral_metrics.py` | warns; a deferral that never resolves stays invisible |
+ | 16 | `patch_skip_mm_warmup.py` | warns; the boot pays the stock ~21.5 s multi-modal warmup |
  
  That split is deliberate. 1 and 2 are load-bearing — without patch 1 the engine
 asserts and dies the first time an external hit lands on a request that also hit
@@ -129,6 +130,7 @@ patch's metric series actually exists in `/metrics` before you believe a result;
  | `fs_failed_load` | `RADIANCE_FS_FAILED_LOAD_FORGET` |
  | `lookup_invalidate` | `RADIANCE_LOOKUP_INVALIDATE` |
  | `fs_fanout` | `RADIANCE_FS_FANOUT_MAX`, `RADIANCE_FS_FANOUT_TARGET_MB` |
+ | `skip_mm_warmup` | `RADIANCE_SKIP_MM_WARMUP` (launcher default 1; 0 = stock startup warmup, and the first image request of a boot pays it otherwise) |
  | `instrumentation`, `lookup_metrics`, `debug_instrument`, `tier_report`, `miss_deferral_metrics` | none — metrics only, no behaviour change |
  
  Patching is therefore reversible without rebuilding: unset the gate and you get

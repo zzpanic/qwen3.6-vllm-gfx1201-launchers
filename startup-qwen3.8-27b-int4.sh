@@ -194,8 +194,15 @@ QUANT="${QUANT:-auto_gptq}"    # must AGREE with the checkpoint's config.json or
                                # a mismatch ValueError several minutes into the load. The raw
                                # upstream file says "auto-round", which is neither -- the
                                # ROUTING GUARD below rewrites it.
-CACHE_DIR="${CACHE_DIR:-./vllm-cache}"
 IMAGE="${IMAGE:-docker.io/stilldeadcode/vllm-radiance:0.9.3}"
+# Build caches (startup-cache/README.md): the compile caches are keyed on the image ID and GPU
+# arch (STARTUP_CACHE_KEY), so a new image -- even one re-pulled under the same tag -- or a
+# different GPU gets fresh caches instead of replaying stale compiled graphs. The image is pulled
+# here if missing (its ID is the key). ARCH=<gfx...> overrides the detected arch.
+STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
+# shellcheck source=startup-cache/startup-cache.sh
+. "$STARTUP_CACHE/startup-cache.sh"
+CACHE_DIR="${CACHE_DIR:-./vllm-cache/$STARTUP_CACHE_KEY}"
                                # 0.9.3 = vLLM 0.27.1, DFlash2 native. Every benchmark in
                                # benchmarks/ was measured on this tag. 0.5.8 (vLLM 0.26.0)
                                # still works but needs DFLASH2_PATCH=1; see the header.
@@ -685,6 +692,7 @@ exec podman run --rm --name "$NAME" \
   --shm-size 4g --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
   -v "$MODEL_DIR:/model:ro" \
   -v "$CACHE_DIR:/cache" \
+  "${STARTUP_CACHE_RUN_ARGS[@]}" \
   "${TILES_MOUNT_ARG[@]}" \
   "${DFLASH2_MOUNT_ARGS[@]}" \
   "${DRAFT_MOUNT_ARG[@]}" \
@@ -700,7 +708,7 @@ exec podman run --rm --name "$NAME" \
   -e RADIANCE_SKINNY_GEMM="$RADIANCE_SKINNY_GEMM" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
   -e TRITON_CACHE_DIR=/cache/triton -e AITER_ROOT_DIR=/cache/aiter \
-  -e TRITON_CACHE_AUTOTUNING=1 \
+  -e TRITON_CACHE_AUTOTUNING=1 -e AITER_JIT_DIR=/cache/aiter-jit \
   ${KV_GROUP_SIZE:+-e KV_GROUP_SIZE=$KV_GROUP_SIZE} \
   "$IMAGE" \
     /model \

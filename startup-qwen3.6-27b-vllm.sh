@@ -136,8 +136,15 @@ QUANT="${QUANT:-auto_gptq}"    # auto_gptq   for Intel/Qwen3.6-27B-int4-AutoRoun
                                # raises a mismatch ValueError at load. For AutoRound that
                                # means the config.json patch below has to be applied too;
                                # the raw upstream file says "auto-round", which is neither.
-CACHE_DIR="${CACHE_DIR:-./vllm-cache}"
 IMAGE="${IMAGE:-docker.io/stilldeadcode/vllm-radiance:0.5.8}"
+# Build caches (startup-cache/README.md): the compile caches are keyed on the image ID and GPU
+# arch (STARTUP_CACHE_KEY), so a new image -- even one re-pulled under the same tag -- or a
+# different GPU gets fresh caches instead of replaying stale compiled graphs. The image is pulled
+# here if missing (its ID is the key). ARCH=<gfx...> overrides the detected arch.
+STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
+# shellcheck source=startup-cache/startup-cache.sh
+. "$STARTUP_CACHE/startup-cache.sh"
+CACHE_DIR="${CACHE_DIR:-./vllm-cache/$STARTUP_CACHE_KEY}"
 MAXLEN="${MAXLEN:-131072}"
 GPUUTIL="${GPUUTIL:-0.98}"
 ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}"
@@ -380,6 +387,7 @@ exec podman run --rm --name "$NAME" \
   --shm-size 4g --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
   -v "$MODEL_DIR:/model:ro" \
   -v "$CACHE_DIR:/cache" \
+  "${STARTUP_CACHE_RUN_ARGS[@]}" \
   "${TILES_MOUNT_ARG[@]}" \
   -p "127.0.0.1:${PORT}:8000" \
   -e HIP_VISIBLE_DEVICES=0 \
@@ -392,7 +400,7 @@ exec podman run --rm --name "$NAME" \
   -e RADIANCE_VIT_FLASH=1 -e RADIANCE_FUSE_RMS_QUANT=1 -e RADIANCE_DYNAMIC_DRAFT=1 \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
   -e TRITON_CACHE_DIR=/cache/triton -e AITER_ROOT_DIR=/cache/aiter \
-  -e TRITON_CACHE_AUTOTUNING=1 \
+  -e TRITON_CACHE_AUTOTUNING=1 -e AITER_JIT_DIR=/cache/aiter-jit \
   "$IMAGE" \
     /model \
     --served-model-name qwen3.6-27b-vllm \

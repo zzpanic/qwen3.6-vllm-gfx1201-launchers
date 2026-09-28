@@ -52,9 +52,18 @@
 #   * REPO (new knob, defaults to radiance-vllm-mxfp4 beside kv-cache/) locates the repo's own files
 #     (gpu-detect.sh, r4d_radiance_extras.patch, the chat template, the /patches mount),
 #     which upstream resolves relative to the script itself
+#   * boot-speed work, all optional (each degrades to the stock behaviour when absent):
+#       - build caches via ../../startup-cache/ (see its README.md): every build cache is
+#         keyed on the image ID and GPU arch (STARTUP_CACHE_KEY); aiter's JIT build
+#         persists under $CACHE; radiance_mxfp4_fp8.so is compiled once per key; and the
+#         patch prelude is replaced by a verified boot overlay, built automatically on a
+#         miss, whose key includes KVOFF_MINIMAL, RADIANCE_GDN_LAZY and the /house patches.
+#       - RADIANCE_SKIP_MM_WARMUP defaults to 1 (house patch /house/patch_skip_mm_warmup.py):
+#         skips the ~21.5 s startup multi-modal processor warmup; the first image request
+#         of a boot pays it once. Set 0 for stock behaviour.
 # Everything else -- the knob defaults, the patch prelude, the env list, the entrypoint
 # exec, the vllm serve arguments -- is byte-identical to upstream. Re-copy this file from
-# the upstream serve-mxfp4.sh when the repo updates, then re-apply these six edits.
+# the upstream serve-mxfp4.sh when the repo updates, then re-apply these ten edits.
 #
 #   serve-mxfp4-kvcache-base.sh --port <N>   start the server (launched by llama-swap)
 #   serve-mxfp4-kvcache-base.sh -h           every knob, its default and what it does
@@ -486,7 +495,16 @@ if [ "$MAMBA_SSM_FP16" = 1 ]; then CACHE_SUF="$CACHE_SUF-f16ssm"; fi
 GDN_FUSED_ITEMS=${RADIANCE_GDN_FUSED_MAX_ITEMS:-32}
 if [ "$GDN_FUSED_ITEMS" != 32 ]; then CACHE_SUF="$CACHE_SUF-f$GDN_FUSED_ITEMS"; fi
 CACHE_EXPLICIT=${CACHE:+1}   # did the caller pin CACHE? (-tp1s below must not override that)
-CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-093$CACHE_SUF}
+# Build caches (../../startup-cache/, see its README.md): sets IMG_KEY, ARCH and
+# STARTUP_CACHE_KEY ("$IMG_KEY-$ARCH") and the container run args. Sourced HERE, before
+# anything is keyed. The boot-overlay check is deferred to just before the run
+# (startup_cache_overlay), because the prelude branches on KVOFF_MINIMAL and
+# RADIANCE_GDN_LAZY, which are only resolved further down.
+STARTUP_CACHE=${STARTUP_CACHE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/../../startup-cache}
+STARTUP_CACHE_DEFER_OVERLAY=1
+# shellcheck source=../../startup-cache/startup-cache.sh
+. "$STARTUP_CACHE/startup-cache.sh"
+CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4
@@ -759,6 +777,7 @@ fi
 # its own key and builds once. Note the new tree ALSO carries r4d_radiance_extras_rx9.patch for
 # its single-GPU profile -- we do not use that profile (see the upgrade README, Stage B).
 R4D_PATCH_RX5_SHA=6a03fb481f62
+R4D_KEY_EXPLICIT=${R4D_KEY:+1}
 if [ -z "${R4D_KEY:-}" ]; then            # an explicit R4D_KEY in the environment still wins
   R4D_KEY="$R4D_PIN"
   if [ -f "$R4D_PATCH" ]; then
@@ -771,9 +790,13 @@ if [ -z "${R4D_KEY:-}" ]; then            # an explicit R4D_KEY in the environme
     fi
   fi
 fi
+# The build DIRECTORY also carries STARTUP_CACHE_KEY: the build runs inside $IMAGE (its hipcc)
+# for $ARCH, so a new image or GPU must not reuse it. An explicit R4D_KEY names its directory
+# as-is, so a hand-picked existing build is still used exactly.
+if [ -n "${R4D_KEY_EXPLICIT:-}" ]; then R4D_DIR_KEY="$R4D_KEY"; else R4D_DIR_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"; fi
 if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
-  if [ ! -f "$R4D_CACHE/$R4D_KEY/r4d.so" ]; then
-    echo "[radiance] building libr4d $R4D_KEY in $IMAGE -- one time, a few minutes"
+  if [ ! -f "$R4D_CACHE/$R4D_DIR_KEY/r4d.so" ]; then
+    echo "[radiance] building libr4d $R4D_DIR_KEY in $IMAGE -- one time, a few minutes"
     rm -rf "$R4D_CACHE/.build"
     mkdir -p "$R4D_CACHE/.build"
     git clone -q https://codeberg.org/StillDeadcode/libr4d.git "$R4D_CACHE/.build"
@@ -782,12 +805,12 @@ if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
       git -C "$R4D_CACHE/.build" apply "$R4D_PATCH"
     fi
     "$RUNTIME" run --rm --entrypoint bash -v "$R4D_CACHE/.build":/work:z -w /work \
-      "$IMAGE" -c ./build.sh
+      -e GFX_ARCH="$ARCH" "$IMAGE" -c ./build.sh
     # publish only after a successful build, so an interrupted one is not cached as good
-    mv "$R4D_CACHE/.build" "$R4D_CACHE/$R4D_KEY"
+    mv "$R4D_CACHE/.build" "$R4D_CACHE/$R4D_DIR_KEY"
   fi
-  R4D_SO="$R4D_CACHE/$R4D_KEY"
-  echo "[radiance] libr4d $R4D_KEY -> $R4D_SO"
+  R4D_SO="$R4D_CACHE/$R4D_DIR_KEY"
+  echo "[radiance] libr4d $R4D_DIR_KEY -> $R4D_SO"
 fi
 if [ "${PREPARE_ONLY:-0}" = 1 ]; then
   echo "[radiance] prepared: image pulled and libr4d built -- ready to serve"
@@ -1833,6 +1856,13 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 #   RADIANCE_BANNER_PLAIN=1  disables ANSI colour in the banner. Everything we read comes back
 #                            through journalctl, where the escape codes are just noise.
 # Both remain overridable per-entry from config.yaml, since these are :- defaults.
+# --- boot overlay (startup-cache), deferred to here -----------------------------
+# The two knobs the patch prelude branches on are final by now; pass them exactly as the
+# container gets them (-e below), plus /house, where half of the prelude patches live.
+# Both go into the overlay key, and the builder applies the prelude with them.
+STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL RADIANCE_GDN_LAZY=$GDN_LAZY"
+STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
+startup_cache_overlay
 # --- prune stale radiance cache trees (stale permutations), before the exec ---------
 # The live tree is known by construction (CACHE at :340, CACHE_SUF at :311-340), so the
 # pruner takes it as --live and can never touch it. It is capacity-governed, whole-tree-
@@ -1954,6 +1984,8 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -v "$CACHE":/cache \
   -v "${PATCHES:-$REPO}":/patches:z \
   -v "$HOUSE":/house:z \
+  -e AITER_JIT_DIR=/cache/aiter-jit "${STARTUP_CACHE_RUN_ARGS[@]}" \
+  -e RADIANCE_SKIP_MM_WARMUP="${RADIANCE_SKIP_MM_WARMUP:-1}" \
   ${CT_MOUNT[@]+"${CT_MOUNT[@]}"} \
   ${R4D_SO:+-v "$R4D_SO":/r4d:z} \
   ${R4D_SO:+-e R4D_SO="$R4D_SO"} \
@@ -1962,6 +1994,13 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     set -e
     SP=/opt/vllm/lib/python3.12/site-packages
     cd /patches
+    # Boot overlay (startup-cache/overlay-apply.sh): copies in the host-verified, pre-patched
+    # site-packages delta, or leaves BOOT_OVERLAY_APPLIED empty and the prelude below runs.
+    # startup-cache/build-boot-overlay.sh extracts and hashes the lines between the BEGIN/END
+    # markers: keep the markers, and keep that block to site-packages patching only.
+    . /startup-cache/overlay-apply.sh "$SP"
+    if [ -z "$BOOT_OVERLAY_APPLIED" ]; then
+    # BEGIN patch prelude
     python3 patch_quark_mxfp4.py
     python3 patch_ar_maxbytes.py
     python3 patch_topk_triton_rows.py
@@ -2137,8 +2176,17 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # so it has to land in site-packages itself, not under vllm/. Gated so that rolling REPO back
     # to a tree that predates the module cannot break a boot.
     if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then cp radiance_gdn_lazy.py "$SP"/; fi
-    hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $(python3 -m pybind11 --includes) \
-      radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+    # House patch: skip the startup multi-modal warmup (RADIANCE_SKIP_MM_WARMUP, default
+    # 1 via the launcher). Boot speed only: if it fails to apply, the boot just pays the
+    # stock ~21.5 s warmup -- a cost, not a failure.
+    PYTHONPATH=/patches python3 /house/patch_skip_mm_warmup.py \
+      || echo "[radiance] WARNING: skip-mm-warmup patch did not apply; the startup mm warmup will run"
+    # END patch prelude
+    fi
+    # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~30 s per start). Keyed on
+    # source, flags, arch and image ID by startup-cache/hip-so-cache.sh.
+    bash /startup-cache/hip-so-cache.sh radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
+      -O3 -w -std=c++17 -fPIC -shared $(python3 -m pybind11 --includes)
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
     # rebuild, the Dockerfile supports the same substitution through R4D_REPO / R4D_VERSION.

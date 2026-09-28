@@ -384,6 +384,11 @@ work and still serves the 3.8, because it is keyed on GEMM shape rather than mod
   `CLIENT`. Nothing else differs.
 - `logs/boot-qwen3.6-27b-vllm.log` / `logs/boot-qwen3.6-35b-vllm.log` — same, for the 3.6
   models, captured 2026-08-09.
+- `startup-cache/` — the build caches every script above shares. Compile caches, libr4d, the
+  aiter JIT build and the fp8 `.so` are keyed on the image ID and GPU arch, so a new image
+  (even one re-pulled under the same tag) rebuilds instead of reusing stale artifacts. The
+  MXFP4 and KV-cache scripts also get a boot overlay that replaces their patch step. See
+  [startup-cache/README.md](startup-cache/README.md).
 - `patches/` — a per-shape override table for the 27B scripts' W4A16 kernel, whose stock
   gfx1201 Triton tile heuristic is tuned on a different model's shapes and group_size.
   Measured **+4.6% to +9.6% real end-to-end prefill tokens/sec** and **+4.3% decode step
