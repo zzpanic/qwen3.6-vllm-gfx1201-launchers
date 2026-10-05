@@ -308,6 +308,15 @@ one document is how a reader ends up matching the wrong table to their boot log.
 [MXFP4 vs int4, and the flags that actually move this card](#mxfp4-vs-int4-and-the-flags-that-actually-move-this-card)
 below is the part that stays here: it is about choosing between them.
 
+## r4d_kernels: a fix for wrong GDN prefill (opt-in)
+
+libr4d v0.5.0 and older compute **finite but wrong** gated-delta-net prefill output and state on any
+chunk whose gate span exceeds 160 (libr4d issue #4; 20 of this model's 2,304 heads cross it on every
+chunk). `R4D_RX13=1` builds libr4d v0.5.0 + `r4d_kernels/r4d_kernels.patch`, which carries deadcode's
+corrected scan from his radiance engine: 12/12 synthetic cases within 0.36% of an fp64 reference
+where the stock pin fails 6 (46-94% error). Opt-in until the shipped defaults are boot-tested with it.
+Details, sources and licence status: [r4d_kernels/README.md](r4d_kernels/README.md).
+
 ## KV-cache offload
 
 `startup-qwen3.8-27b-kvcache.sh` and the [`kv-cache/`](kv-cache/) directory add **KV-cache

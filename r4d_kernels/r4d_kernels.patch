@@ -1,0 +1,3394 @@
+# r4d_kernels.patch -- the libr4d build behind R4D_RX13=1 in zzpanic/qwen3.6-vllm-gfx1201-launchers.
+# Apply to libr4d v0.5.0 (codeberg.org/StillDeadcode/libr4d, tag v0.5.0 = e8de4bc). The launchers do it
+# for you when R4D_RX13=1; see r4d_kernels/README.md.
+#
+# SOURCES AND LICENCE STATUS -- read before reusing this file
+#   1. libr4d v0.5.0 itself (context and replaced lines): StillDeadcode, codeberg.org/StillDeadcode/libr4d.
+#      That repository publishes no licence as of 2026-10-05. The same author publishes an evolved libr4d
+#      under Apache-2.0 inside codeberg.org/StillDeadcode/radiance. Licence of v0.5.0: UNCERTAIN.
+#   2. "radiance extras" rx10 -- narrow-state GDN decode, fused GDN update, lazy-snapshot kernels, fp8
+#      prefill-attention legs, all-reduce extras: ggz14, codeberg.org/ggz14/radiance-vllm-mxfp4
+#      (mirror github.com/GGZ14/vllm-mxfp4), r4d_radiance_extras_rx10.patch. No licence published:
+#      UNCERTAIN.
+#   3. rx12 -- the rebase of (2) onto v0.5.0 and the bf16-state lazy unit: J-Nova,
+#      github.com/J-Nova/mtp-offload-r9700 (r4d_radiance_extras_rx12.patch). No licence published:
+#      UNCERTAIN.
+#   4. r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip -- deadcode, codeberg.org/StillDeadcode/radiance
+#      (libr4d/ in the engine tree, 1.0.x). Apache-2.0. NOTICE: "radiance Copyright 2026 Deadcode and the
+#      radiance contributors". Modified here: the engine's plugin-ABI wrapper (r4d_rad_gdn_chunk_scan) is
+#      removed; the kernel and its raw entry points are unchanged.
+#   5. Changes by this repository -- the gdn_chunk_scan_k128_v128_c64_bf16_st binding (state_fp16),
+#      gdn_lazy_materialize mode 2 (prefill stash invalidation), the stale-stash counters and their
+#      reader bindings, and the declarations/registry entries for these: Apache-2.0 (this repository's
+#      LICENSE).
+#   Parts 1-3 are redistributed here without a licence grant from their authors. If you are one of them
+#   and want this changed or removed, open an issue on this repository.
+#
+# VALIDATION (2026-10-05, one R9700): parts 1-4 + the _st binding are the build that serves production
+# (rx13). Against an fp64 sequential recurrence (magiccodingman/vllm-radiance#8 check_gdn_extreme_decay):
+# libr4d b9e42ab + rx9 fails 6/12 cases (46-94% output error at chunk gate spans 200-2000); this build
+# passes 12/12 + CUDA-graph replay within 0.36%, with fp32 and fp16 state. The lazy-GDN parts of (5) are
+# NOT validated: lazy GDN stays off (RADIANCE_GDN_LAZY=0), and its code paths do not run when it is off.
+#
+diff --git a/build.sh b/build.sh
+index 78ea749..8458a26 100755
+--- a/build.sh
++++ b/build.sh
+@@ -42,9 +42,18 @@ UNITS=(
+   "r4d_gdn_conv_w4_h128_bf16:"
+   "r4d_gdn_kkt_solve_k128_c64_bf16:"
+   "r4d_gdn_recurrent_update_k128_v128_bf16_fp32state:"
++  "r4d_gdn_recurrent_update_k128_v128_bf16_bf16state:"
++  "r4d_gdn_recurrent_update_k128_v128_bf16_f16state:"
++  "r4d_gdn_lazy_update_k128_v128_bf16_fp32state:"
++  "r4d_gdn_lazy_update_k128_v128_bf16_f16state:"
++  "r4d_gdn_lazy_update_k128_v128_bf16_bf16state:"
++  "r4d_gdn_fused_update_w4k128v128_bf16:"
++  "r4d_gdn_fused_update_w4k128v128_bf16_bf16state:"
++  "r4d_gdn_fused_update_w4k128v128_bf16_f16state:"
+   "r4d_gdn_gated_rmsnorm_h128_bf16:"
+   "r4d_ar_oneshot_2rank_exact:"
+   "r4d_ar_oneshot_2rank_wht6:"
++  "r4d_ar_oneshot_3rank_exact:"
+   "r4d_gemm_bf16_nt_m16:"
+   "r4d_gemm_bf16_nt_m64:"
+   "r4d_gemm_w4a16_nt_m64:"
+diff --git a/r4d.h b/r4d.h
+index 3be4032..d06fb42 100644
+--- a/r4d.h
++++ b/r4d.h
+@@ -97,11 +97,23 @@ void r4d_attn_vit_dims(int* head_dim, int* rows_large, int* rows_small, int* spl
+ // K, V and bt are the compile-time 128/128/64 in the name; a mismatch returns -1 rather than
+ // running. Named for the algorithm, not the serving phase: this is the chunked scan, which is what
+ // prefill and chunked prefill both run. Decode uses the recurrent update, a different kernel.
++// state_fp16: 0 = fp32 state cache, 1 = fp16 (h0/ht read and written at that width; the
++// recurrence itself runs in fp32 WMMA accumulators either way). Returns -1 on a geometry this
++// build was not compiled for, -2 when H is not a multiple of Hg.
+ int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
+         const void* q, const void* k, const void* v, const void* A,
+         const void* g, const void* beta, const void* h0, void* o, void* ht,
+         const void* cu, int N, int H, int Hg, int K, int V, int bt,
+-        float scale, void* stream);
++        float scale, int state_fp16, void* stream);
++// The same scan reading/writing the paged state cache in place: state slot of sequence n is
++// ssm_state_indices[n * indices_stride]; strides are in elements (0 = packed [N, H, V, K]).
++int r4d_gdn_chunk_scan_k128_v128_c64_bf16_sidx(
++        const void* q, const void* k, const void* v, const void* A,
++        const void* g, const void* beta, const void* h0, void* o, void* ht,
++        const void* cu, const void* ssm_state_indices, long indices_stride,
++        long state_slot_stride, long state_head_stride,
++        int N, int H, int Hg, int K, int V, int bt,
++        float scale, int state_fp16, void* stream);
+ void r4d_gdn_dims(int* head_k, int* head_v, int* chunk);
+ 
+ // The chunk preamble: A = (I + strict_lower(diag(beta) K K^T e^{g_i-g_j}))^-1 per chunk, which is
+@@ -155,6 +167,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
+ // l2 norm, the state update and the output, against the paged state cache. The state is fp32
+ // (this model's config asks for it) and one is written per candidate token, which is the whole
+ // cost of the kernel. Replaces fused_sigmoid_gating_delta_rule_update.
++int r4d_gdn_fused_update_w4k128v128_bf16(
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream);
++// The same kernel against a bf16 state cache (--mamba-ssm-cache-dtype=bfloat16). The state dtype
++// is part of the geometry, not a flag: handing an fp32 cache to this entry reads half the bytes
++// it should. select() matches it on the state_dtype constraint.
++int r4d_gdn_fused_update_w4k128v128_bf16_bf16state(
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream);
++// The same kernel against an f16 state cache; see r4d_gdn_state.h.
++int r4d_gdn_fused_update_w4k128v128_bf16_f16state(
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream);
+ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+         const void* q, const void* k, const void* v, const void* a, const void* b,
+         long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
+@@ -162,6 +205,81 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+         const void* ssm_state_indices, long indices_stride, const void* num_accepted,
+         const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
+         int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
++// The same kernel against a bf16 state cache; see the note on the fused sibling above.
++int r4d_gdn_recurrent_update_k128_v128_bf16_bf16state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
++        int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
++// The same kernel against an f16 state cache; see r4d_gdn_state.h.
++int r4d_gdn_recurrent_update_k128_v128_bf16_f16state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
++        int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
++// Lazy-snapshot variant (r4d_gdn_lazy_update_k128_v128.h): ONE base state per sequence in slot
++// sidx[n,0] plus a candidate stash in slot sidx[n,stash_col]; replays the previous step's accepted
++// candidates instead of reading a per-candidate snapshot. No fused row norm. Returns -4 when the
++// slot is too small for H stash regions.
++int r4d_gdn_lazy_update_k128_v128_bf16_fp32state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++        void* stream);
++int r4d_gdn_lazy_update_k128_v128_bf16_f16state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++        void* stream);
++// Lazy-cache materialisation for vLLM's align-mode state copies (see the .h): mode 0 = pre-forward
++// migration (src_col / token_bias / state_idx = dst), mode 1 = post-step checkpoint (num_accepted /
++// state_idx / new_computed / block_size). Pointer tables are device int64 arrays.
++// rx14: stale-stash counters of each lazy unit: [update stale, migrate stale, checkpoint stale,
++// prefill invalidations]. reset != 0 zeroes them after the read. Synchronous; call rarely.
++int r4d_gdn_lazy_stale_counts_fp32state(unsigned int* out4, int reset);
++int r4d_gdn_lazy_stale_counts_f16state(unsigned int* out4, int reset);
++int r4d_gdn_lazy_stale_counts_bf16state(unsigned int* out4, int reset);
++int r4d_gdn_lazy_materialize_k128_v128_bf16_fp32state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream);
++int r4d_gdn_lazy_materialize_k128_v128_bf16_f16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream);
++// The same lazy pair against a bf16 state cache (--mamba-ssm-cache-dtype=bfloat16); see the note
++// on the fused sibling above and r4d_gdn_state.h. bf16 and f16 states are both 2 bytes, so the
++// geometry is identical -- only the storage rounding differs.
++int r4d_gdn_lazy_update_k128_v128_bf16_bf16state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++        void* stream);
++int r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream);
++
++
+ 
+ // ---- all-reduce: one-shot, push, 2 ranks over P2P ------------------------------------------
+ // One-shot means each rank pushes its whole input into the peer's IPC scratch and then reduces
+@@ -180,6 +298,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
+                                 long seq_ctrs, long slot_stride16, long inp, long out, long n_elem,
+                                 long dtype, long stream, long nblocks, long nthreads, long drain,
+                                 long acq);
++
++// radiance extras: exact all-reduce with the decoder layer's fused post-AR epilogue
++// (residual add + Gemma rms_norm + per-token e4m3 quant), one block per row. bf16 only.
++void r4d_ar_oneshot_2rank_exact_nq(long peer_scratch, long my_scratch, long peer_flags,
++                                   long my_flags, long seq_ctrs, long slot_stride16,
++                                   long inp, long residual, long norm_w, long q_out,
++                                   long scale_out, long res_out, long m_rows, long k_cols,
++                                   double eps, long stream_i, long drain, long acq);
+ // Same topology, but the wire payload is Walsh-Hadamard rotated and quantised to 6 bits per element
+ // over groups of 64 (plus a bf16 scale per group). Lossy, and bf16 / fp16 payload only. Takes this
+ // rank's own packed copy (loc_pack) as well, so the reduce folds exactly the bytes it sent.
+@@ -188,6 +314,18 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
+                                long scale_off_bytes, long inp, long out, long n_elem, long dtype,
+                                long stream, long nblocks, long nthreads, long drain, long acq);
+ int  r4d_ar_max_blocks(void);                                   // both kernels
++
++// radiance extras: the same one-shot push all-reduce for EXACTLY THREE ranks (TP=3). Scratch per
++// rank is 2 receive regions x 2 slots x (slot_stride16 * 16) bytes and flags are 2 x max_blocks
++// uints: region 0 holds the lower-ranked peer's message, region 1 the higher. peer_lo / peer_hi
++// are the peers below / above `rank`. fp32 accumulate in canonical rank order ((x0 + x1) + x2),
++// so the three ranks hold bit-identical results. Exact only (no compressed 3-rank payload).
++void r4d_ar_oneshot_3rank_exact(long my_scratch, long peer_lo_scratch, long peer_hi_scratch,
++                                long my_flags, long peer_lo_flags, long peer_hi_flags,
++                                long seq_ctrs, long slot_stride16, long rank,
++                                long inp, long out, long n_elem, long dtype, long stream,
++                                long nblocks, long nthreads, long drain, long acq);
++int  r4d_ar_3rank_max_blocks(void);                             // flags per region
+ void r4d_ar_wht6_dims(int* group, int* bits, int* chunk_elems); // rotated-6-bit payload only
+ 
+ // ---- GEMM ----------------------------------------------------------------------------------
+diff --git a/r4d_ar_oneshot_2rank_exact.hip b/r4d_ar_oneshot_2rank_exact.hip
+index f721bc7..52691a4 100644
+--- a/r4d_ar_oneshot_2rank_exact.hip
++++ b/r4d_ar_oneshot_2rank_exact.hip
+@@ -122,6 +122,156 @@ __global__ void r4d_ar_oneshot_2rank_exact_kernel(
+   }
+ }
+ 
++// ---- radiance extras: all-reduce with a fused decoder-layer epilogue ------------------------
++// r4d_ar_oneshot_2rank_exact_nq: the same push/flag/spin all-reduce, restructured ONE BLOCK PER
++// ROW so the epilogue's per-row reductions stay block-local. After reducing its row (bf16
++// rounded, exactly like the plain exact kernel writes), the block finishes the decoder layer's
++// post-AR epilogue in registers: residual add (fp32), Gemma rms_norm (weight is (1+w), variance
++// over the fp32 sum), bf16 round, per-token e4m3 quant with scale = max(amax/448, 1/(448*512)).
++// Precision contract matches vllm.ir.ops.fused_add_rms_norm + the radiance traced quant; the
++// standalone radiance_add_rms_quant kernel (radiance_mxfp4_fp8.hip) is bit-identical to that
++// reference, and this is the same arithmetic on the same rounded values. The reduced y is NOT
++// written anywhere -- the epilogue is its only consumer, which saves the out-stream entirely.
++// Both ranks compute identical q/scale/res_out (same summation order), so rank parity holds.
++// Shares scratch/flags/seq with the plain exact kernel; per-block seq counters stay in rank
++// lockstep because both ranks issue identical call sequences (SPMD), grid size included.
++#define R4D_ARNQ_T 256
++#define R4D_ARNQ_MAXG 5
++__global__ __launch_bounds__(R4D_ARNQ_T) void r4d_ar_oneshot_2rank_exact_nq_kernel(
++    const int4* __restrict__ in4, int4* peer_base, const int4* my_base,
++    const __hip_bfloat16* __restrict__ res, const __hip_bfloat16* __restrict__ w,
++    unsigned char* __restrict__ q, float* __restrict__ scale,
++    __hip_bfloat16* __restrict__ res_out,
++    unsigned int* peer_flags, unsigned int* my_flags, unsigned int* seq_ctrs,
++    int k16, int slot_stride16, float eps, int drain, int acq) {
++  const int b = blockIdx.x, tid = threadIdx.x;
++  __shared__ unsigned int s_seq;
++  if (tid == 0) s_seq = atomicAdd(&seq_ctrs[b], 1u) + 1u;
++  __syncthreads();
++  const unsigned int sq = s_seq;
++  const int slot = (int)(sq & 1u);
++  int4* ps = peer_base + (size_t)slot * slot_stride16;
++  const int4* ms = my_base + (size_t)slot * slot_stride16;
++  const int start = b * k16, end = start + k16;
++  const int K = k16 * 8;
++  {
++    int k = start + tid;
++    for (; k + 3 * R4D_ARNQ_T < end; k += 4 * R4D_ARNQ_T) {
++      int4 v0 = in4[k], v1 = in4[k + R4D_ARNQ_T], v2 = in4[k + 2 * R4D_ARNQ_T],
++           v3 = in4[k + 3 * R4D_ARNQ_T];
++      ps[k] = v0; ps[k + R4D_ARNQ_T] = v1; ps[k + 2 * R4D_ARNQ_T] = v2;
++      ps[k + 3 * R4D_ARNQ_T] = v3;
++    }
++    for (; k < end; k += R4D_ARNQ_T) ps[k] = in4[k];
++  }
++  if (drain == 1) __threadfence_system();
++  else if (drain == 3) asm volatile("s_wait_storecnt 0x0" ::: "memory");
++  __syncthreads();
++  if (tid == 0) {
++    if (drain == 2) __threadfence_system();
++    store_sys_rel(&peer_flags[b], sq);
++    unsigned long long z = 0;
++    while (load_sys_acq(&my_flags[b]) < sq) { if (++z > R4D_AR_SPIN_MAX) break; }
++  }
++  __syncthreads();
++  if (acq) __threadfence_system();
++  // reduce this row into registers (bf16-rounded like the plain kernel) + start the epilogue
++  res += (size_t)b * K; q += (size_t)b * K; res_out += (size_t)b * K;
++  float sv[R4D_ARNQ_MAXG][8];
++  float ssq = 0.f;
++  int ng = 0;
++  for (int k = start + tid; k < end; k += R4D_ARNQ_T, ++ng) {
++    int4 red = vadd<__hip_bfloat16, 8>(in4[k], ms[k]);
++    const __hip_bfloat16* rh = reinterpret_cast<const __hip_bfloat16*>(&red);
++    const int e0 = (k - start) * 8;
++    int4 rv = ((const int4*)res)[k - start];
++    const __hip_bfloat16* vh = reinterpret_cast<const __hip_bfloat16*>(&rv);
++    int4 ro;
++    __hip_bfloat16* oh = reinterpret_cast<__hip_bfloat16*>(&ro);
++#pragma unroll
++    for (int j = 0; j < 8; ++j) {
++      float v = (float)rh[j] + (float)vh[j];
++      sv[ng][j] = v;
++      oh[j] = (__hip_bfloat16)v;
++      ssq += v * v;
++    }
++    ((int4*)res_out)[k - start] = ro;
++    (void)e0;
++  }
++  __shared__ float lds[R4D_ARNQ_T / 32];
++  for (int o = 16; o; o >>= 1) ssq += __shfl_down(ssq, o);
++  if ((tid & 31) == 0) lds[tid >> 5] = ssq;
++  __syncthreads();
++  if (tid < R4D_ARNQ_T / 32) {
++    float v = lds[tid];
++    for (int o = R4D_ARNQ_T / 64; o; o >>= 1) v += __shfl_down(v, o);
++    if (tid == 0) lds[0] = v;
++  }
++  __syncthreads();
++  const float inv = rsqrtf(lds[0] / (float)K + eps);
++  __syncthreads();
++  float amax = 0.f;
++  int mg = 0;
++  for (int k = start + tid; k < end; k += R4D_ARNQ_T, ++mg) {
++    int4 wv = ((const int4*)w)[k - start + 0] ; // w indexed by column within the row
++    const __hip_bfloat16* wh = reinterpret_cast<const __hip_bfloat16*>(&wv);
++#pragma unroll
++    for (int j = 0; j < 8; ++j) {
++      float nv = (float)(__hip_bfloat16)(sv[mg][j] * inv * ((float)wh[j] + 1.f));
++      sv[mg][j] = nv;
++      amax = fmaxf(amax, fabsf(nv));
++    }
++  }
++  for (int o = 16; o; o >>= 1) amax = fmaxf(amax, __shfl_down(amax, o));
++  if ((tid & 31) == 0) lds[tid >> 5] = amax;
++  __syncthreads();
++  if (tid < R4D_ARNQ_T / 32) {
++    float v = lds[tid];
++    for (int o = R4D_ARNQ_T / 64; o; o >>= 1) v = fmaxf(v, __shfl_down(v, o));
++    if (tid == 0) lds[0] = v;
++  }
++  __syncthreads();
++  const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
++  const float rs = 1.f / sc;
++  if (tid == 0) scale[b] = sc;
++  mg = 0;
++  for (int k = start + tid; k < end; k += R4D_ARNQ_T, ++mg) {
++    unsigned int lo = 0, hi = 0;
++#pragma unroll
++    for (int j = 0; j < 4; j += 2) {
++      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
++      float bq = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
++      lo |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, bq, 0u, false) & 0xffffu) << (j * 8);
++    }
++#pragma unroll
++    for (int j = 4; j < 8; j += 2) {
++      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
++      float bq = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
++      hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, bq, 0u, false) & 0xffffu) << ((j - 4) * 8);
++    }
++    ((uint2*)q)[k - start] = make_uint2(lo, hi);
++  }
++}
++
++void r4d_ar_oneshot_2rank_exact_nq(long peer_scratch, long my_scratch, long peer_flags,
++                                   long my_flags, long seq_ctrs, long slot_stride16,
++                                   long inp, long residual, long norm_w, long q_out,
++                                   long scale_out, long res_out, long m_rows, long k_cols,
++                                   double eps, long stream_i, long drain, long acq) {
++  hipStream_t st = (hipStream_t)stream_i;
++  if (k_cols % 8 != 0) throw std::runtime_error("ar_exact_nq: K must be a multiple of 8");
++  if (k_cols > 8 * R4D_ARNQ_T * R4D_ARNQ_MAXG)
++    throw std::runtime_error("ar_exact_nq: K too large for the register budget");
++  if (m_rows > R4D_AR_MAX_BLOCKS) throw std::runtime_error("ar_exact_nq: too many rows");
++  const int k16 = (int)(k_cols / 8);
++  r4d_ar_oneshot_2rank_exact_nq_kernel<<<(int)m_rows, R4D_ARNQ_T, 0, st>>>(
++      (const int4*)inp, (int4*)peer_scratch, (const int4*)my_scratch,
++      (const __hip_bfloat16*)residual, (const __hip_bfloat16*)norm_w,
++      (unsigned char*)q_out, (float*)scale_out, (__hip_bfloat16*)res_out,
++      (unsigned*)peer_flags, (unsigned*)my_flags, (unsigned*)seq_ctrs,
++      k16, (int)slot_stride16, (float)eps, (int)drain, (int)acq);
++}
++
+ // The IPC handle is returned through a caller-owned buffer rather than a std::string so this
+ // stays a C ABI; R4D_AR_HANDLE_BYTES is the fixed size the header promises.
+ static_assert(sizeof(hipIpcMemHandle_t) <= R4D_AR_HANDLE_BYTES, "ipc handle larger than the ABI buffer");
+diff --git a/r4d_ar_oneshot_2rank_wht6.h b/r4d_ar_oneshot_2rank_wht6.h
+index a4f359a..846b94a 100644
+--- a/r4d_ar_oneshot_2rank_wht6.h
++++ b/r4d_ar_oneshot_2rank_wht6.h
+@@ -20,6 +20,22 @@
+ //  * cudagraph-safe and double-buffered as in r4d_ar_oneshot_2rank_exact.hip: per-block device-resident
+ //    seq counter, slot = seq&1.
+ //
++// MEASURED AND CLOSED (2026-08-29), so nobody re-derives these:
++//  * The call decomposes into ~equal thirds -- wire (0.5 ms of a 1.47 ms 80 MiB call, Gen5 x16
++//    verified maxed), mandatory local DRAM (~280 MB/call), and peer-skew spin. The WHT/quantize
++//    ALU is negligible; block cap swept 48/96/192/384 -> 1512/1467/1507/1618 us (96 ships).
++//  * Holding the local pack in registers across the handshake (to skip its 60 MB round trip) is
++//    INFEASIBLE at this geometry: a wave owns ~7 chunks (~140 VGPRs, unbounded at compile time),
++//    the LDS alternative needs 328 KB/block at 96 blocks, and the quantized local half cannot be
++//    replaced by exact values -- both ranks must fold the identical quantized pair or they
++//    diverge.
++//  * Folding residual+RMSNorm into REDUCE re-priced BELOW the build threshold: rows (hidden dim)
++//    do not tile the 2048-element chunks, so single-pass normalize needs chunk residency a wave
++//    cannot afford; the block-local two-pass nets only ~0.1 ms/call against the ~0.5 ms the
++//    inductor-fused downstream add+rms actually costs, and the call-site plumbing is either
++//    graph-pattern surgery (matched zero twice on this stack) or decoder-forward patches plus a
++//    ppl gate. ~1% prefill for a fragile session; parked deliberately.
++//
+ // Layout, per slot, inside the shared 2*max_bytes scratch:
+ //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
+ // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
+diff --git a/r4d_ar_oneshot_3rank_exact.hip b/r4d_ar_oneshot_3rank_exact.hip
+new file mode 100644
+index 0000000..2c64d6b
+--- /dev/null
++++ b/r4d_ar_oneshot_3rank_exact.hip
+@@ -0,0 +1,191 @@
++// r4d_ar_oneshot_3rank_exact.hip: r4d_ar_oneshot_3rank_exact -- multi-block one-shot P2P-BAR
++// all-reduce for EXACTLY THREE ranks (three R9700 over PCIe; TP=3 via the radiance dummy-head
++// padding). Templated on r4d_ar_oneshot_2rank_exact, which stays byte-identical; everything
++// below is additive.
++//
++// What generalises from the 2-rank kernel, and what does not:
++//  * PUSH model, unchanged: each rank writes ITS input into BOTH peers' IPC scratch, then reduces
++//    (local input + the two peer messages now in local scratch) -> out. Under full-duplex PCIe
++//    this symmetric one-shot ties a hub/tree on wire time at every size (2S out and 2S in on the
++//    slow link, in parallel, vs S up then S down sequentially), so the algorithm is kept and no
++//    topology-aware tree is needed.
++//  * SCRATCH: two receive REGIONS (one per sender) x two seq-parity SLOTS x max_bytes. In
++//    receiver j's scratch, sender i writes region i - (i > j): region 0 always holds the
++//    lower-ranked peer, region 1 the higher. The host computes "my region in each peer" once.
++//  * FLAGS: two regions x AR_MAX_BLOCKS, one flag per (sender, block), same layout as the regions.
++//  * HANDSHAKE: thread 0 releases both peer flags, then spins until BOTH of its own flags for
++//    this block reach the sequence number. Per-block device-resident seq counters and the
++//    (seq & 1) double-buffer are unchanged; the reuse argument carries over per peer pair: a rank
++//    at seq s+2 has passed the s+1 handshake with both peers, and a peer releases flag s+1 only
++//    after its kernel s (which read slot s) has completed in stream order.
++//  * REDUCE: a CANONICAL rank-ascending fp32 sum ((x0 + x1) + x2) on every rank. Two-term fp32
++//    addition is commutative, which is what gave the 2-rank kernel cross-rank bit-identity for
++//    free; with three terms the association order has to be fixed explicitly, and it is: the rank
++//    selects the operand mapping, not the summation order. The result is rounded to T once, so
++//    all three ranks hold the same bits -- the replicated-state invariant the fused epilogues
++//    depend on.
++//  * drain=3 (s_wait_storecnt) drains BOTH peers' pushes at once: the two stores of each chunk
++//    are interleaved, and PCIe keeps posted writes to the same peer ordered, so each peer's
++//    release flag lands after that peer's data.
++#include "r4d.h"
++#include <hip/hip_fp16.h>
++#include <hip/hip_bf16.h>
++#include <cstdint>
++#include <stdexcept>
++#include <string>
++
++#define R4D_AR3_SPIN_MAX 4000000000ULL
++#define R4D_AR3_MAX_BLOCKS 512   // == R4D_AR_MAX_BLOCKS of the 2-rank units (flags per region)
++
++namespace {
++
++__device__ __forceinline__ void store_sys_rel3(unsigned int* p, unsigned int v) {
++  __hip_atomic_store(p, v, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
++}
++__device__ __forceinline__ unsigned int load_sys_acq3(const unsigned int* p) {
++  return __hip_atomic_load(p, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
++}
++__device__ __forceinline__ float to_f3(const float& x) { return x; }
++__device__ __forceinline__ float to_f3(const __half& x) { return __half2float(x); }
++__device__ __forceinline__ float to_f3(const __hip_bfloat16& x) { return (float)x; }
++__device__ __forceinline__ void from_f3(float v, float& o) { o = v; }
++__device__ __forceinline__ void from_f3(float v, __half& o) { o = __float2half(v); }
++__device__ __forceinline__ void from_f3(float v, __hip_bfloat16& o) { o = (__hip_bfloat16)v; }
++
++// out = ((a + b) + c) per lane in fp32, rounded to T once. The caller passes the operands in
++// canonical rank order, so every rank evaluates the identical expression.
++template <typename T, int LANES>
++__device__ __forceinline__ int4 vadd3(const int4& a, const int4& b, const int4& c) {
++  int4 r;
++  const T* pa = reinterpret_cast<const T*>(&a);
++  const T* pb = reinterpret_cast<const T*>(&b);
++  const T* pc = reinterpret_cast<const T*>(&c);
++  T* pr = reinterpret_cast<T*>(&r);
++#pragma unroll
++  for (int j = 0; j < LANES; ++j) from_f3((to_f3(pa[j]) + to_f3(pb[j])) + to_f3(pc[j]), pr[j]);
++  return r;
++}
++
++template <typename T, int LANES>
++__global__ void r4d_ar_oneshot_3rank_exact_kernel(
++    const int4* __restrict__ in4, int4* __restrict__ out4,
++    const int4* my_base, int4* peer_lo_base, int4* peer_hi_base,
++    unsigned int* my_flags, unsigned int* peer_lo_flags, unsigned int* peer_hi_flags,
++    unsigned int* seq_ctrs, int n16, int slot_stride16, int region_stride16,
++    int my_region_in_lo, int my_region_in_hi, int rank, int drain, int acq) {
++  const int b = blockIdx.x, nb = gridDim.x, tid = threadIdx.x, nt = blockDim.x;
++  __shared__ unsigned int s_seq;
++  if (tid == 0) s_seq = atomicAdd(&seq_ctrs[b], 1u) + 1u;  // per-block, replay-safe
++  __syncthreads();
++  const unsigned int s = s_seq;
++  const int slot = (int)(s & 1u);
++  // where MY data goes in each peer, and where each peer's data lands in MY scratch
++  int4* p_lo = peer_lo_base + (size_t)my_region_in_lo * region_stride16 + (size_t)slot * slot_stride16;
++  int4* p_hi = peer_hi_base + (size_t)my_region_in_hi * region_stride16 + (size_t)slot * slot_stride16;
++  const int4* r0 = my_base + (size_t)0 * region_stride16 + (size_t)slot * slot_stride16;  // lower peer
++  const int4* r1 = my_base + (size_t)1 * region_stride16 + (size_t)slot * slot_stride16;  // higher peer
++
++  const int w = (n16 + nb - 1) / nb;
++  const int start = b * w;
++  int end = start + w; if (end > n16) end = n16;
++
++  // push chunk -> both peers, stores interleaved so one drain covers both
++  {
++    int k = start + tid;
++    for (; k + 3 * nt < end; k += 4 * nt) {
++      int4 v0 = in4[k], v1 = in4[k + nt], v2 = in4[k + 2 * nt], v3 = in4[k + 3 * nt];
++      p_lo[k] = v0; p_hi[k] = v0;
++      p_lo[k + nt] = v1; p_hi[k + nt] = v1;
++      p_lo[k + 2 * nt] = v2; p_hi[k + 2 * nt] = v2;
++      p_lo[k + 3 * nt] = v3; p_hi[k + 3 * nt] = v3;
++    }
++    for (; k < end; k += nt) { int4 v = in4[k]; p_lo[k] = v; p_hi[k] = v; }
++  }
++  if (drain == 1) __threadfence_system();
++  else if (drain == 3) asm volatile("s_wait_storecnt 0x0" ::: "memory");
++  __syncthreads();
++  if (tid == 0) {
++    if (drain == 2) __threadfence_system();
++    store_sys_rel3(&peer_lo_flags[my_region_in_lo * R4D_AR3_MAX_BLOCKS + b], s);
++    store_sys_rel3(&peer_hi_flags[my_region_in_hi * R4D_AR3_MAX_BLOCKS + b], s);
++    const unsigned int* f0 = &my_flags[0 * R4D_AR3_MAX_BLOCKS + b];
++    const unsigned int* f1 = &my_flags[1 * R4D_AR3_MAX_BLOCKS + b];
++    unsigned long long z = 0;
++    bool d0 = false, d1 = false;
++    while (!(d0 && d1)) {
++      if (!d0) d0 = load_sys_acq3(f0) >= s;
++      if (!d1) d1 = load_sys_acq3(f1) >= s;
++      if (++z > R4D_AR3_SPIN_MAX) break;
++    }
++  }
++  __syncthreads();
++  if (acq) __threadfence_system();
++  // reduce chunk in canonical rank order: x0 + x1 + x2 where x_rank is this rank's own input.
++  //   rank 0: (in + r0) + r1      rank 1: (r0 + in) + r1      rank 2: (r0 + r1) + in
++  // fp32 two-term addition is commutative, so the first two cases are one expression.
++  {
++    int k = start + tid;
++    if (rank == 2) {
++      for (; k + 3 * nt < end; k += 4 * nt) {
++        out4[k]          = vadd3<T, LANES>(r0[k],          r1[k],          in4[k]);
++        out4[k + nt]     = vadd3<T, LANES>(r0[k + nt],     r1[k + nt],     in4[k + nt]);
++        out4[k + 2 * nt] = vadd3<T, LANES>(r0[k + 2 * nt], r1[k + 2 * nt], in4[k + 2 * nt]);
++        out4[k + 3 * nt] = vadd3<T, LANES>(r0[k + 3 * nt], r1[k + 3 * nt], in4[k + 3 * nt]);
++      }
++      for (; k < end; k += nt) out4[k] = vadd3<T, LANES>(r0[k], r1[k], in4[k]);
++    } else {
++      for (; k + 3 * nt < end; k += 4 * nt) {
++        out4[k]          = vadd3<T, LANES>(in4[k],          r0[k],          r1[k]);
++        out4[k + nt]     = vadd3<T, LANES>(in4[k + nt],     r0[k + nt],     r1[k + nt]);
++        out4[k + 2 * nt] = vadd3<T, LANES>(in4[k + 2 * nt], r0[k + 2 * nt], r1[k + 2 * nt]);
++        out4[k + 3 * nt] = vadd3<T, LANES>(in4[k + 3 * nt], r0[k + 3 * nt], r1[k + 3 * nt]);
++      }
++      for (; k < end; k += nt) out4[k] = vadd3<T, LANES>(in4[k], r0[k], r1[k]);
++    }
++  }
++}
++
++}  // namespace
++
++// Host entry. Scratch per rank is 2 regions x 2 slots x (slot_stride16 * 16) bytes; flags per
++// rank are 2 x R4D_AR_MAX_BLOCKS uints. peer_lo / peer_hi are the peers with the lower / higher
++// rank than `rank`; the region this rank writes in each is derived here (i - (i > j)).
++void r4d_ar_oneshot_3rank_exact(long my_scratch, long peer_lo_scratch, long peer_hi_scratch,
++                                long my_flags, long peer_lo_flags, long peer_hi_flags,
++                                long seq_ctrs, long slot_stride16, long rank,
++                                long inp, long out, long n_elem, long dtype,
++                                long stream_i, long nblocks, long nthreads,
++                                long drain, long acq) {
++  hipStream_t st = (hipStream_t)stream_i;
++  if (rank < 0 || rank > 2) throw std::runtime_error("all_reduce_3rank: rank must be 0, 1 or 2");
++  const int esize = (dtype == 2) ? 4 : 2;
++  const long nbytes = (long)n_elem * esize;
++  if (nbytes % 16 != 0) throw std::runtime_error("all_reduce_3rank: n_elem*esize not 16B-aligned");
++  if (nbytes / 16 > slot_stride16) throw std::runtime_error("all_reduce_3rank: message exceeds a scratch slot");
++  const int n16 = (int)(nbytes / 16);
++  int nb = (int)nblocks;
++  if (nb < 1) nb = 1;
++  if (nb > n16) nb = n16;
++  if (nb > R4D_AR3_MAX_BLOCKS) nb = R4D_AR3_MAX_BLOCKS;
++  int nt = (int)nthreads;
++  if (nt < 64) nt = 64;
++  if (nt > 1024) nt = 1024;
++  // rank r's peers in ascending order are lo < hi; my region in receiver j is r - (r > j).
++  const int lo = (rank == 0) ? 1 : 0;
++  const int hi = (rank == 2) ? 1 : 2;
++  const int my_region_in_lo = (int)rank - (rank > lo ? 1 : 0);
++  const int my_region_in_hi = (int)rank - (rank > hi ? 1 : 0);
++  const int region_stride16 = 2 * (int)slot_stride16;
++#define L3(T, LN) r4d_ar_oneshot_3rank_exact_kernel<T, LN><<<nb, nt, 0, st>>>(                  \
++    (const int4*)inp, (int4*)out, (const int4*)my_scratch, (int4*)peer_lo_scratch,               \
++    (int4*)peer_hi_scratch, (unsigned*)my_flags, (unsigned*)peer_lo_flags,                       \
++    (unsigned*)peer_hi_flags, (unsigned*)seq_ctrs, n16, (int)slot_stride16, region_stride16,     \
++    my_region_in_lo, my_region_in_hi, (int)rank, (int)drain, (int)acq)
++  if (dtype == 0) L3(__hip_bfloat16, 8);
++  else if (dtype == 1) L3(__half, 8);
++  else if (dtype == 2) L3(float, 4);
++  else throw std::runtime_error("all_reduce_3rank: bad dtype");
++#undef L3
++}
++
++int r4d_ar_3rank_max_blocks(void) { return R4D_AR3_MAX_BLOCKS; }
+diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
+index cd4e294..3694dab 100644
+--- a/r4d_attn_paged_h256_gqa6.hip
++++ b/r4d_attn_paged_h256_gqa6.hip
+@@ -57,9 +57,35 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+     if (a->q_heads / a->kv_heads != A_GQA) return -2;
+     constexpr int BQ = (P_NWARPS * 16) / A_GQA;
+     dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
+-    hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, P_TILE, A_HEAD_DIM, A_GQA, A_BLOCK_SIZE,
+-                                                KVP, P_OPT>),
+-                       grid, dim3(P_NWARPS * 32), 0, s, *a);
++    // R4D_ATTN_FP8: 0 = the shipped f16 legs; 1 = O_QK8, 2 = O_PV8, 3 = both. fp8 KV only.
++    // Opt-in and read once: the 8-bit legs trade oracle accuracy (1.7e-3 -> 1.7e-2/2.6e-2/3.1e-2
++    // row relRMSE) for WMMA issue rate (+10%/+24%/+56% at a hot 8k chunk, +18% at a cold 40k
++    // chunk, ~/mxfp4_work/tier8). Whether that accuracy trade is FREE at the end task is exactly
++    // what the serving gates (ppl + GSM8K paired) decide; kernel-level parity already decided the
++    // default, which is why these are bits and not the baseline.
++    int fp8mode = 0;
++    if constexpr (!KVP) {
++        static const int m = [] {
++            const char* e = getenv("R4D_ATTN_FP8");
++            return e ? atoi(e) : 0;
++        }();
++        fp8mode = m;
++    }
++#define P_LAUNCH(OPTX)                                                                            \
++    do {                                                                                          \
++        hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, P_TILE, A_HEAD_DIM, A_GQA,          \
++                                                    A_BLOCK_SIZE, KVP, OPTX>),                    \
++                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
++    } while (0)
++    if constexpr (!KVP) {
++        if (fp8mode == 3)      P_LAUNCH(P_OPT | O_QK8 | O_PV8);
++        else if (fp8mode == 2) P_LAUNCH(P_OPT | O_PV8);
++        else if (fp8mode == 1) P_LAUNCH(P_OPT | O_QK8);
++        else                   P_LAUNCH(P_OPT);
++    } else {
++        P_LAUNCH(P_OPT);
++    }
++#undef P_LAUNCH
+     CHK();
+     return 0;
+ }
+diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
+index 513d97f..da52a10 100644
+--- a/r4d_attn_prefill_h256_gqa6.hip
++++ b/r4d_attn_prefill_h256_gqa6.hip
+@@ -38,6 +38,25 @@
+ 
+ #define O_F16     1
+ #define O_MSKIP   2
++// QK8/PV8: the deleted 8-bit arms, rebuilt as SEPARABLE opt-in bits for long-context serving.
++// The dispatch header records why they were deleted: single-term e4m3 Q measured 2.58e-2 against
++// the fp32 oracle vs 2.3e-3 for the f16 path. That is a KERNEL-level verdict; these bits exist to
++// let the END-TASK verdict (ppl + GSM8K, the fp8 all-reduce playbook) be measured on a build
++// where each leg can be flipped alone. Both require the fp8 KV cache (KVP == 0).
++//   QK8: Q quantized e4m3 once at load (the fold makes it ~0.1-0.5, well inside e4m3), K stays
++//        RAW BYTES in LDS -- the fp8->f16 upconvert in storeK disappears, sK halves, and the QK
++//        WMMA runs at the 2x fp8 issue rate.
++//   PV8: P packed e4m3 instead of f16 (v_cvt_pk_fp8_f32, same instruction count as pkrtz), V
++//        stays raw bytes, PV WMMA at 2x. GROW tightens to 8 octaves (e4m3 max 448 = 2^8.8) and
++//        DOT2 is off -- the denominator sums the pre-quantization p, which the old probe measured
++//        indistinguishable at these error levels.
++#define O_QK8    32
++#define O_PV8    64
++// A K prefetch across the m-tile loop (the GPREV pattern applied to K) was re-measured under the
++// 8-bit legs on 2026-08-29, on the theory that the register headroom they free (qf8 is 32 VGPRs
++// against qf's 64) removes the spill that killed upstream's three attempts. It still LOSES:
++// -5% at an 8k chunk, -1% at 40k, bit-identical output -- the live range across the loop is the
++// cost, not the spill. Do not build it a fifth time.
+ #define O_FOLDQ   8
+ #define O_CONTIG  512
+ #define O_PF2    1024
+@@ -72,6 +91,13 @@
+ // ever orders LDS.
+ #define O_LDSB  2097152
+ 
++typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
++// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
++__device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d) {
++    const uint32_t w = __builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false);
++    return __builtin_amdgcn_cvt_pk_fp8_f32(c, d, w, true);
++}
++
+ // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
+ template<class D, int FOLDQ, int F16>
+ __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
+@@ -90,11 +116,15 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     constexpr int CTG   = (OPT & O_CONTIG) ? 1 : 0;
+     constexpr int PF    = 1 << ((OPT >> 10) & 3);
+     constexpr int SGB   = (OPT & O_SGB) ? 1 : 0;
+-    constexpr int DOT2  = ((OPT & O_DOT2) && (OPT & O_F16)) ? 1 : 0;
++    constexpr int DOT2  = ((OPT & O_DOT2) && (OPT & O_F16) && !(OPT & O_PV8)) ? 1 : 0;
+     constexpr int BTS   = (OPT & O_BTS)   ? 1 : 0;
+     constexpr int GPREV = (OPT & O_GPREV) ? 1 : 0;
+     constexpr int LDSB  = (OPT & O_LDSB)  ? 1 : 0;
+     constexpr int KWIDE = (OPT & O_KWIDE) ? 1 : 0;
++    constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
++    constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
++    static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
++    static_assert(!(OPT & O_QK8) || KWIDE, "QK8 raw-byte staging is written for the wide K fetch");
+     typedef DT16<F16> D;
+     typedef typename D::frag frag16;
+ 
+@@ -113,11 +143,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     constexpr int NTR     = (TILE / 8) * (HEAD_DIM / (KVP ? 32 : 64));
+     constexpr int VREGS   = (NTR + NWARPS - 1) / NWARPS;        // uint4 of raw V per thread
+     constexpr float PSHIFT = D::SHIFT;
+-    constexpr float PGROW  = D::GROW;
+-    static_assert(!KWIDE || KPASS == 1, "the wide K fetch is one straight-line pass");
++    constexpr float PGROW  = PV8 ? 8.0f : D::GROW;   // e4m3 max is 448 = 2^8.8
++    // KPASS was pinned to 1 when the wide fetch was written for the 48-key tile (768 threads x
++    // 16 B is exactly that tile); the fetch/store loops always iterated KPASS and the index map
++    // extends verbatim, so larger tiles just take more passes. Bound it to keep kreg honest.
++    static_assert(!KWIDE || KPASS <= 2, "the wide K fetch covers at most two passes");
++    static_assert((!QK8 && !PV8) || CTG, "the 8-bit fragment maps are written for CONTIG");
+ 
+-    __shared__ uint16_t sK[TILE * KSTR];
+-    __shared__ uint16_t sV16[HEAD_DIM * VSTR];
++    // The K and V tiles are BYTES under the 8-bit legs and the allocation is sized accordingly
++    // -- this is what unlocks TILE > 48 (bf16 tiles at TILE 64 need 68 KB > the 64 KB limit;
++    // byte tiles need 35 KB, and TILE 96 still fits at 52 KB), and at TILE 48 it takes the
++    // fp8-leg LDS from 54 KB to 27 KB, i.e. TWO resident workgroups per WGP instead of one.
++    // Strides are padded 8 (bytes or shorts alike) so the 16-row fragment reads spread across
++    // all 32 banks.
++    constexpr int KSTR8 = HEAD_DIM + 8, VSTR8 = TILE + 8;
++    __shared__ uint16_t sK[QK8 ? (TILE * KSTR8 + 1) / 2 : TILE * KSTR];
++    __shared__ uint16_t sV16[PV8 ? (HEAD_DIM * VSTR8 + 1) / 2 : HEAD_DIM * VSTR];
++    uint8_t* const sK8 = (uint8_t*)sK;
++    uint8_t* const sV8 = (uint8_t*)sV16;
+ 
+     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+     const int c = lane & 15, h = lane >> 4;
+@@ -140,6 +183,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     const float mul   = a.scale * kdesc * 1.44269504089f;
+ 
+     frag16 qf[NKS];
++    v2i32_r4d qf8[QK8 ? NKS : 1];
+     {
+         const uint16_t* qp = (const uint16_t*)a.q
+                            + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
+@@ -148,10 +192,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+             // CONTIG reads the same 8 d as ONE run; the legacy map splits them 4+4.
+             const uint2 l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
+             const uint2 h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
+-            qf[t] = D::mk(make_uint2(r4d_qcvt<D, FOLDQ, F16>(l0.x, mul),
+-                                     r4d_qcvt<D, FOLDQ, F16>(l0.y, mul)),
+-                          make_uint2(r4d_qcvt<D, FOLDQ, F16>(h0.x, mul),
+-                                     r4d_qcvt<D, FOLDQ, F16>(h0.y, mul)));
++            if constexpr (QK8) {
++                // e4m3 Q, folded scale first: the fold puts |q| in ~[0.05, 1], comfortably inside
++                // e4m3, and its error is relative so the fold costs nothing extra.
++                const float m_ = FOLDQ ? mul : 1.0f;
++                #define R4D_QB(w) __builtin_bit_cast(float, (w) << 16) * m_, \
++                                  __builtin_bit_cast(float, (w) & 0xffff0000u) * m_
++                qf8[t] = (v2i32_r4d){(int)pk_fp8x4(R4D_QB(l0.x), R4D_QB(l0.y)),
++                                     (int)pk_fp8x4(R4D_QB(h0.x), R4D_QB(h0.y))};
++                #undef R4D_QB
++            } else {
++                qf[t] = D::mk(make_uint2(r4d_qcvt<D, FOLDQ, F16>(l0.x, mul),
++                                         r4d_qcvt<D, FOLDQ, F16>(l0.y, mul)),
++                              make_uint2(r4d_qcvt<D, FOLDQ, F16>(h0.x, mul),
++                                         r4d_qcvt<D, FOLDQ, F16>(h0.y, mul)));
++            }
+         }
+     }
+ 
+@@ -229,6 +284,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+                 const int key = KWIDE ? (2 * (i >> 5) + (i & 1)) : (i / (HEAD_DIM / KEL));
+                 const int ch  = KWIDE ? ((i & 31) >> 1) : (i - key * (HEAD_DIM / KEL));
+                 if (KWIDE && key >= TILE) continue;
++                if constexpr (QK8) {
++                    // K stays e4m3: no upconvert, one b128 store, sK footprint halves.
++                    *(uint4*)(&sK8[key * KSTR8 + ch * KEL]) = kreg[p];
++                    continue;
++                }
+                 uint16_t* kd = &sK[key * KSTR + ch * KEL];
+                 #pragma unroll
+                 for (int q = 0; q < KEL / 8; ++q) {
+@@ -266,6 +326,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+                     // ADJACENT d; v_perm_b32 splits them back into two d rows.
+                     const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
+                     const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
++                    if constexpr (PV8) {
++                        *(uint2*)(&sV8[(d0 + 2 * vj)     * VSTR8 + kg * 8]) = make_uint2(lo0, lo1);
++                        *(uint2*)(&sV8[(d0 + 2 * vj + 1) * VSTR8 + kg * 8]) = make_uint2(hi0, hi1);
++                        continue;
++                    }
+                     uint32_t wl[4], wh[4];
+                     fp8x8_to_16x4w<D>(make_uint2(lo0, lo1), wl);
+                     fp8x8_to_16x4w<D>(make_uint2(hi0, hi1), wh);
+@@ -310,7 +375,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+         #pragma unroll 1
+         for (int mt = 0; mt < MT; ++mt) {
+             v8f s = (v8f){0,0,0,0,0,0,0,0};
+-            {
++            if constexpr (QK8) {
++                // Same PF discipline, half the fragment bytes, 2x the WMMA issue rate.
++                const uint8_t* krow8 = &sK8[(mt * 16 + c) * KSTR8] + 8 * h;
++                #pragma unroll
++                for (int g = 0; g < NKS; g += PF) {
++                    v2i32_r4d kb8[PF];
++                    #pragma unroll
++                    for (int j = 0; j < PF; ++j)
++                        kb8[j] = *(const v2i32_r4d*)(krow8 + 16 * (g + j));
++                    if (SGB) sched_barrier();
++                    #pragma unroll
++                    for (int j = 0; j < PF; ++j)
++                        s = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(kb8[j], qf8[g + j], s);
++                }
++            } else {
+                 const uint16_t* krow = &sK[(mt * 16 + c) * KSTR] + (CTG ? 8 * h : 0);
+                 // PF fragments are LOADED before the matching PF WMMAs are ISSUED, so the wait in
+                 // front of each WMMA becomes `s_wait_dscnt PF-1` instead of a full drain.
+@@ -368,7 +447,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+             }
+             if (!DOT2) l_i += lsum;
+ 
+-            {
++            if constexpr (PV8) {
++                const v2i32_r4d p8 = (v2i32_r4d){(int)pk_fp8x4(pf[0], pf[1], pf[2], pf[3]),
++                                                 (int)pk_fp8x4(pf[4], pf[5], pf[6], pf[7])};
++                const uint8_t* vbase8 = &sV8[c * VSTR8 + mt * 16 + 8 * h];
++                #pragma unroll
++                for (int g = 0; g < NKS; g += PF) {
++                    v2i32_r4d vb8[PF];
++                    #pragma unroll
++                    for (int j = 0; j < PF; ++j)
++                        vb8[j] = *(const v2i32_r4d*)(vbase8 + (size_t)(g + j) * 16 * VSTR8);
++                    if (SGB) sched_barrier();
++                    #pragma unroll
++                    for (int j = 0; j < PF; ++j)
++                        acc[g + j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(vb8[j], p8, acc[g + j]);
++                }
++            } else {
+                 uint32_t pw[4];
+                 #pragma unroll
+                 for (int e = 0; e < 8; e += 2) pw[e >> 1] = D::pk(pf[e], pf[e + 1]);
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+index 9ed27e4..97d491e 100644
+--- a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+@@ -1,3 +1,7 @@
++// Ported 2026-10-05 from StillDeadcode/radiance (libr4d/ in the engine tree, 1.0.x): every decay
++// factor <= 1, so no exponent clamp (fixes libr4d issue #4, finite-but-wrong prefill on chunks
++// whose gate span exceeds 160). The engine's plugin-ABI wrapper is dropped; the raw entry points
++// below are unchanged from the engine, including the state_fp16 template switch.
+ // r4d_gdn: the gated-delta-net chunked scan, gfx1201 WMMA. Entry point
+ // r4d_gdn_chunk_scan_k128_v128_c64_bf16 -- head_k 128, head_v 128, chunk 64, bf16 in.
+ // Named for the algorithm rather than the serving phase: the chunked scan is what prefill and
+@@ -6,21 +10,24 @@
+ // recurrent state lives in WMMA accumulators across the whole chunk loop, so h / w / u /
+ // v_new are never written to or read from HBM.
+ //
+-// Decay is carried on a per-chunk reference c = (g_first + g_last)/2 rather than on
+-// g_last, which lets the (i,j) decay factor separate exactly:
+-//     e^{g_i-g_j} = e^{g_i-c} * e^{c-g_j}          (j <= i, so the product is <= 1)
+-// Folding the left half into the score matrix and the right half into V' means the
+-// UNGATED Vd is never needed -- one LDS buffer and two barriers disappear, and the
+-// 16 per-lane __expf in the score step collapse to one multiply by a precomputed row
+-// scale. Splitting at the midpoint bounds each half by e^{span/2}; a g_last reference
+-// would need e^{span}, and measured spans already reach 64 of the 88 fp32 allows.
++// Every decay factor this kernel forms is <= 1. That is a correctness requirement, not
++// a style: the intra-chunk gate span reaches 558 nats on real Qwen3.8 prefill
++// activations, so any factorisation that puts part of the exponent on
++// its own -- e^{g_i-c} and e^{c-g_j} about a per-chunk reference c, say -- sends one half
++// past fp32's e^88 while the other underflows to 0, whatever c is chosen. The pair
++// e^{g_i-g_j} (j <= i) and e^{g_last-g_j} never leave (0, 1].
+ //
+-//   ge[j]=e^{g_j}   rs[i]=scale*e^{g_i-c}   gv[j]=e^{c-g_j}   lam=e^{g_last-c}
+-//   U  = K@S            W  = beta*(V - ge*U)      V' = gv*(A@W)
+-//   P  = Q@K^T          sA = rs*tril(P)
++//   ge[j]=e^{g_j}   gg[j]=g_j   gs[j]=e^{g_last-g_j}
++//   U  = K@S            W  = beta*(V - ge*U)      V' = A@W          (undecayed)
++//   P  = Q@K^T          sA = scale*e^{g_i-g_j}*tril(P)
+ //   O  = scale*ge*(Q@S) + sA@V'
+-//   S  = lam*(e^c*S + V'^T@K)
++//   S  = e^{g_last}*S + V'^T@(gs*K)
+ // A is FLA's solve_tril output (decay already folded in), so no decay enters W or V'.
++// The (i,j) weight is therefore applied per element in the score step -- eight __expf per
++// tile -- and the state's e^{g_last-g_j} rides on K, which is dead by then. V' itself has
++// to stay undecayed because its two consumers want different references: the output wants
++// e^{g_i-g_j}, which is row-dependent, and the state wants e^{g_last-g_j}. One shared
++// scaling of V' can only serve both through a split, which is exactly what has no safe c.
+ #include <hip/hip_runtime.h>
+ #include "r4d.h"
+ #include "r4d_gdn_wmma.h"
+@@ -31,7 +38,7 @@
+ // needed, but 10 tiles over 8 waves still leaves some wave holding 2 -- the barrier's
+ // arrival time does not move, and the skipped waves just wait longer. On top of that
+ // the guards stop the compiler batching fragment loads ahead of the WMMA chain.
+-// Correctness is unaffected either way; the flag is kept so this stays reproducible.
++// Correctness is unaffected either way, which is why the flag can stay.
+ #ifndef TRIL
+ #define TRIL 0
+ #endif
+@@ -82,12 +89,12 @@
+ // SASG: how a wave's slice of the 8 k-tile x 4 v-tile state grid is shaped. The A
+ // operand of the state update is K TRANSPOSED, which costs eight scalar LDS reads per
+ // fragment against one for an untransposed one, so the shape that reads the FEWEST
+-// k-tiles per wave wins: one k-tile x four v-tiles reads 4 fragT + 16 fragP per chunk
+-// where two x two reads 8 + 8. Pricing the transposed reads at all (ABL=7) says they are
+-// 3.0% of the kernel.
+-// Slower: 237.6 us against 196.7. Reading half as many transposed fragments does not
+-// pay for holding four V' fragments live per k step -- the shape that reads fewer
+-// k-tiles reads more of everything else. Left at 0 (two k-tiles x two v-tiles).
++// k-tiles per wave would win: one k-tile x four v-tiles reads 4 fragT + 16 fragP per chunk
++// where two x two reads 8 + 8. The transposed reads are only ~3% of the kernel (ABL=7
++// prices them), and the 1x4 shape is about 20% SLOWER: reading half as many transposed
++// fragments does not pay for holding four V' fragments live per k step, because the shape
++// that reads fewer k-tiles reads more of everything else. Left at 0 (two k-tiles x two
++// v-tiles).
+ #ifndef SASG
+ #define SASG 0
+ #endif
+@@ -114,7 +121,7 @@ struct Smem {
+   unsigned short D[BV][AP];     // staged V as [token][v]; then V' as [v][token].
+                                 // Both live inside one chunk and never overlap: V dies
+                                 // in the W update, V' is written after barrier (2).
+-  float ge[BT], gv[BT], rs[BT], bt[BT];
++  float ge[BT], gv[BT], gg[BT], bt[BT];   // gv = gs (or e^{c-g} under GSPLIT), gg = raw g
+ };
+ 
+ // LDSO: hold each LDS row pointer as one opaque 32-bit byte offset (see fragO).
+@@ -157,9 +164,9 @@ struct Smem {
+ // registers consumed a whole chunk later -- and as a block they land in the 267-instruction
+ // stretch between the main loop's last WMMA and the V' loop's first, which has no WMMA to hide
+ // their addressing behind.
+-// Slower: 206.4 us against 196.2. The loads themselves are one v_min and an access, but
++// It is ~5% slower and left at 0: the loads themselves are one v_min and an access, but
+ // interleaving them costs the main loop's WMMA schedule more than the block costs in the gap.
+-// Left at 0. (Nor does an in-loop bf16 rounding trick exist to shrink that gap: gfx1201 has no
++// (Nor does an in-loop bf16 rounding trick exist to shrink that gap: gfx1201 has no
+ // v_add_nc_u64, so two floats cannot be rounded with one add, and v_pk_add_u16 does not carry
+ // between halves -- which IS the rounding.)
+ #ifndef PFIN
+@@ -169,9 +176,9 @@ struct Smem {
+ // of at the top of the V' loop. They are read immediately after barrier (2), so their HBM
+ // latency is otherwise fully exposed; hoisted, they land during the main loop's 48 WMMAs.
+ // Costs 16 VGPRs.
+-// Slower: 255.7 us against 220.5. It does not spill (227 VGPRs) but the sixteen
+-// registers it keeps live across the main loop cost more than the latency it hides, and
+-// the V' loop's sched group already batches those loads a whole step ahead. Left at 0.
++// It is ~16% slower and left at 0. It does not spill (227 VGPRs), but the sixteen registers
++// it keeps live across the main loop cost more than the latency it hides, and the V' loop's
++// sched group already batches those loads a whole step ahead.
+ #ifndef APRE
+ #define APRE 0
+ #endif
+@@ -185,13 +192,23 @@ struct Smem {
+ #endif
+ // BFR: which bf16 packs round. 1 = all (safe), 2 = intermediates truncate but the
+ // recurrent state and the kernel output still round, 0 = all truncate.
+-// Rejected: truncating is 1.5% (BFR=2) / 2.2% (BFR=0) faster but takes the fp64-oracle
++// Left at 1: truncating is 1.5% (BFR=2) / 2.2% (BFR=0) faster, but it takes the fp64-oracle
+ // error from 3.30e-03 (FLA parity) to 9.02e-03 / 1.17e-02, and the state error from
+ // 2.4e-03 to 5.1e-03 -- W/sA/V' feed the recurrence, so even BFR=2 pollutes the state.
+-// Left at 1.
+ #ifndef BFR
+ #define BFR 1
+ #endif
++// GSPLIT: the split-decay form, e^{g_i-g_j} = e^{g_i-c}.e^{c-g_j} about the chunk midpoint,
++// with both halves clamped at e^80. IT IS WRONG AND IT IS OFF; it stays reachable only so
++// the failure it produces can be reproduced on demand. It is one exp per token instead of
++// eight per tile, but a chunk whose gate span passes ~176 nats has the growing half clamped
++// and the shrinking one at 0, and the terms it should have produced are attenuated to
++// nothing. On real prefill activations that fires on 3.5% of (head, chunk) pairs and takes
++// the fp64-oracle error from 3.4e-03 to 4.0e-02 - 7.2e-02, bimodally: a chunk is either
++// untouched or wrecked. This is the factorisation the file header rules out.
++#ifndef GSPLIT
++#define GSPLIT 0
++#endif
+ // PRIO: raise this wave's issue priority across the WMMA-dense region so it is not
+ // starved by waves in their memory phase.
+ #ifndef PRIO
+@@ -248,18 +265,43 @@ struct Smem {
+   ((unsigned)((const char*)&(buf)[0][0] - (const char*)&s) + \
+    (unsigned)((((base) + lo) * (pitch) + 4 * hi) * 2))
+ 
++// SDT is the STATE CACHE's element type -- 0 = fp32, 1 = fp16 -- and nothing else: every value
++// this kernel computes with is fp32 either way, and the recurrence still carries the state in
++// WMMA accumulators across the whole chunk loop. It exists because vLLM allocates the mamba cache
++// from --mamba-ssm-cache-dtype and the recurrent update, whose time IS the state traffic, wants
++// the narrow one; the two kernels share the cache, so they have to agree on its width.
++typedef _Float16 cs_h8 __attribute__((ext_vector_type(8)));
++template <int SDT> struct cs_state { using T = float; };
++template <> struct cs_state<1>     { using T = _Float16; };
++
++// H0 / HT say whether the optional initial and final state operands were passed. They are template
++// parameters rather than runtime tests so that the form every caller in this tree launches -- both
++// present -- carries no test for them; the absent forms are what libref reads the op as: no initial
++// state starts the recurrence from zero, no final state stores nothing.
++template <int SDT, bool H0 = true, bool HT = true>
+ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     const unsigned short* __restrict__ q, const unsigned short* __restrict__ k,
+     const unsigned short* __restrict__ v, const unsigned short* __restrict__ Amat,
+     const float* __restrict__ gcs, const float* __restrict__ beta,
+-    const float* __restrict__ h0, unsigned short* __restrict__ o,
+-    float* __restrict__ ht, const int* __restrict__ cu, int H, int Hg, float scale)
++    const typename cs_state<SDT>::T* __restrict__ h0, unsigned short* __restrict__ o,
++    typename cs_state<SDT>::T* __restrict__ ht, const int* __restrict__ cu,
++    const int* __restrict__ sidx, long sidx_stride, long st_slot, long st_head,
++    int H, int Hg, float scale)
+ {
+   __shared__ Smem s;
+   const int bv = blockIdx.x, hv = blockIdx.y, nq = blockIdx.z;
+   const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
+   const int hq = hv / (H / Hg), v0 = bv * BV;
+   const int tb = cu[nq], te = cu[nq + 1];
++  // THE STATE SLOT IS THE MANAGER'S, NOT THE BATCH POSITION. Without `sidx` this kernel writes
++  // state[nq] -- correct only while a sequence's slot happens to equal its row in the batch,
++  // which holds until the first slot is reused out of order and then silently does not.
++  // COLUMN 0 IS THE STATE. A row may name more than one slot -- a decode kernel serving
++  // speculation asks for scratch beside the state -- but the scan writes the state and nothing
++  // else, so it reads the first column and ignores the width.
++  const long si = sidx ? (long)sidx[(size_t)nq * sidx_stride] : (long)nq;
++  if (si < 0) return;                                        // a padded row owns no state
++  const size_t st_base = (size_t)si * st_slot + (size_t)hv * st_head;
+   const int nchunk = (te - tb + BT - 1) / BT;
+   const int lo = lane & 15, hi = lane >> 4;
+ 
+@@ -314,23 +356,32 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #define KRU NW
+ #define VRU (2 * NW)
+ #endif
+-  // Rows past the chunk end are CLAMPED, not zeroed. Nothing they reach is live:
++  // ROWS PAST THE CHUNK END ARE ZEROED, AND CLAMPING THEM TO THE LAST LIVE ROW IS WRONG.
++  // DO NOT "OPTIMISE" THIS BACK TO A CLAMP. The apparent argument that a duplicated row
++  // cannot matter is:
+   //   * beta[t>=nval] = 0, so W = beta*(V - ge*U) is 0 whatever V and U hold;
+-  //   * gv[t>=nval]  = 0, and V' is scaled by gv[t] as it is stored, so the state
+-  //     update's contraction over t already drops those columns;
+-  //   * rs[i>=nval]  = 0 and the tril mask kills j>i, so sA is clean both ways;
++  //   * gv[t>=nval]  = 0, and s.k is scaled by gv before the state update, so the
++  //     contraction over t already drops those columns;
++  //   * the tril mask kills j>i, so a padding j never reaches a live row of sA;
+   //   * the O store is guarded by tok < nval.
+-  // A clamped row is real (finite) data, so no NaN can enter through the 0 factors.
+-  // This removes 12 selects, the exec-mask manipulation around each address, and the
+-  // two zero registers -- and since the row is wave-uniform the clamp is pure SALU.
+-// PFV: 0 = original (divergent index, predicated)   1 = wave-uniform + predicate
++  // Every clause of that is true and the conclusion is false. With the clamp, any prompt
++  // whose trailing chunk is not a multiple of 16 tokens -- 65, 75, 81, 200 -- comes back as
++  // one token repeated, and the process never serves a correct answer again; 64, 80, 96,
++  // 112 and 128 stay right. Zeroing the staged rows makes all of them right, and zeroing k
++  // alone is enough with v still clamped -- so the leak is through a consumer of s.k, and
++  // the four clauses above cover every consumer of s.k this kernel has. One of them is
++  // therefore not the whole story. Until it is known which, the padding rows do not get to
++  // hold live data.
++// PFV: 0 = divergent index, predicated               1 = wave-uniform + predicate
+ //      2 = wave-uniform + clamp                      3 = divergent index + clamp
+-// Measured round-robin in one process (4-arm, bit-identical outputs): 0 = 245.0 us,
+-// 1 = 215.5, 2 = 246.0, and with WIDE: 1 = 211.1, 2 = 202.4. The clamp only pays once
+-// the load is wide -- at PFW=4 it saves the selects but doubles nothing else, while at
+-// PFW=8 it also removes the exec-mask manipulation around a 128-bit load.
++// All four produce bit-identical output where the clamp is safe. Variant 1 is ~12% faster than
++// variant 0, and the CLAMPED variants only pay once the load is wide: at PFW=4 a clamp saves the
++// selects but nothing else, while at PFW=8 it also removes the exec-mask manipulation around
++// a 128-bit load, which is worth a further ~4%.
++// The clamped variants are unreachable in the shipped configuration -- see the paragraph above --
++// and are LEFT IN only as the comparison point for that cost.
+ #ifndef PFV
+-#define PFV 4
++#define PFV 1
+ #endif
+ // 4 = the clamp applied to a HOISTED per-lane byte offset. Once a lane stages eight
+ // shorts the staging row is no longer wave-uniform (lanes 0-15 and 16-31 are different
+@@ -352,7 +403,11 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #endif
+ #if PFV == 0 || PFV == 1
+ #define PFK(r, pnv, e) ((r) < (pnv) ? (e) : PFZERO)
+-#define PFCLAMP(r, prl) (r)
++/* The `(void)` is what keeps PREFETCH's `prl` from being an unused local in this variant -- it is
++ * the last row of the chunk, and only the unconditional-read variant below needs it to clamp with.
++ * Here the read is already guarded by PFK's `(r) < (pnv)`, so there is nothing to clamp.
++ * Discarding it in the macro rather than not declaring it keeps ONE PREFETCH body for both. */
++#define PFCLAMP(r, prl) ((void)(prl), (r))
+ #else
+ #define PFK(r, pnv, e) (e)
+ #define PFCLAMP(r, prl) min((r), (prl))
+@@ -417,14 +472,27 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #define KT(t) (kt0 + (t) / SVT)
+ #define VT(t) (vt0 + (t) % SVT)
+ #define SROW(t) ((size_t)(v0 + VT(t) * 16 + lo) * KD + KT(t) * 16 + 8 * hi)
+-  {
+-    const float* p = h0 + ((size_t)(nq * H + hv) * VD) * KD;
++  if constexpr (!H0) {
++#pragma unroll
++    for (int t = 0; t < NST; ++t)
++#pragma unroll
++      for (int e = 0; e < 8; ++e) St[t][e] = 0.0f;
++  } else {
++    const typename cs_state<SDT>::T* p = h0 + st_base;
+ #pragma unroll
+     for (int t = 0; t < NST; ++t) {
+-      const float4 a = *(const float4*)(p + SROW(t));
+-      const float4 b = *(const float4*)(p + SROW(t) + 4);
+-      St[t][0]=a.x; St[t][1]=a.y; St[t][2]=a.z; St[t][3]=a.w;
+-      St[t][4]=b.x; St[t][5]=b.y; St[t][6]=b.z; St[t][7]=b.w;
++      // Eight elements a row-tile: two 16-byte accesses in fp32, ONE in fp16. SROW ends in
++      // 8*hi, so the fp16 arm is 16-byte aligned for the same reason the fp32 arm is.
++      if constexpr (SDT) {
++        const cs_h8 x = *(const cs_h8*)(p + SROW(t));
++#pragma unroll
++        for (int e = 0; e < 8; ++e) St[t][e] = (float)x[e];
++      } else {
++        const float4 a = *(const float4*)(p + SROW(t));
++        const float4 b = *(const float4*)(p + SROW(t) + 4);
++        St[t][0]=a.x; St[t][1]=a.y; St[t][2]=a.z; St[t][3]=a.w;
++        St[t][4]=b.x; St[t][5]=b.y; St[t][6]=b.z; St[t][7]=b.w;
++      }
+     }
+   }
+ #define SWRITE()                                                                      \
+@@ -439,6 +507,10 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+   PREFETCH(0);
+ 
+   const char* const sbase = (const char*)&s;
++  // scale rides inside the score exponent: exp(g_i + log(scale) - g_j) is the same
++  // instruction count as exp(g_i - g_j) and drops the eight multiplies per tile.
++  const float lgs = __logf(scale);
++  (void)lgs;
+   for (int ci = 0; ci < nchunk; ++ci) {
+     const int c0 = tb + ci * BT, nval = min(BT, te - c0);
+     const int lim = nval - 1;
+@@ -446,7 +518,9 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     const unsigned short* ag = Amat + ((size_t)c0 * H + hv) * BT;
+     const size_t qrs = (size_t)Hg * KD, ars = (size_t)H * BT;
+     const float gl = gcs[(size_t)(c0 + lim) * H + hv];
++#if GSPLIT
+     const float cref = 0.5f * (gcs[(size_t)c0 * H + hv] + gl);
++#endif
+ 
+     // Issued before the staging store so the LDS writes below cover their latency:
+     // only waves 0-1 (tid < BT) run this, and every other wave waits for them at (1).
+@@ -467,27 +541,23 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+       bool ok = tid < nval;
+       s.bt[tid] = btr;
+       s.ge[tid] = __expf(ggr);
+-      // The split form e^{g_i-c}.e^{c-g_j} is one exp per token instead of eight per tile, but each
+-      // half leaves range on its own where the PRODUCT never does: cref sits at the chunk midpoint,
+-      // so each half spans +/-(gate span)/2, and a span past ~176 sends one to +INF while the other
+-      // underflows to 0. Both consumers are bounded -- rs[i].gv[j] = scale.e^{g_i-g_j} under the
+-      // tril mask, and gv[t].lam = e^{gl-g_t} on the state path -- so clamping the growing half
+-      // leaves the shrinking one at or near 0 and the term is attenuated instead of 0 * INF = NaN.
+-      //
+-      // Attenuated, not exact. What leaves range is the distance from cref, not g_i-g_j, so on a
+-      // span-200 chunk the last token's own diagonal -- and its e^{gl-g_t} ~ 1 weight into the
+-      // state, which the next chunk reads -- are damped by e^{80-(cref-g_t)}. This bounds the
+-      // damage; it does not remove the cause. The cause is splitting a weight that is provably
+-      // <= 1 into a huge x tiny pair: stage V' in fp32, or apply e^{gl-g_t} on the state path.
+-      //
+-      // 80 rather than 88 because the binding ceiling is not fp32's: V' = gv[t].(A@W)[t] is staged
+-      // in bf16 (s.D) and then accumulated over BT tokens into V'^T @ K, so gv must leave room for
+-      // |A@W| under 3.4e38 -- e^88 = 1.6e38 leaves a factor of two and still produced NaN. The
+-      // value is measured, not assumed: WikiText-2 PPL over 208,539 tokens, no other mitigation --
+-      // 70 -> 8.3841, 80 -> 8.3706, 83 -> 8.3728, reference 8.3335, stock 653586. Where both
+-      // halves fit (every ordinary chunk) nothing changes.
++#if GSPLIT
++      s.gg[tid] = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;   // rs
+       s.gv[tid] = ok ? __expf(fminf(cref - ggr, 80.0f)) : 0.f;
+-      s.rs[tid] = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;
++#else
++      // g is a within-chunk cumsum of log-sigmoid gates, so it is non-increasing and gl is
++      // its minimum: gl - ggr <= 0, and gs underflowing to 0 is the right answer for a token
++      // the chunk's own decay has already annihilated.
++      // A PADDING ROW GETS gl, NOT 0. The score exponent is exp(g_i - g_j + log scale) and the
++      // mask only removes j > i, so a padding row i (which has no gate of its own) is scored
++      // against LIVE j with a real, very negative g_j: at 0 that is exp(+400) = inf, written
++      // into s.A as bf16 and multiplied by V-prime. The row is discarded either way -- the O
++      // store is guarded by tok < nval -- but an inf that only exists because a lane had no
++      // token is not something to leave in a shared buffer. gl is the chunk minimum, so
++      // gl - g_j <= 0 and the exponent cannot leave (0, scale].
++      s.gg[tid] = ok ? ggr : gl;
++      s.gv[tid] = ok ? __expf(gl - ggr) : 0.f;                           // gs
++#endif
+     }
+     BAR();                                                   // (1)
+ #if PFIN && PFV == 4
+@@ -658,16 +728,30 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+         *(uint2*)(wp + 4) = F2BF4I(wa[i][4], wa[i][5], wa[i][6], wa[i][7]);
+       }
+     }
+-    // sA = rs * tril(P): one multiply per element, no exp
++    // sA = scale * e^{g_i-g_j} * tril(P). The row token ii is constant per lane and the
++    // eight g_j are contiguous and wave-uniform in groups of 16 lanes, so this is eight
++    // broadcast LDS reads, eight v_sub and eight v_exp per tile -- no multiply, because
++    // log(scale) is already inside the exponent. The mask makes g_i - g_j <= 0 wherever the
++    // value is kept, so the exp cannot overflow and its underflow is the true answer.
+     {
+-      const int ii = mt * 16 + lo;            // now constant per lane: one rs load
+-      const float r = s.rs[ii];
++      const int ii = mt * 16 + lo;
++#if GSPLIT
++      const float r = s.gg[ii];               // rs
++#else
++      const float gis = s.gg[ii] + lgs;
++#endif
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         const int j0 = (ntb + i) * 16 + 8 * hi;
+         float a[8];
++#if GSPLIT
+ #pragma unroll
+         for (int e = 0; e < 8; ++e) a[e] = (j0 + e <= ii) ? p[i][e] * r : 0.f;
++#else
++#pragma unroll
++        for (int e = 0; e < 8; ++e)
++          a[e] = (j0 + e <= ii) ? p[i][e] * __expf(gis - s.gg[j0 + e]) : 0.f;
++#endif
+         if (doP[i]) {
+           *(uint2*)&s.A[ii][j0]     = F2BF4I(a[0], a[1], a[2], a[3]);
+           *(uint2*)&s.A[ii][j0 + 4] = F2BF4I(a[4], a[5], a[6], a[7]);
+@@ -722,18 +806,45 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+         __builtin_amdgcn_sched_group_barrier(0x008, NTV * SB, SIDV);
+       }
+ #endif
++#if GSPLIT
+       float gvv[8];
+ #pragma unroll
+       for (int e = 0; e < 8; ++e) gvv[e] = s.gv[mt * 16 + 8 * hi + e];
++#endif
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         unsigned short* dp = &s.D[(ntb + i) * 16 + lo][mt * 16 + 8 * hi];
++#if GSPLIT
+         *(uint2*)dp       = F2BF4I(d[i][0]*gvv[0], d[i][1]*gvv[1],
+                                    d[i][2]*gvv[2], d[i][3]*gvv[3]);
+         *(uint2*)(dp + 4) = F2BF4I(d[i][4]*gvv[4], d[i][5]*gvv[5],
+                                    d[i][6]*gvv[6], d[i][7]*gvv[7]);
++#else
++        *(uint2*)dp       = F2BF4I(d[i][0], d[i][1], d[i][2], d[i][3]);
++        *(uint2*)(dp + 4) = F2BF4I(d[i][4], d[i][5], d[i][6], d[i][7]);
++#endif
+       }
+     }
++#if !GSPLIT
++    // K <- gs * K, in place, for the state's V'^T @ K. The state wants
++    // sum_j e^{gl-g_j} v'_j k_j^T, and (diag(gs) V')^T K == V'^T (diag(gs) K), so the
++    // per-token factor can ride on either operand; K is the one that is already dead.
++    // Every raw-K read -- U = K@S and P = Q@K^T -- retired before barrier (2), the state
++    // matmul is the only reader left, and s.k is restaged from the prefetch registers at
++    // the top of the next chunk, so the scaling dies with the chunk. Barrier (3) below
++    // publishes it. 32 elements per lane; the alternative, a second decayed copy of V',
++    // costs an extra workgroup barrier because s.S is the only buffer free to hold it and
++    // SWRITE races the state matmul for it.
++#pragma unroll
++    for (int u = 0; u < BT * (KD / 4) / NTHR; ++u) {
++      const int idx = tid + u * NTHR;
++      const int t = idx / (KD / 4), c = (idx % (KD / 4)) * 4;
++      const float f = s.gv[t];
++      unsigned short* kp = &s.k[t][c];
++      *(uint2*)kp = F2BF4O(bf2f(kp[0]) * f, bf2f(kp[1]) * f,
++                           bf2f(kp[2]) * f, bf2f(kp[3]) * f);
++    }
++#endif
+     BAR();                                                   // (3)
+ 
+     // ---- O += sA @ V' ; store.  V' also feeds the state update, unchanged.
+@@ -786,9 +897,13 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+       }
+     }
+ 
+-    // ---- S = lam * (e^c * S + V'^T @ K)   (B needs K as [dim][token] -> strided fragT)
++    // ---- S = e^{gl} * S + V'^T @ (gs*K)   (B needs K as [dim][token] -> strided fragT)
+     {
++#if GSPLIT
+       const float ec = __expf(cref), lam = __expf(gl - cref);
++#else
++      const float ec = __expf(gl);            // gl <= 0: no lam, the decay is already on K
++#endif
+ #pragma unroll
+       for (int t = 0; t < NST; ++t)
+ #pragma unroll
+@@ -837,10 +952,12 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+         __builtin_amdgcn_sched_group_barrier(0x008, NST * SS, SIDS);
+       }
+ #endif
++#if GSPLIT
+ #pragma unroll
+       for (int t = 0; t < NST; ++t)
+ #pragma unroll
+         for (int e = 0; e < 8; ++e) St[t][e] *= lam;
++#endif
+     }
+     // no barrier: s.S aliases nothing, and barrier (2) already proves every wave
+     // finished its U/O reads of s.S this chunk
+@@ -848,28 +965,75 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     BAR();                                                   // (4)
+   }
+ 
+-  float* p = ht + ((size_t)(nq * H + hv) * VD) * KD;
++  if constexpr (!HT) return;
++  typename cs_state<SDT>::T* p = ht + st_base;
+ #pragma unroll
+   for (int t = 0; t < NST; ++t) {
+-    *(float4*)(p + SROW(t))     = make_float4(St[t][0], St[t][1], St[t][2], St[t][3]);
+-    *(float4*)(p + SROW(t) + 4) = make_float4(St[t][4], St[t][5], St[t][6], St[t][7]);
++    if constexpr (SDT) {
++      cs_h8 x;
++#pragma unroll
++      for (int e = 0; e < 8; ++e) x[e] = (_Float16)St[t][e];
++      *(cs_h8*)(p + SROW(t)) = x;
++    } else {
++      *(float4*)(p + SROW(t))     = make_float4(St[t][0], St[t][1], St[t][2], St[t][3]);
++      *(float4*)(p + SROW(t) + 4) = make_float4(St[t][4], St[t][5], St[t][6], St[t][7]);
++    }
+   }
+ }
+ 
+-extern "C" int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
++// THE SLOT-INDEXED FORM, and the one radiance calls. `sidx` names the state slot each row of the
++// batch owns; without it the kernel indexes the cache by ROW, which is the same thing only while
++// slots are handed out in batch order. `st_slot` and `st_head` are the strides of the cache
++// itself, in elements: a manager that pads a linear slot to the attention page size (radiance
++// does) has a slot wider than H*V*K, and the packed formula then reads the wrong memory for every
++// slot but the first. Pass sidx = null and either stride 0 for the packed [N, H, V, K] layout.
++extern "C" int r4d_gdn_chunk_scan_k128_v128_c64_bf16_sidx(
+     const void* q, const void* k, const void* v, const void* A, const void* g,
+     const void* beta, const void* h0, void* o, void* ht, const void* cu,
+-    int N, int H, int Hg, int K, int V, int bt, float scale, void* stream)
++    const void* ssm_state_indices, long indices_stride, long state_slot_stride,
++    long state_head_stride,
++    int N, int H, int Hg, int K, int V, int bt, float scale, int state_fp16, void* stream)
+ {
+   if (K != KD || V != VD || bt != BT) return -1;
++  // The kernel maps a v head to its k head with `hq = hv / (H / Hg)`, a truncating divide. An H
++  // that is not a multiple of Hg sends every v head to the wrong k head -- wrong numbers, no
++  // error. The two siblings that share the mapping refuse it with the same -2
++  // (r4d_gdn_kkt_solve_k128_c64_bf16, r4d_gdn_recurrent_update_k128_v128_bf16_fp32state).
++  if (Hg <= 0 || H % Hg) return -2;
++  const long st_head = state_head_stride > 0 ? state_head_stride : (long)VD * KD;
++  const long st_slot = state_slot_stride > 0 ? state_slot_stride : (long)H * VD * KD;
+   dim3 grid(V / BV, H, N), blk(NTHR);
+-  r4d_gdn_chunk_scan_kernel<<<grid, blk, 0, (hipStream_t)stream>>>(
+-      (const unsigned short*)q, (const unsigned short*)k, (const unsigned short*)v,
+-      (const unsigned short*)A, (const float*)g, (const float*)beta, (const float*)h0,
+-      (unsigned short*)o, (float*)ht, (const int*)cu, H, Hg, scale);
++#define CS_LAUNCH(SDTC, H0C, HTC)                                                          \
++  hipLaunchKernelGGL((r4d_gdn_chunk_scan_kernel<SDTC, H0C, HTC>), grid, blk, 0,            \
++      (hipStream_t)stream,                                                                 \
++      (const unsigned short*)q, (const unsigned short*)k, (const unsigned short*)v,        \
++      (const unsigned short*)A, (const float*)g, (const float*)beta,                       \
++      (const cs_state<SDTC>::T*)h0, (unsigned short*)o, (cs_state<SDTC>::T*)ht,            \
++      (const int*)cu, (const int*)ssm_state_indices, (indices_stride > 0 ? indices_stride : 1),  \
++      st_slot, st_head, H, Hg, scale)
++#define CS_PICK(SDTC)                                                                      \
++  do { if (h0 && ht) CS_LAUNCH(SDTC, true, true);                                          \
++       else if (h0)  CS_LAUNCH(SDTC, true, false);                                         \
++       else if (ht)  CS_LAUNCH(SDTC, false, true);                                         \
++       else          CS_LAUNCH(SDTC, false, false); } while (0)
++  if (state_fp16) CS_PICK(1); else CS_PICK(0);
++#undef CS_PICK
++#undef CS_LAUNCH
+   return (int)hipGetLastError();
+ }
+ 
++// The packed-layout entry point, for the out-of-tree vLLM caller: one state per batch row,
++// [N, H, V, K].
++extern "C" int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
++    const void* q, const void* k, const void* v, const void* A, const void* g,
++    const void* beta, const void* h0, void* o, void* ht, const void* cu,
++    int N, int H, int Hg, int K, int V, int bt, float scale, int state_fp16, void* stream)
++{
++  return r4d_gdn_chunk_scan_k128_v128_c64_bf16_sidx(q, k, v, A, g, beta, h0, o, ht, cu,
++                                                    nullptr, 0, 0, 0, N, H, Hg, K, V, bt, scale,
++                                                    state_fp16, stream);
++}
++
+ // The geometry baked into the kernel above, so a caller can test a model's GDN shape against it
+ // instead of hardcoding a copy of these three numbers.
+ extern "C" void r4d_gdn_dims(int* head_k, int* head_v, int* chunk) {
+diff --git a/r4d_gdn_fused_update_w4k128v128.h b/r4d_gdn_fused_update_w4k128v128.h
+new file mode 100644
+index 0000000..839ee1f
+--- /dev/null
++++ b/r4d_gdn_fused_update_w4k128v128.h
+@@ -0,0 +1,293 @@
++// Shared implementation of the fused GDN decode step (conv -> grid barrier -> recurrent in ONE
++// launch), templated on the state cache dtype. The thin translation units beside it each
++// instantiate one and export its entry point. See r4d_gdn_state.h for the dtype split.
++#pragma once
++// r4d_gdn_fused_update_w4k128v128.hip -- the decode GDN step as ONE launch: the rolling
++// speculative conv update, then the recurrent delta-rule update, separated by a grid-wide
++// barrier instead of a kernel boundary.
++//
++// WHY. The two stages are 7-13 us kernels launched 2 x 48 layers per forward; at the measured
++// ~3.3 us graph-dispatch gap the boundary costs as much as the smaller kernel. They cannot be
++// block-fused: a recurrent head hv consumes q/k written by DIFFERENT conv units, so the handoff
++// has to cross workgroups. The barrier is the decode GEMM's fused split-K pattern (arrive on an
++// atomic, last arrival resets it, so the counter is zeroed for the next launch and graph replay
++// needs no clearing pass) -- and it is deadlock-free BY CONSTRUCTION, not by luck: the grid is
++// capped at FU_MAXWG workgroups of 8 waves, far under residency, and both phases WORK-LOOP over
++// their items instead of assuming one item per block.
++//
++// The math is copied VERBATIM from r4d_gdn_conv_w4_h128_bf16.hip (decode entry) and
++// r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip (ABF16 templated, NM=0 -- the production
++// configuration; a caller wanting the fused row norm must use the unfused pair). Outputs are
++// bit-identical to the pair: every (n, unit) / (n, head) item is independent, so the work-loop
++// remap changes scheduling only. If either source kernel changes, this file has to follow -- the
++// duplication is the price of not linking device code across TUs (no -fgpu-rdc in this build).
++#include <hip/hip_runtime.h>
++#include "r4d.h"
++#include "r4d_common.h"
++#include "r4d_gdn_wmma.h"
++#include "r4d_gdn_state.h"
++
++#define FU_HD    128
++#define FU_W       4
++#define FU_ST   (FU_W - 1)
++#define FU_DPL     4
++#define FU_MAXT    1            // matches CU_MAXT: the x preload band of the decode conv
++#define FU_K     128
++#define FU_V     128
++#define FU_HK     64
++#define FU_MAXWG  32            // 8-wave workgroups; 32 is <= 1 per WGP, always resident
++
++__device__ __forceinline__ float fu_silu(float x) { return x / (1.0f + __expf(-x)); }
++__device__ __forceinline__ float fu_softplus(float x, float thr) {
++  if (x > thr) return x;
++  return (x > 0.0f) ? (x + __logf(1.0f + __expf(-x))) : __logf(1.0f + __expf(x));
++}
++template <int ABF16>
++__device__ __forceinline__ float fu_ab(const void* p, size_t i) {
++  return ABF16 ? bf2f(((const unsigned short*)p)[i]) : ((const float*)p)[i];
++}
++
++template <int ABF16, int STDT>
++__global__ __launch_bounds__(256)
++void r4d_gdn_fused_update_kernel(
++    const unsigned short* __restrict__ x, long xpitch,
++    const unsigned short* __restrict__ wgt, const unsigned short* __restrict__ bias,
++    unsigned short* __restrict__ cstate, long cs_seq, long cs_dim, long cs_tok,
++    int state_len_max, const int* __restrict__ cache_idx, long ci_stride,
++    const int* __restrict__ naccept, const int* __restrict__ cu,
++    int N, int H, int Hg, int maxq,
++    unsigned short* __restrict__ q, unsigned short* __restrict__ k,
++    unsigned short* __restrict__ v,
++    const void* __restrict__ av, const void* __restrict__ bv, long ab_stride,
++    const float* __restrict__ A_log, const float* __restrict__ dt_bias,
++    gdn_state_t<STDT>* __restrict__ state, long st_slot, long st_head,
++    unsigned short* __restrict__ o,
++    const int* __restrict__ sidx, long sidx_stride,
++    float scale, float sp_thr, int* __restrict__ bar, int numWG, int o_rows)
++{
++  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
++  const int units = 2 * Hg + H;
++
++  // ---- phase 1: the decode conv, one warp per (sequence, unit), work-looped -----------------
++  for (int item = blockIdx.x * 8 + warp; item < N * units; item += numWG * 8) {
++    const int n = item / units, unit = item - n * units;
++    const int bos = cu[n], slen = cu[n + 1] - bos;
++    if (slen <= 0) continue;
++    const int slot = cache_idx[(size_t)n * ci_stride];
++    if (slot <= 0) continue;
++
++    const int off = naccept ? (naccept[n] - 1) : 0;
++    const int slen_eff = state_len_max - (maxq - slen);
++    const int d0 = unit * FU_HD + lane * FU_DPL;
++
++    float wt[FU_W][FU_DPL], bs[FU_DPL];
++#pragma unroll
++    for (int c = 0; c < FU_DPL; ++c) {
++      const ushort4 w4 = *(const ushort4*)(wgt + (size_t)(d0 + c) * FU_W);
++      const unsigned short* ws = (const unsigned short*)&w4;
++#pragma unroll
++      for (int i = 0; i < FU_W; ++i) wt[i][c] = bf2f(ws[i]);
++      bs[c] = bias ? bf2f(bias[d0 + c]) : 0.0f;
++    }
++
++    unsigned short* sp = cstate + (size_t)slot * cs_seq + (size_t)d0 * cs_dim;
++    float win[FU_W][FU_DPL];
++    unsigned short hist[FU_ST][FU_DPL];
++#pragma unroll
++    for (int i = 0; i < FU_ST; ++i)
++#pragma unroll
++      for (int c = 0; c < FU_DPL; ++c) {
++        const unsigned short raw = sp[(size_t)c * cs_dim + (size_t)(off + i) * cs_tok];
++        hist[i][c] = raw;
++        win[i][c] = bf2f(raw);
++      }
++
++    const int hq = unit, hk2 = unit - Hg, hv2 = unit - 2 * Hg;
++    const int region = (unit < Hg) ? 0 : ((unit < 2 * Hg) ? 1 : 2);
++
++    ushort4 xb[FU_MAXT];
++    const bool xpre = (slen <= FU_MAXT);
++#pragma unroll
++    for (int t = 0; t < FU_MAXT; ++t)
++      if (xpre && t < slen) xb[t] = *(const ushort4*)(x + (size_t)(bos + t) * xpitch + d0);
++
++    for (int t = 0; t < slen; ++t) {
++      const ushort4 raw = xpre ? xb[t]
++                               : *(const ushort4*)(x + (size_t)(bos + t) * xpitch + d0);
++      win[FU_W - 1][0] = bf2f(raw.x); win[FU_W - 1][1] = bf2f(raw.y);
++      win[FU_W - 1][2] = bf2f(raw.z); win[FU_W - 1][3] = bf2f(raw.w);
++
++      unsigned short out[FU_DPL];
++#pragma unroll
++      for (int c = 0; c < FU_DPL; ++c) {
++        float acc = bs[c];
++#pragma unroll
++        for (int i = 0; i < FU_W; ++i) acc += wt[i][c] * win[i][c];
++        out[c] = f2bf(fu_silu(acc));
++      }
++      unsigned short* dst = (region == 2)
++          ? (v + ((size_t)(bos + t) * H + hv2) * FU_HD + lane * FU_DPL)
++          : ((region ? k : q) + ((size_t)(bos + t) * Hg + (region ? hk2 : hq)) * FU_HD
++             + lane * FU_DPL);
++      *(ushort4*)dst = make_ushort4(out[0], out[1], out[2], out[3]);
++
++#pragma unroll
++      for (int i = 0; i < FU_W - 1; ++i)
++#pragma unroll
++        for (int c = 0; c < FU_DPL; ++c) win[i][c] = win[i + 1][c];
++    }
++
++    const int VAL = FU_W - 2;
++#pragma unroll
++    for (int c = 0; c < FU_DPL; ++c) {
++      unsigned short* dst = sp + (size_t)c * cs_dim;
++      for (int i = 0; i < slen_eff; ++i) {
++        unsigned short val;
++        if (i + slen < slen_eff) {
++          val = hist[i + 1][c];
++        } else {
++          const int ti = i - VAL;
++          val = (xpre && ti >= 0 && ti < slen)
++                    ? ((const unsigned short*)&xb[ti])[c]
++                    : x[(size_t)(bos + ti) * xpitch + d0 + c];
++        }
++        dst[(size_t)i * cs_tok] = val;
++      }
++    }
++  }
++
++  // ---- grid barrier: arrive, last resets -- counter is zero again for the next launch -------
++  __threadfence();
++  __syncthreads();
++  if (tid == 0) {
++    if (atomicAdd(bar, 1) == numWG - 1) {
++      __threadfence();
++      atomicExch(bar, 0);
++    } else {
++      while (atomicAdd(bar, 0) != 0) { __builtin_amdgcn_s_sleep(8); }
++    }
++  }
++  __syncthreads();
++  __threadfence();
++
++  // ---- phase 2: the recurrent update, one workgroup per (sequence, v-head), work-looped -----
++  // 256 threads = the VS=1 shape: two threads per v row, a thread owns half the k range.
++  const int row = tid >> 1, half = tid & 1, k0 = half * FU_HK;
++  for (int item = blockIdx.x; item < N * H; item += numWG) {
++    const int n = item / H, hv = item - n * H;
++    const int bos = cu[n], T = cu[n + 1] - bos;
++    if (T <= 0) continue;
++    const int hk = hv / (H / Hg);
++    const int it = naccept ? (naccept[n] - 1) : 0;
++    const int si = sidx[(size_t)n * sidx_stride + it];
++    if (si <= 0) continue;
++
++    float h[FU_HK];
++    {
++      const gdn_state_t<STDT>* p = state + (size_t)si * st_slot + (size_t)hv * st_head
++                     + (size_t)row * FU_K + k0;
++      gdn_state_load<STDT, FU_HK>(h, p);
++    }
++    const float alog = __expf(A_log[hv]), dtb = dt_bias[hv];
++
++    for (int t = 0; t < T; ++t) {
++      const int tok = bos + t;
++      const unsigned short* qp = q + ((size_t)tok * Hg + hk) * FU_K + k0;
++      const unsigned short* kp = k + ((size_t)tok * Hg + hk) * FU_K + k0;
++
++      float qq[FU_HK], kk[FU_HK];
++#pragma unroll
++      for (int j = 0; j < FU_HK; j += 8) {
++        const uint4 wq = *(const uint4*)(qp + j), wk = *(const uint4*)(kp + j);
++        const unsigned short* sq2 = (const unsigned short*)&wq;
++        const unsigned short* sk2 = (const unsigned short*)&wk;
++#pragma unroll
++        for (int e = 0; e < 8; ++e) { qq[j + e] = bf2f(sq2[e]); kk[j + e] = bf2f(sk2[e]); }
++      }
++
++      float sq = 0.0f, sk = 0.0f;
++#pragma unroll
++      for (int j = 0; j < FU_HK; ++j) { sq += qq[j] * qq[j]; sk += kk[j] * kk[j]; }
++      sq += __shfl_xor(sq, 1, 32);
++      sk += __shfl_xor(sk, 1, 32);
++      const float qs = __frsqrt_rn(sq + 1e-6f) * scale, ks = __frsqrt_rn(sk + 1e-6f);
++#pragma unroll
++      for (int j = 0; j < FU_HK; ++j) { qq[j] *= qs; kk[j] *= ks; }
++
++      const float g  = -alog * fu_softplus(
++          fu_ab<ABF16>(av, (size_t)tok * ab_stride + hv) + dtb, sp_thr);
++      const float bt = 1.0f / (1.0f + __expf(-fu_ab<ABF16>(bv, (size_t)tok * ab_stride + hv)));
++      const float eg = __expf(g);
++
++      float dot = 0.0f;
++#pragma unroll
++      for (int j = 0; j < FU_HK; ++j) { h[j] *= eg; dot += h[j] * kk[j]; }
++      dot += __shfl_xor(dot, 1, 32);
++
++      const float u = (bf2f(v[((size_t)tok * H + hv) * FU_V + row]) - dot) * bt;
++
++      float on = 0.0f;
++#pragma unroll
++      for (int j = 0; j < FU_HK; ++j) { h[j] += u * kk[j]; on += h[j] * qq[j]; }
++      on += __shfl_xor(on, 1, 32);
++
++      if (half == 0) o[((size_t)tok * H + hv) * FU_V + row] = f2bf(on);
++
++      const int so = sidx[(size_t)n * sidx_stride + t];
++      if (so > 0) {
++        gdn_state_t<STDT>* p = state + (size_t)so * st_slot + (size_t)hv * st_head
++                 + (size_t)row * FU_K + k0;
++        gdn_state_store<STDT, FU_HK>(p, h);
++      }
++    }
++  }
++
++  // ---- phase 3: zero the cudagraph pad rows of o ---------------------------------------------
++  // The recurrent phase writes o only for rows a sequence covers, [0, cu[N]). core_attn_out is
++  // the padded batch (o_rows), and vLLM zero-fills it before this op precisely because a
++  // torch.empty there leaks garbage from the pad rows into the layers below (vLLM PR 28182).
++  // Zeroing the tail here lets the caller drop that fill: rows [cu[N], o_rows), H*V bf16 each,
++  // strided over the workgroups, ushort4 per thread. Disjoint from the rows phase 2 wrote.
++  {
++    const int first = cu[N];
++    const int rowv4 = (H * FU_V) >> 2;
++    for (int r = first + blockIdx.x; r < o_rows; r += numWG) {
++      ushort4* dst = (ushort4*)(o + (size_t)r * H * FU_V);
++      for (int i = tid; i < rowv4; i += 256) dst[i] = make_ushort4(0, 0, 0, 0);
++    }
++  }
++}
++
++template <int STDT>
++static int fu_launch(
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream)
++{
++  if (K != FU_K || V != FU_V || width != FU_W) return -1;
++  if (H % Hg) return -2;
++  if (!barrier_cnt) return -3;
++  int numWG = N * H;
++  if (numWG > FU_MAXWG) numWG = FU_MAXWG;
++  if (numWG < 1) numWG = 1;
++  dim3 grid(numWG), blk(256);
++#define FU_LAUNCH(AB)                                                                         \
++  hipLaunchKernelGGL((r4d_gdn_fused_update_kernel<AB, STDT>), grid, blk, 0, (hipStream_t)stream,    \
++                     (const unsigned short*)x, xpitch, (const unsigned short*)wgt,            \
++                     (const unsigned short*)bias, (unsigned short*)cstate, cs_seq, cs_dim,    \
++                     cs_tok, state_len_max, (const int*)cache_idx, ci_stride,                 \
++                     (const int*)num_accepted, (const int*)cu, N, H, Hg, max_query_len,       \
++                     (unsigned short*)q, (unsigned short*)k, (unsigned short*)v,              \
++                     a, b, ab_stride, (const float*)A_log, (const float*)dt_bias,             \
++                     (gdn_state_t<STDT>*)state, st_slot, st_head, (unsigned short*)o,                     \
++                     (const int*)sidx, sidx_stride, scale, softplus_thr,                      \
++                     (int*)barrier_cnt, numWG, o_rows)
++  if (ab_is_bf16) FU_LAUNCH(1); else FU_LAUNCH(0);
++#undef FU_LAUNCH
++  return (int)hipGetLastError();
++}
+diff --git a/r4d_gdn_fused_update_w4k128v128_bf16.hip b/r4d_gdn_fused_update_w4k128v128_bf16.hip
+new file mode 100644
+index 0000000..0540ca7
+--- /dev/null
++++ b/r4d_gdn_fused_update_w4k128v128_bf16.hip
+@@ -0,0 +1,25 @@
++// r4d_gdn_fused_update_w4k128v128_bf16.hip -- the fused GDN decode step against an **fp32** paged
++// state cache: conv update -> grid barrier -> recurrent update, in ONE launch.
++//
++// This is the single-sequence path (the dispatcher routes nseq*H > 32 to the conv+recurrent pair,
++// whose resident 32-workgroup grid it would otherwise work-loop). The kernel lives in
++// r4d_gdn_fused_update_w4k128v128.h; this unit instantiates it for the fp32 state.
++//
++// NOTE the entry point keeps its original, state-dtype-free name so existing callers and benches
++// that hardcode it keep working; the bf16 sibling is spelled ..._bf16_bf16state. The registry
++// still constrains state_dtype on BOTH rows, so select() cannot hand a caller the wrong one.
++#include "r4d_gdn_fused_update_w4k128v128.h"
++
++extern "C" int r4d_gdn_fused_update_w4k128v128_bf16(
++
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream)
++{
++  return fu_launch<R4D_ST_F32>(x, xpitch, wgt, bias, cstate, cs_seq, cs_dim, cs_tok, state_len_max, cache_idx, ci_stride, num_accepted, cu, N, H, Hg, K, V, width, max_query_len, q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state, st_slot, st_head, o, sidx, sidx_stride, scale, softplus_thr, barrier_cnt, o_rows, stream);
++}
+diff --git a/r4d_gdn_fused_update_w4k128v128_bf16_bf16state.hip b/r4d_gdn_fused_update_w4k128v128_bf16_bf16state.hip
+new file mode 100644
+index 0000000..fe350b9
+--- /dev/null
++++ b/r4d_gdn_fused_update_w4k128v128_bf16_bf16state.hip
+@@ -0,0 +1,20 @@
++// r4d_gdn_fused_update_w4k128v128_bf16_bf16state.hip -- the fused GDN decode step against a
++// **bf16** paged state cache (--mamba-ssm-cache-dtype=bfloat16).
++//
++// Same single-sequence path as its fp32 sibling, with the state snapshot halved. See
++// r4d_gdn_state.h for why the accumulator stays fp32 and what the rounding costs.
++#include "r4d_gdn_fused_update_w4k128v128.h"
++
++extern "C" int r4d_gdn_fused_update_w4k128v128_bf16_bf16state(
++
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream)
++{
++  return fu_launch<R4D_ST_BF16>(x, xpitch, wgt, bias, cstate, cs_seq, cs_dim, cs_tok, state_len_max, cache_idx, ci_stride, num_accepted, cu, N, H, Hg, K, V, width, max_query_len, q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state, st_slot, st_head, o, sidx, sidx_stride, scale, softplus_thr, barrier_cnt, o_rows, stream);
++}
+diff --git a/r4d_gdn_fused_update_w4k128v128_bf16_f16state.hip b/r4d_gdn_fused_update_w4k128v128_bf16_f16state.hip
+new file mode 100644
+index 0000000..a07d43b
+--- /dev/null
++++ b/r4d_gdn_fused_update_w4k128v128_bf16_f16state.hip
+@@ -0,0 +1,18 @@
++// r4d_gdn_fused_update_w4k128v128_bf16_f16state.hip -- the fused GDN decode step against an **f16**
++// paged state cache (--mamba-ssm-cache-dtype=float16). Same single-sequence path as its siblings;
++// see r4d_gdn_state.h for why f16 beats bf16 at the same width on gfx1201.
++#include "r4d_gdn_fused_update_w4k128v128.h"
++
++extern "C" int r4d_gdn_fused_update_w4k128v128_bf16_f16state(
++
++    const void* x, long xpitch, const void* wgt, const void* bias, void* cstate,
++    long cs_seq, long cs_dim, long cs_tok, int state_len_max, const void* cache_idx,
++    long ci_stride, const void* num_accepted, const void* cu, int N, int H, int Hg,
++    int K, int V, int width, int max_query_len, void* q, void* k, void* v,
++    const void* a, const void* b, long ab_stride, int ab_is_bf16,
++    const void* A_log, const void* dt_bias, void* state, long st_slot, long st_head,
++    void* o, const void* sidx, long sidx_stride, float scale, float softplus_thr,
++    void* barrier_cnt, int o_rows, void* stream)
++{
++  return fu_launch<R4D_ST_F16>(x, xpitch, wgt, bias, cstate, cs_seq, cs_dim, cs_tok, state_len_max, cache_idx, ci_stride, num_accepted, cu, N, H, Hg, K, V, width, max_query_len, q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state, st_slot, st_head, o, sidx, sidx_stride, scale, softplus_thr, barrier_cnt, o_rows, stream);
++}
+diff --git a/r4d_gdn_lazy_update_k128_v128.h b/r4d_gdn_lazy_update_k128_v128.h
+new file mode 100644
+index 0000000..28bbb0e
+--- /dev/null
++++ b/r4d_gdn_lazy_update_k128_v128.h
+@@ -0,0 +1,462 @@
++// r4d_gdn_lazy_update_k128_v128.h -- the GDN recurrent decode update with LAZY state snapshots.
++//
++// The eager kernel (r4d_gdn_recurrent_update_k128_v128.h) writes one full [V,K] state per
++// CANDIDATE token per head, because which candidate survives verification is only known after
++// the layer has run. Under speculative decode that is T snapshots per step per head, T slots per
++// sequence in the paged cache, and 55-88% of the kernel's time. This kernel keeps ONE state per
++// sequence (the "base": the state after every token that has been accepted so far) and a small
++// STASH of the last step's candidate inputs. Each step:
++//
++//   1. load the base from slot sidx[n, 0];
++//   2. replay the previous step's ACCEPTED candidates 1..naccept-1 from the stash (their
++//      post-conv q/k/v and gates were stashed last step, the accepted count only became known
++//      after verification) -- the same arithmetic as the eager update, no stores;
++//   3. run this step's candidate 0 (always accepted: it is the token the last verify sampled)
++//      and store the state after it back to slot sidx[n, 0] -- ONE snapshot per head per step;
++//   4. run candidates 1..T-1 from it, emitting outputs only, and stash their q/k/v/a/b for the
++//      next step's replay.
++//
++// The stash lives in the ssm-state area of the slot sidx[n, STASH_COL] (the one speculative block
++// the allocator still gives the request), laid out per v-head so a workgroup touches only its own
++// region. Its header records the base slot it was written against: a stash that does not match
++// the current base slot (first step after a prefill / prefix hit, or a slot the allocator moved)
++// is ignored, which makes "replay nothing" the fail-safe -- the base is then the last state that
++// was WRITTEN, which after a prefill is exactly right.
++//
++// Precision: the replayed tokens are applied in fp32 to the fp16 base, so a replayed token sees
++// ONE fewer storage rounding than the eager path gave it. Not bit-identical to eager; strictly
++// closer to the fp32 reference.
++#pragma once
++#include <hip/hip_runtime.h>
++#include "r4d.h"
++#include "r4d_gdn_wmma.h"
++#include "r4d_gdn_state.h"
++
++#define LZ_K    128
++#define LZ_V    128
++#define LZ_TPR    4            // threads per v row: a thread owns 32 of the 128 k elements
++#define LZ_HK   (LZ_K / LZ_TPR)
++#define LZ_THR  (LZ_V * LZ_TPR)  // 512 at VS=1
++#define LZ_MAXT   8            // candidates the stash holds per head (SPEC+1 at SPEC=7)
++// Per-head stash region, bytes: header 64 | a,b per candidate 64 | LZ_MAXT x (q 256 | k 256 | v 256)
++#define LZ_REGION     8192          // one stash region per (head, row-split workgroup)
++#define LZ_MAXVS         2
++#define LZ_HEAD_BYTES (LZ_REGION * LZ_MAXVS)
++#define LZ_HDR_MAGIC  0x4c5a5331u   // "LZS1"
++#define LZ_CAND_BYTES 768
++#define LZ_AB_OFF     64
++#define LZ_CAND_OFF   128
++
++struct lz_hdr { unsigned magic, count, base_slot, vs_w; };   // vs_w: row split at write time
++
++// rx14: stale-stash event counters, one set per translation unit (= per state dtype).
++//   [0] update (step) kernel: header stale while candidates were due for replay (naccept > 1)
++//   [1] materialize mode 0 (migration): header stale with count > 0
++//   [2] materialize mode 1 (checkpoint): header stale with count > 0 -- the fail-open path
++//   [3] materialize mode 2 (prefill invalidation): requests whose stash headers were zeroed
++// [0]-[2] should stay 0 once mode 2 runs on every prefill; anything else means a stale stash was
++// met where a replay was owed, and the state written from it is short by that many candidates.
++static __device__ unsigned int lz_stale[4];
++static int lz_stale_read(unsigned int* out, int reset) {
++  hipError_t e = hipMemcpyFromSymbol(out, HIP_SYMBOL(lz_stale), sizeof(unsigned int) * 4, 0,
++                                     hipMemcpyDeviceToHost);
++  if (e == hipSuccess && reset) {
++    const unsigned int z[4] = {0u, 0u, 0u, 0u};
++    e = hipMemcpyToSymbol(HIP_SYMBOL(lz_stale), z, sizeof z, 0, hipMemcpyHostToDevice);
++  }
++  return (int)e;
++}
++
++__device__ __forceinline__ float lz_softplus(float x, float thr) {
++  if (x > thr) return x;
++  return (x > 0.0f) ? (x + __logf(1.0f + __expf(-x))) : __logf(1.0f + __expf(x));
++}
++template <int ABF16>
++__device__ __forceinline__ float lz_ab(const void* p, size_t i) {
++  return ABF16 ? bf2f(((const unsigned short*)p)[i]) : ((const float*)p)[i];
++}
++// sum across the LZ_TPR lanes that share a row (consecutive lanes)
++__device__ __forceinline__ float lz_rowsum(float x) {
++  x += __shfl_xor(x, 1, 32);
++  x += __shfl_xor(x, 2, 32);
++  return x;
++}
++
++// One token's update of the thread's 32 state elements; returns this thread's partial of o.
++__device__ __forceinline__ float lz_step(float* h, const float* qq, const float* kk,
++                                         float vrow, float eg, float bt) {
++  float dot = 0.0f;
++#pragma unroll
++  for (int j = 0; j < LZ_HK; ++j) { h[j] *= eg; dot += h[j] * kk[j]; }
++  dot = lz_rowsum(dot);
++  const float u = (vrow - dot) * bt;
++  float on = 0.0f;
++#pragma unroll
++  for (int j = 0; j < LZ_HK; ++j) { h[j] += u * kk[j]; on += h[j] * qq[j]; }
++  return on;
++}
++
++// raw bf16 quarter-rows -> normalised fp32 (q scaled)
++__device__ __forceinline__ void lz_norm(const uint4* cq, const uint4* ck, float* qq, float* kk,
++                                        float scale) {
++#pragma unroll
++  for (int j = 0; j < LZ_HK / 8; ++j) {
++    const unsigned short* sq = (const unsigned short*)&cq[j];
++    const unsigned short* sk = (const unsigned short*)&ck[j];
++#pragma unroll
++    for (int e = 0; e < 8; ++e) { qq[8 * j + e] = bf2f(sq[e]); kk[8 * j + e] = bf2f(sk[e]); }
++  }
++  float sq = 0.0f, sk = 0.0f;
++#pragma unroll
++  for (int j = 0; j < LZ_HK; ++j) { sq += qq[j] * qq[j]; sk += kk[j] * kk[j]; }
++  sq = lz_rowsum(sq); sk = lz_rowsum(sk);
++  const float qs = __frsqrt_rn(sq + 1e-6f) * scale, ks = __frsqrt_rn(sk + 1e-6f);
++#pragma unroll
++  for (int j = 0; j < LZ_HK; ++j) { qq[j] *= qs; kk[j] *= ks; }
++}
++
++// VS: workgroups per head (each owns 128/VS v rows). At one sequence (48 heads on 64 CUs) VS=2
++// fills the machine. Four threads per row keep the per-thread state at 32 elements, which is
++// what lets the NEXT token's raw q/k/v/a/b be fetched before this token's arithmetic starts
++// (software prefetch) without spilling: the per-token chain is latency-bound.
++template <int ABF16, int STDT, int VS>
++__global__ __launch_bounds__(LZ_THR / VS)
++void r4d_gdn_lazy_update_kernel(const unsigned short* __restrict__ q,
++                                const unsigned short* __restrict__ k,
++                                const unsigned short* __restrict__ v,
++                                const void* __restrict__ av,
++                                const void* __restrict__ bv, long ab_stride,
++                                const float* __restrict__ A_log,
++                                const float* __restrict__ dt_bias,
++                                gdn_state_t<STDT>* __restrict__ state,
++                                long st_slot, long st_head,
++                                unsigned short* __restrict__ o,
++                                const int* __restrict__ cu,
++                                const int* __restrict__ sidx, long sidx_stride,
++                                const int* __restrict__ naccept,
++                                int H, int Hg, int stash_col, float scale, float sp_thr)
++{
++  constexpr int NR = LZ_V / VS;
++  const int n = blockIdx.x, hv = blockIdx.y;
++  const int bos = cu[n], T = cu[n + 1] - bos;
++  if (T <= 0) return;
++  const int tid = threadIdx.x;
++  const int lrow = tid / LZ_TPR, quarter = tid % LZ_TPR;
++  const int row = lrow + (VS > 1 ? blockIdx.z * NR : 0), k0 = quarter * LZ_HK;
++  const int hk = hv / (H / Hg);
++  const int base_slot = sidx[(size_t)n * sidx_stride];
++  const int stash_slot = sidx[(size_t)n * sidx_stride + stash_col];
++  if (base_slot <= 0 || stash_slot <= 0) return;           // NULL_BLOCK_ID: nothing scheduled
++
++  // The stash for head hv lives in head hv's own state region of the stash slot (st_head
++  // elements = 32 KB at f16, more than the 8 KB it needs), so a workgroup only ever touches its
++  // own head's bytes -- which is what makes the in-place materialisation below safe.
++  // Region layout: LZ_MAXVS regions of LZ_REGION bytes per head. Region z is owned by the
++  // row-split workgroup z: it carries a header, the gates and the q/k entries (identical copies
++  // in every region) and the v entries of ITS rows. A writer that runs unsplit (VS=1) fills
++  // every region, so a reader of either split always finds its own header -- and never shares
++  // a byte with the other workgroup of the same head (the two are not ordered by anything).
++  unsigned char* stash0 = (unsigned char*)(state + (size_t)stash_slot * st_slot
++                                           + (size_t)hv * st_head);
++  const int z = (VS > 1) ? (int)blockIdx.z : 0;
++  unsigned char* stash = stash0 + (size_t)z * LZ_REGION;
++  __shared__ lz_hdr s_hdr;
++  if (tid == 0) s_hdr = *(const lz_hdr*)stash;
++  __syncthreads();
++  const int vs_w = (s_hdr.vs_w == 2) ? 2 : 1;
++  const unsigned char* vreg = stash0 + (size_t)((row * vs_w) / LZ_V) * LZ_REGION;   // v rows of this row
++  // Candidate 0 of a step is ALWAYS accepted (it is the token the previous verify sampled), so
++  // its state is stored as the base right after it runs, and the replay covers only candidates
++  // 1 .. naccept-1 of the previous step: one token less of serial work per step. The stash holds
++  // candidates 1..T-1 at entries 0..T-2.
++  int r = 0;
++  if (s_hdr.magic == LZ_HDR_MAGIC && (int)s_hdr.base_slot == base_slot) {
++    r = naccept ? naccept[n] - 1 : 0;
++    if (r > (int)s_hdr.count) r = (int)s_hdr.count;
++    if (r > LZ_MAXT - 1) r = LZ_MAXT - 1;
++    if (r < 0) r = 0;
++  } else if (tid == 0 && naccept && naccept[n] > 1) {
++    atomicAdd(&lz_stale[0], 1u);                       // rx14: a replay was owed, the stash is stale
++  }
++
++  float h[LZ_HK];
++  gdn_state_load<STDT, LZ_HK>(h, state + (size_t)base_slot * st_slot + (size_t)hv * st_head
++                                     + (size_t)row * LZ_K + k0);
++  const float alog = __expf(A_log[hv]), dtb = dt_bias[hv];
++  float qq[LZ_HK], kk[LZ_HK];
++  uint4 rq[LZ_HK / 8], rk[LZ_HK / 8];      // raw bf16 of the token being prefetched
++  unsigned short rv = 0; float ra = 0.f, rb = 0.f;
++
++  const float* ab_st = (const float*)(stash + LZ_AB_OFF);
++#define LZ_FETCH_STASH(i)                                                                     \
++  do { const unsigned char* c_ = stash + LZ_CAND_OFF + (size_t)(i) * LZ_CAND_BYTES;          \
++       const uint4* sq_ = (const uint4*)(c_ + (size_t)k0 * 2);                               \
++       const uint4* sk_ = (const uint4*)(c_ + 256 + (size_t)k0 * 2);                         \
++       _Pragma("unroll") for (int j = 0; j < LZ_HK / 8; ++j) { rq[j] = sq_[j]; rk[j] = sk_[j]; } \
++       rv = ((const unsigned short*)(vreg + LZ_CAND_OFF + (size_t)(i) * LZ_CAND_BYTES + 512))[row]; \
++       ra = ab_st[2 * (i)]; rb = ab_st[2 * (i) + 1]; } while (0)
++#define LZ_FETCH_TOK(t)                                                                       \
++  do { const int tok_ = bos + (t);                                                            \
++       const uint4* sq_ = (const uint4*)(q + ((size_t)tok_ * Hg + hk) * LZ_K + k0);          \
++       const uint4* sk_ = (const uint4*)(k + ((size_t)tok_ * Hg + hk) * LZ_K + k0);          \
++       _Pragma("unroll") for (int j = 0; j < LZ_HK / 8; ++j) { rq[j] = sq_[j]; rk[j] = sk_[j]; } \
++       rv = v[((size_t)tok_ * H + hv) * LZ_V + row];                                          \
++       ra = lz_ab<ABF16>(av, (size_t)tok_ * ab_stride + hv);                                 \
++       rb = lz_ab<ABF16>(bv, (size_t)tok_ * ab_stride + hv); } while (0)
++
++  // ---- 2. replay the accepted candidates of the previous step ---------------------------------
++  if (r > 0) LZ_FETCH_STASH(0); else LZ_FETCH_TOK(0);
++  for (int i = 0; i < r; ++i) {
++    uint4 cq[LZ_HK / 8], ck[LZ_HK / 8];
++#pragma unroll
++    for (int j = 0; j < LZ_HK / 8; ++j) { cq[j] = rq[j]; ck[j] = rk[j]; }
++    const float cv = bf2f(rv), ca = ra, cb = rb;
++    if (i + 1 < r) LZ_FETCH_STASH(i + 1); else LZ_FETCH_TOK(0);
++    lz_norm(cq, ck, qq, kk, scale);
++    const float g  = -alog * lz_softplus(ca + dtb, sp_thr);
++    const float bt = 1.0f / (1.0f + __expf(-cb));
++    (void)lz_step(h, qq, kk, cv, __expf(g), bt);
++  }
++  __syncthreads();                       // the stash we read is overwritten below
++
++  // ---- 4. this step's candidates: outputs only, inputs stashed for the next replay ------------
++  for (int t = 0; t < T; ++t) {
++    const int tok = bos + t;
++    uint4 cq[LZ_HK / 8], ck[LZ_HK / 8];
++#pragma unroll
++    for (int j = 0; j < LZ_HK / 8; ++j) { cq[j] = rq[j]; ck[j] = rk[j]; }
++    const unsigned short cvraw = rv; const float ca = ra, cb = rb;
++    if (t + 1 < T) LZ_FETCH_TOK(t + 1);
++    if (t >= 1 && t <= LZ_MAXT - 1) {
++      const int e = t - 1;
++      // q/k quarter-rows and gates: this workgroup's region, plus every other region when it
++      // runs unsplit (a later split reader owns region 1). Row e's four threads carry q/k.
++#pragma unroll
++      for (int rg = 0; rg < LZ_MAXVS; ++rg) {
++        if (VS > 1 && rg != z) continue;
++        unsigned char* c = stash0 + (size_t)rg * LZ_REGION + LZ_CAND_OFF + (size_t)e * LZ_CAND_BYTES;
++        if (lrow == (e % NR)) {
++          uint4* dq = (uint4*)(c + (size_t)k0 * 2); uint4* dk = (uint4*)(c + 256 + (size_t)k0 * 2);
++#pragma unroll
++          for (int j = 0; j < LZ_HK / 8; ++j) { dq[j] = cq[j]; dk[j] = ck[j]; }
++        }
++        if (tid == 0) { float* abw = (float*)(stash0 + (size_t)rg * LZ_REGION + LZ_AB_OFF); abw[2 * e] = ca; abw[2 * e + 1] = cb; }
++      }
++      // v: row `row` lands in region (row * VS / 128) -- this workgroup's own region
++      if (quarter == 0) ((unsigned short*)(stash + LZ_CAND_OFF + (size_t)e * LZ_CAND_BYTES + 512))[row] = cvraw;
++    }
++    lz_norm(cq, ck, qq, kk, scale);
++    const float g  = -alog * lz_softplus(ca + dtb, sp_thr);
++    const float bt = 1.0f / (1.0f + __expf(-cb));
++    float on = lz_step(h, qq, kk, bf2f(cvraw), __expf(g), bt);
++    on = lz_rowsum(on);
++    if (quarter == 0) o[((size_t)tok * H + hv) * LZ_V + row] = f2bf(on);
++    // ---- 3. candidate 0 is always accepted: the state after it is the new base ---------------
++    if (t == 0)
++      gdn_state_store<STDT, LZ_HK>(state + (size_t)base_slot * st_slot + (size_t)hv * st_head
++                                         + (size_t)row * LZ_K + k0, h);
++  }
++  __syncthreads();
++  if (tid == 0) {
++    lz_hdr hd; hd.magic = LZ_HDR_MAGIC; hd.count = (T - 1) < (LZ_MAXT - 1) ? (T - 1) : (LZ_MAXT - 1);
++    hd.base_slot = (unsigned)base_slot; hd.vs_w = (unsigned)VS;
++#pragma unroll
++    for (int rg = 0; rg < LZ_MAXVS; ++rg) {
++      if (VS > 1 && rg != z) continue;
++      *(lz_hdr*)(stash0 + (size_t)rg * LZ_REGION) = hd;
++    }
++  }
++#undef LZ_FETCH_STASH
++#undef LZ_FETCH_TOK
++}
++
++// ---- materialise: the state after candidate `count` of the previous step, written to a slot ---
++//
++// This is what vLLM's align-mode state copies need from a lazy cache. The eager cache copies a
++// per-candidate snapshot (column src + bias); here the same state is base + replay of stash
++// entries 0 .. count-1 (candidates 1 .. count). Two callers, both GPU-driven so nothing syncs:
++//   MODE 0 (pre-forward migration): request rows whose running block moved (src_col != dst_col):
++//     base = bt[src_col], stash = bt[src_col + 1], count = token_bias (= naccept - 1),
++//     dst = bt[dst_col]. dst IS the old stash block (the window slid by one), so the replay
++//     reads the stash before the state overwrites it (one barrier). The block after dst is the
++//     new stash block: its headers are invalidated so a stale stash can never replay.
++//   MODE 1 (post-step checkpoint): rows whose accepted tokens crossed a block boundary:
++//     count = aligned_new_computed - running, dst = the aligned block (== src when the boundary
++//     token is the last accepted one -- then vLLM resets naccept to 1 and the base is complete).
++// Grid (num_reqs, H, num_temporal_states); every state tensor / block table / gate vector comes
++// through pointer tables so all 48 layers are one launch.
++struct lz_tables {
++  const long long* state_ptrs;     // [n_states] temporal state tensors
++  const long long* slot_strides;   // [n_states] bytes per slot
++  const int*       group_idx;      // [n_states] mamba group -> block table
++  const long long* alog_ptrs;      // [n_states] A_log (fp32[H])
++  const long long* dtb_ptrs;       // [n_states] dt_bias (fp32[H])
++  const long long* bt_ptrs;        // [n_groups] int32 block tables [rows, cols]
++  long long        bt_stride_req;  // elements between rows
++  const int*       idx_mapping;    // [num_reqs] batch row -> request slot, or null
++};
++
++template <int STDT>
++__global__ __launch_bounds__(LZ_THR)
++void r4d_gdn_lazy_materialize_kernel(lz_tables tb, int mode,
++                                     const int* __restrict__ state_idx,     // dst col (mode 0) / running col (mode 1)
++                                     const int* __restrict__ src_col,       // mode 0
++                                     const int* __restrict__ token_bias,    // mode 0
++                                     const int* __restrict__ num_accepted,  // mode 1
++                                     const int* __restrict__ new_computed,  // mode 1
++                                     int block_size, int H, int Hg, long st_head,
++                                     float scale, float sp_thr)
++{
++  const int b = blockIdx.x, hv = blockIdx.y, si = blockIdx.z;
++  const int req = tb.idx_mapping ? tb.idx_mapping[b] : b;
++  if (req < 0) return;
++  if (mode == 2) {
++    // rx14: a prefilling request may have been handed a stash block whose header an EARLIER
++    // request wrote against the same (recycled) base slot. The update kernel does not run during
++    // prefill, so nothing else clears it, and the first decode step would replay another
++    // request's candidates. Zero the header of EVERY region (the update kernel reads region z
++    // when it splits rows, VS=2 at one sequence). num_accepted carries the per-batch-row prefill
++    // mask in this mode; state_idx is the running column, so the stash is the column after it.
++    if (!num_accepted[b]) return;
++    const int* bt2 = (const int*)tb.bt_ptrs[tb.group_idx[si]] + (size_t)b * tb.bt_stride_req;
++    const int stash2 = bt2[state_idx[req] + 1];
++    if (stash2 <= 0 || threadIdx.x != 0) return;
++    gdn_state_t<STDT>* st2 = (gdn_state_t<STDT>*)tb.state_ptrs[si];
++    const long sl2 = tb.slot_strides[si] / (long)sizeof(gdn_state_t<STDT>);
++    unsigned char* ns2 = (unsigned char*)(st2 + (size_t)stash2 * sl2 + (size_t)hv * st_head);
++    lz_hdr z2; z2.magic = 0; z2.count = 0; z2.base_slot = 0; z2.vs_w = 0;
++    for (int rg = 0; rg < LZ_MAXVS; ++rg) *(lz_hdr*)(ns2 + (size_t)rg * LZ_REGION) = z2;
++    if (hv == 0 && si == 0) atomicAdd(&lz_stale[3], 1u);
++    return;
++  }
++  int base_col, dst_col, count;
++  if (mode == 0) {
++    base_col = src_col[req]; dst_col = state_idx[req];
++    if (base_col < 0 || base_col == dst_col) return;
++    count = token_bias[req];
++  } else {
++    const int nacc = num_accepted[req];
++    base_col = state_idx[req];
++    const int newc = new_computed[req];
++    const int running = newc - nacc + 1;
++    const int aligned = (newc / block_size) * block_size;
++    if (aligned < running) return;
++    count = aligned - running;
++    dst_col = aligned / block_size - 1;
++    if (dst_col == base_col && count == 0) return;
++  }
++  const int* bt = (const int*)tb.bt_ptrs[tb.group_idx[si]] + (size_t)b * tb.bt_stride_req;
++  const int base_slot = bt[base_col], stash_slot = bt[base_col + 1], dst_slot = bt[dst_col];
++  if (base_slot <= 0 || stash_slot <= 0 || dst_slot <= 0) return;
++  gdn_state_t<STDT>* state = (gdn_state_t<STDT>*)tb.state_ptrs[si];
++  const long st_slot = tb.slot_strides[si] / (long)sizeof(gdn_state_t<STDT>);
++  const float* A_log = (const float*)tb.alog_ptrs[si];
++  const float* dt_bias = (const float*)tb.dtb_ptrs[si];
++
++  const int tid = threadIdx.x;
++  const int row = tid / LZ_TPR, quarter = tid % LZ_TPR, k0 = quarter * LZ_HK;
++  const int hk = hv / (H / Hg);
++  unsigned char* stash = (unsigned char*)(state + (size_t)stash_slot * st_slot + (size_t)hv * st_head);
++  __shared__ lz_hdr s_hdr;
++  if (tid == 0) s_hdr = *(const lz_hdr*)stash;          // region 0
++  __syncthreads();
++  const int vs_w = (s_hdr.vs_w == 2) ? 2 : 1;
++  const unsigned char* vreg = stash + (size_t)((row * vs_w) / LZ_V) * LZ_REGION;
++  int r = 0;
++  if (s_hdr.magic == LZ_HDR_MAGIC && (int)s_hdr.base_slot == base_slot) {
++    r = count;
++    if (r > (int)s_hdr.count) r = (int)s_hdr.count;
++    if (r > LZ_MAXT - 1) r = LZ_MAXT - 1;
++    if (r < 0) r = 0;
++  } else if (tid == 0 && count > 0) {
++    atomicAdd(&lz_stale[mode == 0 ? 1 : 2], 1u);       // rx14: stale stash, `count` candidates lost
++  }
++  float h[LZ_HK];
++  gdn_state_load<STDT, LZ_HK>(h, state + (size_t)base_slot * st_slot + (size_t)hv * st_head
++                                     + (size_t)row * LZ_K + k0);
++  const float alog = __expf(A_log[hv]), dtb = dt_bias[hv];
++  float qq[LZ_HK], kk[LZ_HK];
++  const float* ab_st = (const float*)(stash + LZ_AB_OFF);
++  for (int i = 0; i < r; ++i) {
++    const unsigned char* c = stash + LZ_CAND_OFF + (size_t)i * LZ_CAND_BYTES;
++    uint4 cq[LZ_HK / 8], ck[LZ_HK / 8];
++    const uint4* sq = (const uint4*)(c + (size_t)k0 * 2); const uint4* sk = (const uint4*)(c + 256 + (size_t)k0 * 2);
++#pragma unroll
++    for (int j = 0; j < LZ_HK / 8; ++j) { cq[j] = sq[j]; ck[j] = sk[j]; }
++    const float cv = bf2f(((const unsigned short*)(vreg + LZ_CAND_OFF + (size_t)i * LZ_CAND_BYTES + 512))[row]);
++    const float ca = ab_st[2 * i], cb = ab_st[2 * i + 1];
++    lz_norm(cq, ck, qq, kk, scale);
++    const float g  = -alog * lz_softplus(ca + dtb, sp_thr);
++    const float bt_ = 1.0f / (1.0f + __expf(-cb));
++    (void)lz_step(h, qq, kk, cv, __expf(g), bt_);
++  }
++  __syncthreads();                       // every stash read of this head is done before dst is written
++  gdn_state_store<STDT, LZ_HK>(state + (size_t)dst_slot * st_slot + (size_t)hv * st_head
++                                     + (size_t)row * LZ_K + k0, h);
++  if (mode == 0 && tid == 0) {
++    // the block after the new running block is the new stash block: its header must not replay
++    const int new_stash = bt[dst_col + 1];
++    if (new_stash > 0) {
++      unsigned char* ns = (unsigned char*)(state + (size_t)new_stash * st_slot + (size_t)hv * st_head);
++      lz_hdr z; z.magic = 0; z.count = 0; z.base_slot = 0; z.vs_w = 0;
++      for (int rg = 0; rg < LZ_MAXVS; ++rg) *(lz_hdr*)(ns + (size_t)rg * LZ_REGION) = z;
++    }
++  }
++}
++
++template <int STDT>
++static int lz_materialize_launch(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream)
++{
++  if (K != LZ_K || V != LZ_V) return -1;
++  if (H % Hg) return -2;
++  if (num_reqs <= 0 || n_states <= 0) return 0;
++  lz_tables tb;
++  tb.state_ptrs = (const long long*)state_ptrs; tb.slot_strides = (const long long*)slot_strides;
++  tb.group_idx = (const int*)group_idx; tb.alog_ptrs = (const long long*)alog_ptrs;
++  tb.dtb_ptrs = (const long long*)dtb_ptrs; tb.bt_ptrs = (const long long*)bt_ptrs;
++  tb.bt_stride_req = bt_stride_req; tb.idx_mapping = (const int*)idx_mapping;
++  dim3 grid(num_reqs, H, n_states), blk(LZ_THR);
++  hipLaunchKernelGGL((r4d_gdn_lazy_materialize_kernel<STDT>), grid, blk, 0, (hipStream_t)stream,
++                     tb, mode, (const int*)state_idx, (const int*)src_col, (const int*)token_bias,
++                     (const int*)num_accepted, (const int*)new_computed, block_size, H, Hg,
++                     st_head, scale, softplus_thr);
++  return (int)hipGetLastError();
++}
++
++template <int STDT>
++static int lz_launch(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++    void* stream)
++{
++  if (K != LZ_K || V != LZ_V) return -1;
++  if (H % Hg) return -2;
++  if ((size_t)state_head_stride * sizeof(gdn_state_t<STDT>) < LZ_HEAD_BYTES) return -4;
++  // Fill the machine at small N: 48 (seq, head) items on 64 CUs split their rows in two.
++  const int vs = (N * H < 64) ? 2 : 1;
++  dim3 grid(N, H, vs), blk(LZ_THR / vs);
++#define LZ_LAUNCH(AB)                                                                         \
++  do { if (vs == 2) LZ_LAUNCH_V(AB, 2); else LZ_LAUNCH_V(AB, 1); } while (0)
++#define LZ_LAUNCH_V(AB, VSC)                                                                  \
++  hipLaunchKernelGGL((r4d_gdn_lazy_update_kernel<AB, STDT, VSC>), grid, blk, 0, (hipStream_t)stream,\
++                     (const unsigned short*)q, (const unsigned short*)k,                      \
++                     (const unsigned short*)v, a, b, ab_stride,                               \
++                     (const float*)A_log, (const float*)dt_bias,                              \
++                     (gdn_state_t<STDT>*)state, state_slot_stride, state_head_stride,         \
++                     (unsigned short*)o, (const int*)cu, (const int*)ssm_state_indices,       \
++                     indices_stride, (const int*)num_accepted, H, Hg, stash_col, scale,       \
++                     softplus_thr)
++  if (ab_is_bf16) LZ_LAUNCH(1); else LZ_LAUNCH(0);
++#undef LZ_LAUNCH_V
++#undef LZ_LAUNCH
++  return (int)hipGetLastError();
++}
+diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
+new file mode 100644
+index 0000000..008c468
+--- /dev/null
++++ b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
+@@ -0,0 +1,37 @@
++// r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip -- lazy-snapshot GDN decode update, bf16state cache.
++// See r4d_gdn_lazy_update_k128_v128.h and r4d_gdn_state.h.
++#include "r4d_gdn_lazy_update_k128_v128.h"
++
++extern "C" int r4d_gdn_lazy_update_k128_v128_bf16_bf16state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++    void* stream)
++{
++  return lz_launch<R4D_ST_BF16>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                       state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                       indices_stride, num_accepted, N, H, Hg, K, V, stash_col, scale,
++                       softplus_thr, stream);
++}
++
++extern "C" int r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream)
++{
++  return lz_materialize_launch<R4D_ST_BF16>(state_ptrs, slot_strides, group_idx, alog_ptrs, dtb_ptrs,
++                                   bt_ptrs, bt_stride_req, idx_mapping, mode, state_idx, src_col,
++                                   token_bias, num_accepted, new_computed, block_size, num_reqs,
++                                   n_states, H, Hg, K, V, st_head, scale, softplus_thr, stream);
++}
++
++// rx14: this unit's stale-stash counters (see r4d_gdn_lazy_update_k128_v128.h).
++extern "C" int r4d_gdn_lazy_stale_counts_bf16state(unsigned int* out4, int reset)
++{
++  return lz_stale_read(out4, reset);
++}
+diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip
+new file mode 100644
+index 0000000..40040f3
+--- /dev/null
++++ b/r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip
+@@ -0,0 +1,37 @@
++// r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip -- lazy-snapshot GDN decode update, f16state cache.
++// See r4d_gdn_lazy_update_k128_v128.h.
++#include "r4d_gdn_lazy_update_k128_v128.h"
++
++extern "C" int r4d_gdn_lazy_update_k128_v128_bf16_f16state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++    void* stream)
++{
++  return lz_launch<R4D_ST_F16>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                       state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                       indices_stride, num_accepted, N, H, Hg, K, V, stash_col, scale,
++                       softplus_thr, stream);
++}
++
++extern "C" int r4d_gdn_lazy_materialize_k128_v128_bf16_f16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream)
++{
++  return lz_materialize_launch<R4D_ST_F16>(state_ptrs, slot_strides, group_idx, alog_ptrs, dtb_ptrs,
++                                   bt_ptrs, bt_stride_req, idx_mapping, mode, state_idx, src_col,
++                                   token_bias, num_accepted, new_computed, block_size, num_reqs,
++                                   n_states, H, Hg, K, V, st_head, scale, softplus_thr, stream);
++}
++
++// rx14: this unit's stale-stash counters (see r4d_gdn_lazy_update_k128_v128.h).
++extern "C" int r4d_gdn_lazy_stale_counts_f16state(unsigned int* out4, int reset)
++{
++  return lz_stale_read(out4, reset);
++}
+diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_fp32state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_fp32state.hip
+new file mode 100644
+index 0000000..ab178dc
+--- /dev/null
++++ b/r4d_gdn_lazy_update_k128_v128_bf16_fp32state.hip
+@@ -0,0 +1,37 @@
++// r4d_gdn_lazy_update_k128_v128_bf16_fp32state.hip -- lazy-snapshot GDN decode update, fp32state cache.
++// See r4d_gdn_lazy_update_k128_v128.h.
++#include "r4d_gdn_lazy_update_k128_v128.h"
++
++extern "C" int r4d_gdn_lazy_update_k128_v128_bf16_fp32state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++    void* stream)
++{
++  return lz_launch<R4D_ST_F32>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                       state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                       indices_stride, num_accepted, N, H, Hg, K, V, stash_col, scale,
++                       softplus_thr, stream);
++}
++
++extern "C" int r4d_gdn_lazy_materialize_k128_v128_bf16_fp32state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream)
++{
++  return lz_materialize_launch<R4D_ST_F32>(state_ptrs, slot_strides, group_idx, alog_ptrs, dtb_ptrs,
++                                   bt_ptrs, bt_stride_req, idx_mapping, mode, state_idx, src_col,
++                                   token_bias, num_accepted, new_computed, block_size, num_reqs,
++                                   n_states, H, Hg, K, V, st_head, scale, softplus_thr, stream);
++}
++
++// rx14: this unit's stale-stash counters (see r4d_gdn_lazy_update_k128_v128.h).
++extern "C" int r4d_gdn_lazy_stale_counts_fp32state(unsigned int* out4, int reset)
++{
++  return lz_stale_read(out4, reset);
++}
+diff --git a/r4d_gdn_recurrent_update_k128_v128.h b/r4d_gdn_recurrent_update_k128_v128.h
+new file mode 100644
+index 0000000..bfc30e3
+--- /dev/null
++++ b/r4d_gdn_recurrent_update_k128_v128.h
+@@ -0,0 +1,231 @@
++// Shared implementation of the GDN recurrent update, templated on the state cache dtype.
++// The thin translation units beside it (..._bf16_fp32state.hip / ..._bf16_bf16state.hip)
++// each instantiate one and export its entry point, so an entry-point name keeps naming
++// exactly one geometry -- including the state dtype, which callers must match.
++#pragma once
++// r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip -- the gated-delta-net recurrent state update, which is what
++// decode runs where prefill runs the chunked scan. One kernel for the whole step:
++//
++//     g = -exp(A_log) . softplus(a + dt_bias)      beta = sigmoid(b)      q, k l2-normalised
++//     S  *= e^g
++//     u   = beta . (v - S k)                       S += u k^T              o = S q
++//
++// per token, against a PAGED state cache: the initial state is read from the slot the last
++// accepted token wrote, and every candidate token writes its own slot, because which of them
++// survives verification is not known until after this layer has run. It replaces FLA's
++// fused_sigmoid_gating_delta_rule_update, and its non-speculative sibling falls out as the
++// width-1 case.
++//
++// THE STATE TRAFFIC IS THE WHOLE COST. One [V,K] state is 64 KB, and a speculative step writes
++// one per candidate token per head: at width 9 that is 113 MB per layer per rank, at the
++// bandwidth limit of this part. So this kernel is a port that removes a Triton dependency and
++// a kernel launch, not an arithmetic win, and it is written to keep the state resident rather
++// than to be clever: one thread owns one v row and half its k range, so
++//
++//   * S k and S q are in-lane dot products closed by a single lane<->lane^1 exchange, not a
++//     tree reduction;
++//   * the outer-product update is 64 independent FMAs with no cross-lane traffic at all;
++//   * a thread's 64 state elements are contiguous in k, so the load and every store is four
++//     16-byte accesses over one 256-byte run.
++//
++// The state cache is fp32 -- this model's HF config sets mamba_ssm_dtype=float32, which vLLM
++// honours over the `auto` mamba dtype, so the temporal state is fp32 while the conv state is
++// bf16. That is also what makes the state traffic the cost: one [V,K] state is 64 KB, not 32.
++//
++// The slot and head strides are ARGUMENTS, not H*V*K: vLLM pads the mamba page so it matches the
++// attention page size (here 421888 elements per slot against the 393216 the shape implies), and a
++// kernel that derives the stride from the shape reads every slot but the first at the wrong
++// offset -- which looks like a correct kernel producing noise.
++#include <hip/hip_runtime.h>
++#include "r4d.h"
++#include "r4d_gdn_wmma.h"
++#include "r4d_gdn_state.h"
++
++#define RU_K   128              // head_k
++#define RU_V   128              // head_v
++#define RU_HK   64              // k elements per thread (RU_K / 2)
++#define RU_THR (RU_V * 2)       // two threads per v row
++// VS: how many workgroups share a head's 128 v rows. The grid is (sequences, heads), which at
++// one sequence is 24 workgroups on 64 CUs -- 37% of the machine, and the kernel is not DRAM
++// bound there (its whole working set fits the 64 MB last level). Nothing in a v row's update
++// crosses to another v row: the two dot products contract over k, and the outer-product update
++// is per (v, k). Only the fused RMS norm spans the row, so VS > 1 is compiled without it.
++#ifndef VSMAX
++#define VSMAX 4
++#endif
++
++__device__ __forceinline__ float ru_softplus(float x, float thr) {
++  if (x > thr) return x;
++  return (x > 0.0f) ? (x + __logf(1.0f + __expf(-x))) : __logf(1.0f + __expf(x));
++}
++
++// a and b are a chunk() of the ba projection: bf16, strided by 2*H. See r4d_gdn_conv_w4_h128_bf16.hip.
++template <int ABF16>
++__device__ __forceinline__ float ru_ab(const void* p, size_t i) {
++  return ABF16 ? bf2f(((const unsigned short*)p)[i]) : ((const float*)p)[i];
++}
++
++// The layer's gated RMS norm, folded into the epilogue. A workgroup here owns one (sequence,
++// head) and therefore the WHOLE 128-channel row of the output, which is exactly what an RMS needs
++// -- so on this path the norm costs one workgroup reduction per token and no kernel launch, no
++// second pass over the output, and no read of it back from HBM. The prefill path cannot do this
++// (its workgroup owns half a row) and calls r4d_gdn_gated_rmsnorm_h128_bf16 instead.
++__device__ __forceinline__ float ru_act(float z, int kind) {
++  const float s = 1.0f / (1.0f + __expf(-z));
++  return kind ? s : z * s;
++}
++
++template <int ABF16, int NORM, int VS, int STDT>
++__global__ __launch_bounds__(RU_V / VS * 2)
++void r4d_gdn_recurrent_update_kernel(const unsigned short* __restrict__ q,
++                                     const unsigned short* __restrict__ k,
++                                     const unsigned short* __restrict__ v,
++                                     const void* __restrict__ av,
++                                     const void* __restrict__ bv, long ab_stride,
++                                     const float* __restrict__ A_log,
++                                     const float* __restrict__ dt_bias,
++                                     gdn_state_t<STDT>* __restrict__ state,
++                                     long st_slot, long st_head,
++                                     unsigned short* __restrict__ o,
++                                     const int* __restrict__ cu,
++                                     const int* __restrict__ sidx, long sidx_stride,
++                                     const int* __restrict__ naccept,
++                                     const unsigned short* __restrict__ zg,
++                                     const float* __restrict__ nw, float neps, int nact,
++                                     int H, int Hg, float scale, float sp_thr)
++{
++  constexpr int NR = RU_V / VS;         // v rows this workgroup owns
++  constexpr int THR = NR * 2;
++  static_assert(!(NORM && VS > 1), "the fused row norm needs the whole 128-wide row");
++  __shared__ float wsum[THR / 32];
++  const int n = blockIdx.x, hv = blockIdx.y;
++  const int bos = cu[n], T = cu[n + 1] - bos;
++  if (T <= 0) return;
++
++  const int tid = threadIdx.x;
++  const int row = (tid >> 1) + (VS > 1 ? blockIdx.z * NR : 0), half = tid & 1, k0 = half * RU_HK;
++  const int hk = hv / (H / Hg);
++
++  // the initial state is the one the last accepted token of the previous step wrote
++  const int it = naccept ? (naccept[n] - 1) : 0;
++  const int si = sidx[(size_t)n * sidx_stride + it];
++  if (si <= 0) return;                                  // NULL_BLOCK_ID: nothing scheduled here
++
++  float h[RU_HK];
++  {
++    const gdn_state_t<STDT>* p = state + (size_t)si * st_slot + (size_t)hv * st_head
++                   + (size_t)row * RU_K + k0;
++    gdn_state_load<STDT, RU_HK>(h, p);
++  }
++
++  const float alog = __expf(A_log[hv]), dtb = dt_bias[hv];
++
++  for (int t = 0; t < T; ++t) {
++    const int tok = bos + t;
++    const unsigned short* qp = q + ((size_t)tok * Hg + hk) * RU_K + k0;
++    const unsigned short* kp = k + ((size_t)tok * Hg + hk) * RU_K + k0;
++
++    float qq[RU_HK], kk[RU_HK];
++#pragma unroll
++    for (int j = 0; j < RU_HK; j += 8) {
++      const uint4 wq = *(const uint4*)(qp + j), wk = *(const uint4*)(kp + j);
++      const unsigned short* sq = (const unsigned short*)&wq;
++      const unsigned short* sk = (const unsigned short*)&wk;
++#pragma unroll
++      for (int e = 0; e < 8; ++e) { qq[j + e] = bf2f(sq[e]); kk[j + e] = bf2f(sk[e]); }
++    }
++
++    // l2 norms: 64 in-lane terms, then one exchange with the lane holding the other half
++    float sq = 0.0f, sk = 0.0f;
++#pragma unroll
++    for (int j = 0; j < RU_HK; ++j) { sq += qq[j] * qq[j]; sk += kk[j] * kk[j]; }
++    sq += __shfl_xor(sq, 1, 32);
++    sk += __shfl_xor(sk, 1, 32);
++    const float qs = __frsqrt_rn(sq + 1e-6f) * scale, ks = __frsqrt_rn(sk + 1e-6f);
++#pragma unroll
++    for (int j = 0; j < RU_HK; ++j) { qq[j] *= qs; kk[j] *= ks; }
++
++    const float g   = -alog * ru_softplus(
++        ru_ab<ABF16>(av, (size_t)tok * ab_stride + hv) + dtb, sp_thr);
++    const float bt  = 1.0f / (1.0f + __expf(-ru_ab<ABF16>(bv, (size_t)tok * ab_stride + hv)));
++    const float eg  = __expf(g);
++
++    float dot = 0.0f;
++#pragma unroll
++    for (int j = 0; j < RU_HK; ++j) { h[j] *= eg; dot += h[j] * kk[j]; }
++    dot += __shfl_xor(dot, 1, 32);
++
++    const float u = (bf2f(v[((size_t)tok * H + hv) * RU_V + row]) - dot) * bt;
++
++    float on = 0.0f;
++#pragma unroll
++    for (int j = 0; j < RU_HK; ++j) { h[j] += u * kk[j]; on += h[j] * qq[j]; }
++    on += __shfl_xor(on, 1, 32);
++
++    if (NORM) {
++      // sum of squares over the row: each pair holds one channel, so one wave covers 16 of them
++      float sq = (half == 0) ? on * on : 0.0f;
++#pragma unroll
++      for (int m = 16; m; m >>= 1) sq += __shfl_xor(sq, m, 32);
++      if ((threadIdx.x & 31) == 0) wsum[threadIdx.x >> 5] = sq;
++      __syncthreads();
++      float tot = 0.0f;
++#pragma unroll
++      for (int i = 0; i < THR / 32; ++i) tot += wsum[i];
++      const float sc = __frsqrt_rn(tot * (1.0f / RU_V) + neps);
++      on *= sc * nw[row] * ru_act(bf2f(zg[((size_t)tok * H + hv) * RU_V + row]), nact);
++      __syncthreads();                 // wsum is reused by the next token
++    }
++
++    if (half == 0) o[((size_t)tok * H + hv) * RU_V + row] = f2bf(on);
++
++    const int so = sidx[(size_t)n * sidx_stride + t];
++    if (so > 0) {
++      gdn_state_t<STDT>* p = state + (size_t)so * st_slot + (size_t)hv * st_head
++               + (size_t)row * RU_K + k0;
++      gdn_state_store<STDT, RU_HK>(p, h);
++    }
++  }
++}
++
++template <int STDT>
++static int ru_launch(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
++    int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream)
++{
++  if (K != RU_K || V != RU_V) return -1;
++  if (H % Hg) return -2;
++  const int nm0 = (z_gate && norm_weight) ? 1 : 0;
++  // Fill the machine: at one sequence the (N, H) grid is 24 workgroups. Split a head's v rows
++  // until there are at least 64 workgroups, but never past four (that is 64 threads, two waves).
++  int vs = 1;
++  if (!nm0) { const int want = (64 + N * H - 1) / (N * H);
++              vs = want >= 4 ? 4 : (want >= 2 ? 2 : 1);
++              if (vs > VSMAX) vs = VSMAX; }
++  dim3 grid(N, H, vs), blk(RU_V / vs * 2);
++#define RU_LAUNCH(AB, NM, VSC)                                                                \
++  hipLaunchKernelGGL((r4d_gdn_recurrent_update_kernel<AB, NM, VSC, STDT>), grid, blk, 0,            \
++                     (hipStream_t)stream,                                                     \
++                     (const unsigned short*)q, (const unsigned short*)k,                      \
++                     (const unsigned short*)v, a, b, ab_stride,                               \
++                     (const float*)A_log, (const float*)dt_bias,                              \
++                     (gdn_state_t<STDT>*)state,                                            \
++                     state_slot_stride, state_head_stride,                                    \
++                     (unsigned short*)o, (const int*)cu, (const int*)ssm_state_indices,       \
++                     indices_stride, (const int*)num_accepted,                                \
++                     (const unsigned short*)z_gate, (const float*)norm_weight, norm_eps,      \
++                     norm_act, H, Hg, scale, softplus_thr)
++#define RU_PICKV(AB)                                                                          \
++  do { if (vs == 4)      RU_LAUNCH(AB, 0, 4);                                                 \
++       else if (vs == 2) RU_LAUNCH(AB, 0, 2);                                                 \
++       else              RU_LAUNCH(AB, 0, 1); } while (0)
++  if (ab_is_bf16) { if (nm0) RU_LAUNCH(1, 1, 1); else RU_PICKV(1); }
++  else            { if (nm0) RU_LAUNCH(0, 1, 1); else RU_PICKV(0); }
++#undef RU_PICKV
++#undef RU_LAUNCH
++  return (int)hipGetLastError();
++}
+diff --git a/r4d_gdn_recurrent_update_k128_v128_bf16_bf16state.hip b/r4d_gdn_recurrent_update_k128_v128_bf16_bf16state.hip
+new file mode 100644
+index 0000000..1d20325
+--- /dev/null
++++ b/r4d_gdn_recurrent_update_k128_v128_bf16_bf16state.hip
+@@ -0,0 +1,36 @@
++// r4d_gdn_recurrent_update_k128_v128_bf16_bf16state.hip -- the GDN recurrent update against a
++// **bf16** paged state cache, selected with --mamba-ssm-cache-dtype=bfloat16 (which vLLM lets the
++// user set over the model config's mamba_ssm_dtype, with a warning).
++//
++// Halving the state halves the whole cost of this kernel, because the state traffic IS the cost:
++// one [V,K] snapshot per candidate token per head. Measured against the fp32 entry at H=24 v-heads
++// per rank (TP=2), conv+recurrent pair, us/call:
++//
++//     N=1 T=8   31.4 -> 26.5   (-16%)      N=8 T=5   60.3 -> 44.3   (-26%)
++//     N=4 T=6   41.7 -> 32.6   (-22%)      N=8 T=8  168.9 -> 60.9   (-64%)
++//
++// The last row is the one that matters: at fp32 an eight-wide draft at batch eight puts 100.7 MB
++// of state against a 64 MB last level and falls off a capacity cliff; at bf16 it is 50.3 MB and
++// costs what a FIVE-wide draft costs today. See the header for the accumulator/precision split.
++//
++// The kernel itself lives in r4d_gdn_recurrent_update_k128_v128.h; this unit only instantiates it
++// for the bf16 state and exports the entry point. Its fp32 sibling is
++// r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip. Two entry points rather than a runtime
++// flag because the state dtype IS part of the geometry: a caller that hands an fp32 cache to the
++// bf16 entry reads half the bytes it should and faults, so the registry makes state_dtype a
++// matched constraint and select() can never return the wrong one.
++#include "r4d_gdn_recurrent_update_k128_v128.h"
++
++extern "C" int r4d_gdn_recurrent_update_k128_v128_bf16_bf16state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
++    int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream)
++{
++  return ru_launch<R4D_ST_BF16>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                      state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                      indices_stride, num_accepted, z_gate, norm_weight, norm_eps, norm_act,
++                      N, H, Hg, K, V, scale, softplus_thr, stream);
++}
+diff --git a/r4d_gdn_recurrent_update_k128_v128_bf16_f16state.hip b/r4d_gdn_recurrent_update_k128_v128_bf16_f16state.hip
+new file mode 100644
+index 0000000..9f2e3dd
+--- /dev/null
++++ b/r4d_gdn_recurrent_update_k128_v128_bf16_f16state.hip
+@@ -0,0 +1,22 @@
++// r4d_gdn_recurrent_update_k128_v128_bf16_f16state.hip -- the GDN recurrent update against an
++// **f16** paged state cache (--mamba-ssm-cache-dtype=float16).
++//
++// The same 32 KB snapshot as the bf16 sibling, but f16 is the better 16-bit choice on this part:
++// 10 mantissa bits against bf16's 7, and v_cvt_pkrtz_f16_f32 packs a pair in ONE instruction where
++// bf16 (which gfx1201 cannot convert in hardware) needs three. Strictly finer and strictly cheaper;
++// what it gives up is exponent range, which this state does not use. See r4d_gdn_state.h.
++#include "r4d_gdn_recurrent_update_k128_v128.h"
++
++extern "C" int r4d_gdn_recurrent_update_k128_v128_bf16_f16state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
++    int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream)
++{
++  return ru_launch<R4D_ST_F16>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                      state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                      indices_stride, num_accepted, z_gate, norm_weight, norm_eps, norm_act,
++                      N, H, Hg, K, V, scale, softplus_thr, stream);
++}
+diff --git a/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip b/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip
+index 2a2abac..4075e6a 100644
+--- a/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip
++++ b/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip
+@@ -1,187 +1,14 @@
+-// r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip -- the gated-delta-net recurrent state update, which is what
+-// decode runs where prefill runs the chunked scan. One kernel for the whole step:
++// r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip -- the GDN recurrent update against an
++// **fp32** paged state cache, which is what this model's HF config asks for (mamba_ssm_dtype=
++// float32, honoured by vLLM over the `auto` mamba dtype).
+ //
+-//     g = -exp(A_log) . softplus(a + dt_bias)      beta = sigmoid(b)      q, k l2-normalised
+-//     S  *= e^g
+-//     u   = beta . (v - S k)                       S += u k^T              o = S q
+-//
+-// per token, against a PAGED state cache: the initial state is read from the slot the last
+-// accepted token wrote, and every candidate token writes its own slot, because which of them
+-// survives verification is not known until after this layer has run. It replaces FLA's
+-// fused_sigmoid_gating_delta_rule_update, and its non-speculative sibling falls out as the
+-// width-1 case.
+-//
+-// THE STATE TRAFFIC IS THE WHOLE COST. One [V,K] state is 64 KB, and a speculative step writes
+-// one per candidate token per head: at width 9 that is 113 MB per layer per rank, at the
+-// bandwidth limit of this part. So this kernel is a port that removes a Triton dependency and
+-// a kernel launch, not an arithmetic win, and it is written to keep the state resident rather
+-// than to be clever: one thread owns one v row and half its k range, so
+-//
+-//   * S k and S q are in-lane dot products closed by a single lane<->lane^1 exchange, not a
+-//     tree reduction;
+-//   * the outer-product update is 64 independent FMAs with no cross-lane traffic at all;
+-//   * a thread's 64 state elements are contiguous in k, so the load and every store is four
+-//     16-byte accesses over one 256-byte run.
+-//
+-// The state cache is fp32 -- this model's HF config sets mamba_ssm_dtype=float32, which vLLM
+-// honours over the `auto` mamba dtype, so the temporal state is fp32 while the conv state is
+-// bf16. That is also what makes the state traffic the cost: one [V,K] state is 64 KB, not 32.
+-//
+-// The slot and head strides are ARGUMENTS, not H*V*K: vLLM pads the mamba page so it matches the
+-// attention page size (here 421888 elements per slot against the 393216 the shape implies), and a
+-// kernel that derives the stride from the shape reads every slot but the first at the wrong
+-// offset -- which looks like a correct kernel producing noise.
+-#include <hip/hip_runtime.h>
+-#include "r4d.h"
+-#include "r4d_gdn_wmma.h"
+-
+-#define RU_K   128              // head_k
+-#define RU_V   128              // head_v
+-#define RU_HK   64              // k elements per thread (RU_K / 2)
+-#define RU_THR (RU_V * 2)       // two threads per v row
+-// VS: how many workgroups share a head's 128 v rows. The grid is (sequences, heads), which at
+-// one sequence is 24 workgroups on 64 CUs -- 37% of the machine, and the kernel is not DRAM
+-// bound there (its whole working set fits the 64 MB last level). Nothing in a v row's update
+-// crosses to another v row: the two dot products contract over k, and the outer-product update
+-// is per (v, k). Only the fused RMS norm spans the row, so VS > 1 is compiled without it.
+-#ifndef VSMAX
+-#define VSMAX 4
+-#endif
+-
+-__device__ __forceinline__ float ru_softplus(float x, float thr) {
+-  if (x > thr) return x;
+-  return (x > 0.0f) ? (x + __logf(1.0f + __expf(-x))) : __logf(1.0f + __expf(x));
+-}
+-
+-// a and b are a chunk() of the ba projection: bf16, strided by 2*H. See r4d_gdn_conv_w4_h128_bf16.hip.
+-template <int ABF16>
+-__device__ __forceinline__ float ru_ab(const void* p, size_t i) {
+-  return ABF16 ? bf2f(((const unsigned short*)p)[i]) : ((const float*)p)[i];
+-}
+-
+-// The layer's gated RMS norm, folded into the epilogue. A workgroup here owns one (sequence,
+-// head) and therefore the WHOLE 128-channel row of the output, which is exactly what an RMS needs
+-// -- so on this path the norm costs one workgroup reduction per token and no kernel launch, no
+-// second pass over the output, and no read of it back from HBM. The prefill path cannot do this
+-// (its workgroup owns half a row) and calls r4d_gdn_gated_rmsnorm_h128_bf16 instead.
+-__device__ __forceinline__ float ru_act(float z, int kind) {
+-  const float s = 1.0f / (1.0f + __expf(-z));
+-  return kind ? s : z * s;
+-}
+-
+-template <int ABF16, int NORM, int VS>
+-__global__ __launch_bounds__(RU_V / VS * 2)
+-void r4d_gdn_recurrent_update_kernel(const unsigned short* __restrict__ q,
+-                                     const unsigned short* __restrict__ k,
+-                                     const unsigned short* __restrict__ v,
+-                                     const void* __restrict__ av,
+-                                     const void* __restrict__ bv, long ab_stride,
+-                                     const float* __restrict__ A_log,
+-                                     const float* __restrict__ dt_bias,
+-                                     float* __restrict__ state, long st_slot, long st_head,
+-                                     unsigned short* __restrict__ o,
+-                                     const int* __restrict__ cu,
+-                                     const int* __restrict__ sidx, long sidx_stride,
+-                                     const int* __restrict__ naccept,
+-                                     const unsigned short* __restrict__ zg,
+-                                     const float* __restrict__ nw, float neps, int nact,
+-                                     int H, int Hg, float scale, float sp_thr)
+-{
+-  constexpr int NR = RU_V / VS;         // v rows this workgroup owns
+-  constexpr int THR = NR * 2;
+-  static_assert(!(NORM && VS > 1), "the fused row norm needs the whole 128-wide row");
+-  __shared__ float wsum[THR / 32];
+-  const int n = blockIdx.x, hv = blockIdx.y;
+-  const int bos = cu[n], T = cu[n + 1] - bos;
+-  if (T <= 0) return;
+-
+-  const int tid = threadIdx.x;
+-  const int row = (tid >> 1) + (VS > 1 ? blockIdx.z * NR : 0), half = tid & 1, k0 = half * RU_HK;
+-  const int hk = hv / (H / Hg);
+-
+-  // the initial state is the one the last accepted token of the previous step wrote
+-  const int it = naccept ? (naccept[n] - 1) : 0;
+-  const int si = sidx[(size_t)n * sidx_stride + it];
+-  if (si <= 0) return;                                  // NULL_BLOCK_ID: nothing scheduled here
+-
+-  float h[RU_HK];
+-  {
+-    const float* p = state + (size_t)si * st_slot + (size_t)hv * st_head
+-                   + (size_t)row * RU_K + k0;
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; j += 4) *(float4*)&h[j] = *(const float4*)(p + j);
+-  }
+-
+-  const float alog = __expf(A_log[hv]), dtb = dt_bias[hv];
+-
+-  for (int t = 0; t < T; ++t) {
+-    const int tok = bos + t;
+-    const unsigned short* qp = q + ((size_t)tok * Hg + hk) * RU_K + k0;
+-    const unsigned short* kp = k + ((size_t)tok * Hg + hk) * RU_K + k0;
+-
+-    float qq[RU_HK], kk[RU_HK];
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; j += 8) {
+-      const uint4 wq = *(const uint4*)(qp + j), wk = *(const uint4*)(kp + j);
+-      const unsigned short* sq = (const unsigned short*)&wq;
+-      const unsigned short* sk = (const unsigned short*)&wk;
+-#pragma unroll
+-      for (int e = 0; e < 8; ++e) { qq[j + e] = bf2f(sq[e]); kk[j + e] = bf2f(sk[e]); }
+-    }
+-
+-    // l2 norms: 64 in-lane terms, then one exchange with the lane holding the other half
+-    float sq = 0.0f, sk = 0.0f;
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; ++j) { sq += qq[j] * qq[j]; sk += kk[j] * kk[j]; }
+-    sq += __shfl_xor(sq, 1, 32);
+-    sk += __shfl_xor(sk, 1, 32);
+-    const float qs = __frsqrt_rn(sq + 1e-6f) * scale, ks = __frsqrt_rn(sk + 1e-6f);
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; ++j) { qq[j] *= qs; kk[j] *= ks; }
+-
+-    const float g   = -alog * ru_softplus(
+-        ru_ab<ABF16>(av, (size_t)tok * ab_stride + hv) + dtb, sp_thr);
+-    const float bt  = 1.0f / (1.0f + __expf(-ru_ab<ABF16>(bv, (size_t)tok * ab_stride + hv)));
+-    const float eg  = __expf(g);
+-
+-    float dot = 0.0f;
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; ++j) { h[j] *= eg; dot += h[j] * kk[j]; }
+-    dot += __shfl_xor(dot, 1, 32);
+-
+-    const float u = (bf2f(v[((size_t)tok * H + hv) * RU_V + row]) - dot) * bt;
+-
+-    float on = 0.0f;
+-#pragma unroll
+-    for (int j = 0; j < RU_HK; ++j) { h[j] += u * kk[j]; on += h[j] * qq[j]; }
+-    on += __shfl_xor(on, 1, 32);
+-
+-    if (NORM) {
+-      // sum of squares over the row: each pair holds one channel, so one wave covers 16 of them
+-      float sq = (half == 0) ? on * on : 0.0f;
+-#pragma unroll
+-      for (int m = 16; m; m >>= 1) sq += __shfl_xor(sq, m, 32);
+-      if ((threadIdx.x & 31) == 0) wsum[threadIdx.x >> 5] = sq;
+-      __syncthreads();
+-      float tot = 0.0f;
+-#pragma unroll
+-      for (int i = 0; i < THR / 32; ++i) tot += wsum[i];
+-      const float sc = __frsqrt_rn(tot * (1.0f / RU_V) + neps);
+-      on *= sc * nw[row] * ru_act(bf2f(zg[((size_t)tok * H + hv) * RU_V + row]), nact);
+-      __syncthreads();                 // wsum is reused by the next token
+-    }
+-
+-    if (half == 0) o[((size_t)tok * H + hv) * RU_V + row] = f2bf(on);
+-
+-    const int so = sidx[(size_t)n * sidx_stride + t];
+-    if (so > 0) {
+-      float* p = state + (size_t)so * st_slot + (size_t)hv * st_head
+-               + (size_t)row * RU_K + k0;
+-#pragma unroll
+-      for (int j = 0; j < RU_HK; j += 4) *(float4*)(p + j) = *(const float4*)&h[j];
+-    }
+-  }
+-}
++// The kernel itself lives in r4d_gdn_recurrent_update_k128_v128.h; this unit only instantiates it
++// for the fp32 state and exports the entry point. Its bf16 sibling is
++// r4d_gdn_recurrent_update_k128_v128_bf16_bf16state.hip. Two entry points rather than a runtime
++// flag because the state dtype IS part of the geometry: a caller that hands an fp32 cache to the
++// bf16 entry reads half the bytes it should and faults, so the registry makes state_dtype a
++// matched constraint and select() can never return the wrong one.
++#include "r4d_gdn_recurrent_update_k128_v128.h"
+ 
+ extern "C" int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+     const void* q, const void* k, const void* v, const void* a, const void* b,
+@@ -191,34 +18,8 @@ extern "C" int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+     const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
+     int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream)
+ {
+-  if (K != RU_K || V != RU_V) return -1;
+-  if (H % Hg) return -2;
+-  const int nm0 = (z_gate && norm_weight) ? 1 : 0;
+-  // Fill the machine: at one sequence the (N, H) grid is 24 workgroups. Split a head's v rows
+-  // until there are at least 64 workgroups, but never past four (that is 64 threads, two waves).
+-  int vs = 1;
+-  if (!nm0) { const int want = (64 + N * H - 1) / (N * H);
+-              vs = want >= 4 ? 4 : (want >= 2 ? 2 : 1);
+-              if (vs > VSMAX) vs = VSMAX; }
+-  dim3 grid(N, H, vs), blk(RU_V / vs * 2);
+-#define RU_LAUNCH(AB, NM, VSC)                                                                \
+-  hipLaunchKernelGGL((r4d_gdn_recurrent_update_kernel<AB, NM, VSC>), grid, blk, 0,            \
+-                     (hipStream_t)stream,                                                     \
+-                     (const unsigned short*)q, (const unsigned short*)k,                      \
+-                     (const unsigned short*)v, a, b, ab_stride,                               \
+-                     (const float*)A_log, (const float*)dt_bias, (float*)state,               \
+-                     state_slot_stride, state_head_stride,                                    \
+-                     (unsigned short*)o, (const int*)cu, (const int*)ssm_state_indices,       \
+-                     indices_stride, (const int*)num_accepted,                                \
+-                     (const unsigned short*)z_gate, (const float*)norm_weight, norm_eps,      \
+-                     norm_act, H, Hg, scale, softplus_thr)
+-#define RU_PICKV(AB)                                                                          \
+-  do { if (vs == 4)      RU_LAUNCH(AB, 0, 4);                                                 \
+-       else if (vs == 2) RU_LAUNCH(AB, 0, 2);                                                 \
+-       else              RU_LAUNCH(AB, 0, 1); } while (0)
+-  if (ab_is_bf16) { if (nm0) RU_LAUNCH(1, 1, 1); else RU_PICKV(1); }
+-  else            { if (nm0) RU_LAUNCH(0, 1, 1); else RU_PICKV(0); }
+-#undef RU_PICKV
+-#undef RU_LAUNCH
+-  return (int)hipGetLastError();
++  return ru_launch<R4D_ST_F32>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                      state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                      indices_stride, num_accepted, z_gate, norm_weight, norm_eps, norm_act,
++                      N, H, Hg, K, V, scale, softplus_thr, stream);
+ }
+diff --git a/r4d_gdn_state.h b/r4d_gdn_state.h
+new file mode 100644
+index 0000000..4b25df5
+--- /dev/null
++++ b/r4d_gdn_state.h
+@@ -0,0 +1,100 @@
++// r4d_gdn_state.h -- how a GDN temporal state lands in the paged cache.
++//
++// The [V,K] temporal state is the whole cost of the decode-side GDN kernels: one snapshot per
++// candidate token per head, because which candidate survives verification is not known until after
++// the layer has run. Its dtype is therefore a template parameter shared by the recurrent and fused
++// updates rather than a copy of the access code in each:
++//
++//   R4D_ST_F32  = 0   fp32, what this model's HF config asks for (mamba_ssm_dtype=float32), 64 KB
++//   R4D_ST_BF16 = 1   bf16, --mamba-ssm-cache-dtype=bfloat16, 32 KB
++//   R4D_ST_F16  = 2   f16,  --mamba-ssm-cache-dtype=float16,  32 KB
++//
++// THE ACCUMULATOR IS FP32 IN ALL THREE. Only what lands in the cache narrows, so a step's
++// arithmetic is unchanged and the error is one storage rounding per candidate -- bf16 measures at
++// rms 1.7e-3 on the state against bf16's own 3.9e-3 resolution.
++//
++// bf16 vs f16 is not a wash on this part, and f16 wins on both counts that matter here:
++//
++//   * PRECISION. f16 carries 10 mantissa bits to bf16's 7 (+implicit), so ~8x finer resolution on
++//     a state that round-trips through storage every decode step.
++//   * COST. Equal, at 3 VALU per pair. gfx1201 has no bf16 convert at all (f2bf2 is 2 adds +
++//     v_perm) and no packed round-to-nearest f16 convert either, so f16 is 2 v_cvt_f16_f32 plus
++//     the same pack. The one-instruction v_cvt_pkrtz exists but rounds toward zero; see r4d_f2h2
++//     for why that trade is not available here.
++//
++// What f16 gives up is exponent range: max 65504 and min normal 6.1e-5, where bf16 has fp32's.
++// The state is a leaky integrator of l2-normalised outer products and sits around O(1e-2), so the
++// top is not in reach; the bottom rounds small tails to subnormal/zero, which the decay would have
++// taken anyway. bf16 stays available for anything that does turn out to need the range.
++#pragma once
++#include "r4d_gdn_wmma.h"
++
++#define R4D_ST_F32  0
++#define R4D_ST_BF16 1
++#define R4D_ST_F16  2
++
++
++template <int STDT> struct gdn_state_traits;
++template <> struct gdn_state_traits<R4D_ST_F32>  { typedef float          type; };
++template <> struct gdn_state_traits<R4D_ST_BF16> { typedef unsigned short type; };
++template <> struct gdn_state_traits<R4D_ST_F16>  { typedef unsigned short type; };
++template <int STDT> using gdn_state_t = typename gdn_state_traits<STDT>::type;
++
++// Round-to-NEAREST, deliberately NOT v_cvt_pkrtz. pkrtz packs a pair in ONE instruction, but it
++// rounds toward ZERO, and a biased rounding is the one kind of error this state does not forgive:
++// random error decays out of a leaky integrator within its horizon, a systematic magnitude loss
++// does not -- it just changes the effective decay from d to d(1-b), so the state settles at
++// (1-d)/(1-d(1-b)) of its true size. Measured per-step bias was -2.4e-4 with pkrtz against -3.7e-6
++// for bf16, which at the longest-memory heads here (decay 0.9973, ~376 token horizon) compounds to
++// ~8% state deflation. Two v_cvt_f16_f32 plus the pack is 3 instructions -- the same as bf16's
++// f2bf2 -- so this keeps fp16's 3 extra mantissa bits at bf16's cost and bf16's lack of bias.
++__device__ __forceinline__ unsigned r4d_f2h2(float a, float b) {
++  union { __fp16 h; unsigned short u; } qa, qb;
++  qa.h = (__fp16)a; qb.h = (__fp16)b;          // C++ cast = current round mode = RTNE
++  return __builtin_amdgcn_perm((unsigned)qb.u, (unsigned)qa.u, 0x05040100u);  // {b_lo16, a_lo16}
++}
++__device__ __forceinline__ float r4d_h2f(unsigned short h) {
++  union { unsigned short u; __fp16 h; } q; q.u = h; return (float)q.h;
++}
++
++// HK elements, contiguous in k. Every form is 16-byte accesses over one run: fp32 is four float4
++// over 256 bytes, the 16-bit forms are eight-at-a-time over 128.
++template <int STDT, int HK>
++__device__ __forceinline__ void gdn_state_load(float* h, const gdn_state_t<STDT>* p) {
++  if (STDT == R4D_ST_F32) {
++    const float* q = (const float*)p;
++#pragma unroll
++    for (int j = 0; j < HK; j += 4) *(float4*)&h[j] = *(const float4*)(q + j);
++  } else {
++    const unsigned short* q = (const unsigned short*)p;
++#pragma unroll
++    for (int j = 0; j < HK; j += 8) {
++      const uint4 w = *(const uint4*)(q + j);
++      const unsigned short* sw = (const unsigned short*)&w;
++#pragma unroll
++      for (int e = 0; e < 8; ++e)
++        h[j + e] = (STDT == R4D_ST_BF16) ? bf2f(sw[e]) : r4d_h2f(sw[e]);
++    }
++  }
++}
++
++template <int STDT, int HK>
++__device__ __forceinline__ void gdn_state_store(gdn_state_t<STDT>* p, const float* h) {
++  if (STDT == R4D_ST_F32) {
++    float* q = (float*)p;
++#pragma unroll
++    for (int j = 0; j < HK; j += 4) *(float4*)(q + j) = *(const float4*)&h[j];
++  } else if (STDT == R4D_ST_BF16) {
++    unsigned short* q = (unsigned short*)p;
++#pragma unroll
++    for (int j = 0; j < HK; j += 8)
++      *(uint4*)(q + j) = make_uint4(f2bf2(h[j], h[j + 1]), f2bf2(h[j + 2], h[j + 3]),
++                                    f2bf2(h[j + 4], h[j + 5]), f2bf2(h[j + 6], h[j + 7]));
++  } else {
++    unsigned short* q = (unsigned short*)p;
++#pragma unroll
++    for (int j = 0; j < HK; j += 8)
++      *(uint4*)(q + j) = make_uint4(r4d_f2h2(h[j], h[j + 1]), r4d_f2h2(h[j + 2], h[j + 3]),
++                                    r4d_f2h2(h[j + 4], h[j + 5]), r4d_f2h2(h[j + 6], h[j + 7]));
++  }
++}
+diff --git a/r4d_module.hip b/r4d_module.hip
+index ef84cb5..8c05fd9 100644
+--- a/r4d_module.hip
++++ b/r4d_module.hip
+@@ -131,14 +131,17 @@ static int64_t attn_decode_scratch_bytes(int num_seqs, int q_len, int q_heads, i
+ // =================================================================================================
+ // gated delta net
+ // =================================================================================================
+-static void gdn_chunk_scan(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
+-                           int64_t h0, int64_t o, int64_t ht, int64_t cu, int num_seqs,
+-                           int num_v_heads, int num_k_heads, int head_k, int head_v, int chunk,
+-                           double scale, int64_t stream) {
++static void gdn_chunk_scan_st(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
++                              int64_t h0, int64_t o, int64_t ht, int64_t cu, int num_seqs,
++                              int num_v_heads, int num_k_heads, int head_k, int head_v, int chunk,
++                              double scale, int state_fp16, int64_t stream) {
+   int rc = r4d_gdn_chunk_scan_k128_v128_c64_bf16(
+       (const void*)q, (const void*)k, (const void*)v, (const void*)A, (const void*)g,
+       (const void*)beta, (const void*)h0, (void*)o, (void*)ht, (const void*)cu, num_seqs,
+-      num_v_heads, num_k_heads, head_k, head_v, chunk, (float)scale, (void*)stream);
++      num_v_heads, num_k_heads, head_k, head_v, chunk, (float)scale, state_fp16, (void*)stream);
++  if (rc == -2)
++    throw std::runtime_error("r4d gdn_chunk_scan_k128_v128_c64_bf16: v heads must be a multiple "
++                             "of k heads");
+   if (rc == -1)
+     throw std::runtime_error("r4d gdn_chunk_scan_k128_v128_c64_bf16: this build is compiled for "
+                              "head_k/head_v/chunk 128/128/64");
+@@ -147,6 +150,15 @@ static void gdn_chunk_scan(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g
+                              std::to_string(rc) + ")");
+ }
+ 
++// The original binding, unchanged for existing callers: an fp32 state cache.
++static void gdn_chunk_scan(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
++                           int64_t h0, int64_t o, int64_t ht, int64_t cu, int num_seqs,
++                           int num_v_heads, int num_k_heads, int head_k, int head_v, int chunk,
++                           double scale, int64_t stream) {
++  gdn_chunk_scan_st(q, k, v, A, g, beta, h0, o, ht, cu, num_seqs, num_v_heads, num_k_heads,
++                    head_k, head_v, chunk, scale, 0, stream);
++}
++
+ static void gdn_kkt_solve(int64_t k, int64_t beta, int64_t g, int64_t A, int64_t cu, int num_seqs,
+                           int num_tokens, int num_v_heads, int num_k_heads, int head_k, int chunk,
+                           int64_t stream) {
+@@ -221,6 +233,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
+                              std::to_string(rc) + ")");
+ }
+ 
++// One wrapper, both state dtypes: the fp32 and bf16 entry points have identical
++// signatures and differ only in how wide the state cache they address is.
++template <auto FN>
++static void gdn_fused_update_impl(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias,
++                             int64_t cstate, int64_t cs_seq, int64_t cs_dim, int64_t cs_tok,
++                             int state_len_max, int64_t cache_idx, int64_t ci_stride,
++                             int64_t num_accepted, int64_t cu, int num_seqs, int num_v_heads,
++                             int num_k_heads, int head_k, int head_v, int width,
++                             int max_query_len, int64_t q, int64_t k, int64_t v, int64_t a,
++                             int64_t b, int64_t ab_stride, int ab_is_bf16, int64_t A_log,
++                             int64_t dt_bias, int64_t state, int64_t st_slot, int64_t st_head,
++                             int64_t o, int64_t sidx, int64_t sidx_stride, double scale,
++                             double softplus_thr, int64_t barrier_cnt, int o_rows,
++                             int64_t stream) {
++  int rc = FN(
++      (const void*)x, xpitch, (const void*)wgt, (const void*)bias, (void*)cstate, cs_seq,
++      cs_dim, cs_tok, state_len_max, (const void*)cache_idx, ci_stride,
++      (const void*)num_accepted, (const void*)cu, num_seqs, num_v_heads, num_k_heads, head_k,
++      head_v, width, max_query_len, (void*)q, (void*)k, (void*)v, (const void*)a,
++      (const void*)b, ab_stride, ab_is_bf16, (const void*)A_log, (const void*)dt_bias,
++      (void*)state, st_slot, st_head, (void*)o, (const void*)sidx, sidx_stride, (float)scale,
++      (float)softplus_thr, (void*)barrier_cnt, o_rows, (void*)stream);
++  if (rc == -1)
++    throw std::runtime_error("r4d gdn_fused_update: this build is compiled for head dim 128 "
++                             "and conv width 4");
++  if (rc == -3)
++    throw std::runtime_error("r4d gdn_fused_update: needs a zeroed barrier counter");
++  if (rc != 0)
++    throw std::runtime_error("r4d gdn_fused_update: hip launch error (code " +
++                             std::to_string(rc) + ")");
++}
++
+ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_t rows,
+                               int64_t xrow, int64_t zrow, int64_t orow, int width, double eps,
+                               int act, int64_t stream) {
+@@ -235,7 +279,59 @@ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_
+                              std::to_string(rc) + ")");
+ }
+ 
+-static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int64_t b,
++template <auto FN>
++static void gdn_lazy_materialize_impl(int64_t state_ptrs, int64_t slot_strides, int64_t group_idx,
++                                      int64_t alog_ptrs, int64_t dtb_ptrs, int64_t bt_ptrs,
++                                      int64_t bt_stride_req, int64_t idx_mapping, int mode,
++                                      int64_t state_idx, int64_t src_col, int64_t token_bias,
++                                      int64_t num_accepted, int64_t new_computed, int block_size,
++                                      int num_reqs, int n_states, int num_v_heads, int num_k_heads,
++                                      int head_k, int head_v, int64_t st_head, double scale,
++                                      double softplus_thr, int64_t stream) {
++  int rc = FN((const void*)state_ptrs, (const void*)slot_strides, (const void*)group_idx,
++              (const void*)alog_ptrs, (const void*)dtb_ptrs, (const void*)bt_ptrs, bt_stride_req,
++              (const void*)idx_mapping, mode, (const void*)state_idx, (const void*)src_col,
++              (const void*)token_bias, (const void*)num_accepted, (const void*)new_computed,
++              block_size, num_reqs, n_states, num_v_heads, num_k_heads, head_k, head_v,
++              (long)st_head, (float)scale, (float)softplus_thr, (void*)stream);
++  if (rc != 0)
++    throw std::runtime_error("r4d gdn_lazy_materialize: error (code " + std::to_string(rc) + ")");
++}
++
++template <auto FN>
++static std::vector<unsigned int> gdn_lazy_stale_impl(bool reset) {
++  unsigned int o[4] = {0u, 0u, 0u, 0u};
++  int rc = FN(o, reset ? 1 : 0);
++  if (rc != 0)
++    throw std::runtime_error("r4d gdn_lazy_stale_counts: hip error (code " + std::to_string(rc) + ")");
++  return {o[0], o[1], o[2], o[3]};
++}
++
++template <auto FN>
++static void gdn_lazy_update_impl(int64_t q, int64_t k, int64_t v, int64_t a, int64_t b,
++                                 int64_t ab_stride, bool ab_is_bf16, int64_t A_log,
++                                 int64_t dt_bias, int64_t state, int64_t state_slot_stride,
++                                 int64_t state_head_stride, int64_t o, int64_t cu,
++                                 int64_t sidx, int64_t sidx_stride, int64_t num_accepted,
++                                 int num_seqs, int num_v_heads, int num_k_heads,
++                                 int head_k, int head_v, int stash_col, double scale,
++                                 double softplus_thr, int64_t stream) {
++  int rc = FN(
++      (const void*)q, (const void*)k, (const void*)v, (const void*)a, (const void*)b, ab_stride,
++      ab_is_bf16 ? 1 : 0, (const void*)A_log, (const void*)dt_bias, (void*)state,
++      state_slot_stride, state_head_stride, (void*)o, (const void*)cu, (const void*)sidx,
++      sidx_stride, (const void*)num_accepted, num_seqs, num_v_heads, num_k_heads, head_k,
++      head_v, stash_col, (float)scale, (float)softplus_thr, (void*)stream);
++  if (rc == -1)
++    throw std::runtime_error("r4d gdn_lazy_update: this build is compiled for head_k/head_v 128/128");
++  if (rc == -4)
++    throw std::runtime_error("r4d gdn_lazy_update: the state slot is too small for the candidate stash");
++  if (rc != 0)
++    throw std::runtime_error("r4d gdn_lazy_update: hip launch error (code " + std::to_string(rc) + ")");
++}
++
++template <auto FN>
++static void gdn_recurrent_update_impl(int64_t q, int64_t k, int64_t v, int64_t a, int64_t b,
+                                  int64_t ab_stride, bool ab_is_bf16, int64_t A_log,
+                                  int64_t dt_bias, int64_t state, int64_t state_slot_stride,
+                                  int64_t state_head_stride, int64_t o, int64_t cu,
+@@ -244,7 +340,7 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+                                  int norm_act, int num_seqs, int num_v_heads, int num_k_heads,
+                                  int head_k, int head_v, double scale, double softplus_thr,
+                                  int64_t stream) {
+-  int rc = r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
++  int rc = FN(
+       (const void*)q, (const void*)k, (const void*)v, (const void*)a, (const void*)b, ab_stride,
+       ab_is_bf16 ? 1 : 0, (const void*)A_log, (const void*)dt_bias, (void*)state,
+       state_slot_stride, state_head_stride, (void*)o, (const void*)cu, (const void*)sidx,
+@@ -252,11 +348,11 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+       (float)norm_eps, norm_act, num_seqs, num_v_heads, num_k_heads, head_k, head_v,
+       (float)scale, (float)softplus_thr, (void*)stream);
+   if (rc == -1)
+-    throw std::runtime_error("r4d gdn_recurrent_update_k128_v128_bf16_fp32state: this build is "
+-                             "compiled for head_k/head_v 128/128");
++    throw std::runtime_error("r4d gdn_recurrent_update: this build is compiled for "
++                             "head_k/head_v 128/128");
+   if (rc != 0)
+-    throw std::runtime_error("r4d gdn_recurrent_update_k128_v128_bf16_fp32state: hip launch "
+-                             "error (code " + std::to_string(rc) + ")");
++    throw std::runtime_error("r4d gdn_recurrent_update: hip launch error (code " +
++                             std::to_string(rc) + ")");
+ }
+ 
+ // =================================================================================================
+@@ -604,11 +700,41 @@ PYBIND11_MODULE(r4d, m) {
+ 
+   // ---- gated delta net ----
+   m.def("gdn_chunk_scan_k128_v128_c64_bf16", &gdn_chunk_scan);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16_st", &gdn_chunk_scan_st);   // + state_fp16 before stream
+   m.def("gdn_kkt_solve_k128_c64_bf16", &gdn_kkt_solve);
+   m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
+   m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
+   m.def("gdn_conv_update_w4_h128_bf16", &gdn_conv_update);
+-  m.def("gdn_recurrent_update_k128_v128_bf16_fp32state", &gdn_recurrent_update);
++  m.def("gdn_fused_update_w4k128v128_bf16",
++        &gdn_fused_update_impl<r4d_gdn_fused_update_w4k128v128_bf16>);
++  m.def("gdn_fused_update_w4k128v128_bf16_bf16state",
++        &gdn_fused_update_impl<r4d_gdn_fused_update_w4k128v128_bf16_bf16state>);
++  m.def("gdn_fused_update_w4k128v128_bf16_f16state",
++        &gdn_fused_update_impl<r4d_gdn_fused_update_w4k128v128_bf16_f16state>);
++  m.def("gdn_recurrent_update_k128_v128_bf16_fp32state",
++        &gdn_recurrent_update_impl<r4d_gdn_recurrent_update_k128_v128_bf16_fp32state>);
++  m.def("gdn_recurrent_update_k128_v128_bf16_bf16state",
++        &gdn_recurrent_update_impl<r4d_gdn_recurrent_update_k128_v128_bf16_bf16state>);
++  m.def("gdn_recurrent_update_k128_v128_bf16_f16state",
++        &gdn_recurrent_update_impl<r4d_gdn_recurrent_update_k128_v128_bf16_f16state>);
++  m.def("gdn_lazy_update_k128_v128_bf16_fp32state",
++        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_fp32state>);
++  m.def("gdn_lazy_update_k128_v128_bf16_f16state",
++        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_f16state>);
++  m.def("gdn_lazy_materialize_k128_v128_bf16_fp32state",
++        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_fp32state>);
++  m.def("gdn_lazy_materialize_k128_v128_bf16_f16state",
++        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_f16state>);
++  m.def("gdn_lazy_update_k128_v128_bf16_bf16state",
++        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_bf16state>);
++  m.def("gdn_lazy_materialize_k128_v128_bf16_bf16state",
++        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state>);
++  m.def("gdn_lazy_stale_counts_fp32state", &gdn_lazy_stale_impl<r4d_gdn_lazy_stale_counts_fp32state>,
++        py::arg("reset") = false);
++  m.def("gdn_lazy_stale_counts_f16state", &gdn_lazy_stale_impl<r4d_gdn_lazy_stale_counts_f16state>,
++        py::arg("reset") = false);
++  m.def("gdn_lazy_stale_counts_bf16state", &gdn_lazy_stale_impl<r4d_gdn_lazy_stale_counts_bf16state>,
++        py::arg("reset") = false);
+   m.def("gdn_gated_rmsnorm_h128_bf16", &gdn_gated_rmsnorm);
+   {
+     int hk = 0, hv = 0, c = 0;
+@@ -625,11 +751,14 @@ PYBIND11_MODULE(r4d, m) {
+   m.def("ar_ipc_memzero", &r4d_ar_ipc_memzero);
+   m.def("ar_ipc_enable_peer", &r4d_ar_ipc_enable_peer);
+   m.def("ar_oneshot_2rank_exact", &r4d_ar_oneshot_2rank_exact);
++  m.def("ar_oneshot_2rank_exact_nq", &r4d_ar_oneshot_2rank_exact_nq);
+   m.def("ar_oneshot_2rank_wht6", &r4d_ar_oneshot_2rank_wht6);
++  m.def("ar_oneshot_3rank_exact", &r4d_ar_oneshot_3rank_exact);
+   {
+     int group = 0, bits = 0, chunk_elems = 0;
+     r4d_ar_wht6_dims(&group, &bits, &chunk_elems);
+     m.attr("AR_MAX_BLOCKS")       = r4d_ar_max_blocks();
++    m.attr("AR3_MAX_BLOCKS")      = r4d_ar_3rank_max_blocks();
+     m.attr("AR_WHT6_GROUP")       = group;
+     m.attr("AR_WHT6_BITS")        = bits;
+     m.attr("AR_WHT6_CHUNK_ELEMS") = chunk_elems;
+diff --git a/r4d_registry.hip b/r4d_registry.hip
+index 0bd04ac..937acb7 100644
+--- a/r4d_registry.hip
++++ b/r4d_registry.hip
+@@ -66,6 +66,39 @@ static const R4DConstraint cGdnKktSolve[] = {
+ };
+ static const R4DConstraint cGdnRecurrentUpdate[] = {
+     C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp32"),
++};
++static const R4DConstraint cGdnRecurrentUpdateBf16St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "bf16"),
++};
++static const R4DConstraint cGdnRecurrentUpdateF16St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp16"),
++};
++static const R4DConstraint cGdnLazyUpdateF32St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp32"),
++};
++static const R4DConstraint cGdnLazyUpdateF16St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp16"),
++};
++static const R4DConstraint cGdnLazyUpdateBf16St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "bf16"),
++};
++static const R4DConstraint cGdnFusedUpdate[] = {
++    C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp32"),
++};
++static const R4DConstraint cGdnFusedUpdateBf16St[] = {
++    C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "bf16"),
++};
++static const R4DConstraint cGdnFusedUpdateF16St[] = {
++    C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "fp16"),
+ };
+ static const R4DConstraint cGdnGatedRmsNorm[] = {
+     C_EQ("channels", 128),
+@@ -80,6 +113,10 @@ static const R4DConstraint cArExact[] = {
+ static const R4DConstraint cArWht6[] = {
+     C_EQ("world_size", 2), C_EQ("exact", 0), C_IN("dtype", "bf16 fp16"), C_DIV("numel", 64),
+ };
++// radiance extras: three ranks, exact only.
++static const R4DConstraint cAr3Exact[] = {
++    C_EQ("world_size", 3), C_EQ("exact", 1), C_IN("dtype", "bf16 fp16 fp32"),
++};
+ 
+ // ---- GEMM --------------------------------------------------------------------------------------
+ // DFlash2's grouped dynamic depthwise convolution. block_size is not listed as a predicate: the
+@@ -139,7 +176,7 @@ static const R4DKernelInfo kKernels[] = {
+     {"gdn_chunk_scan_k128_v128_c64_bf16", "gdn", "gdn_chunk_scan",
+      "gated delta net chunked scan: WY recompute, state recurrence and output in one kernel",
+      "head_k 128, head_v 128, chunk 64, varlen, state resident in WMMA accumulators",
+-     "bf16 q/k/v/A, fp32 gate/beta/state, bf16 out, fp32 final state",
++     "bf16 q/k/v/A, fp32 gate/beta, fp32 or fp16 state (the _st binding), bf16 out",
+      ROW(cGdnChunkScan)},
+     {"gdn_conv_prep_w4_h128_bf16", "gdn", "gdn_conv_prep",
+      "gdn prefill preamble: causal conv + qkv split + qk l2norm + gating + per-chunk cumsum",
+@@ -156,12 +193,64 @@ static const R4DKernelInfo kKernels[] = {
+      "head_k 128, chunk 64, varlen; one gram per k head, applied to every v head of the group",
+      "bf16 k and A out, fp32 beta / gate / gram / inverse",
+      ROW(cGdnKktSolve)},
++    {"gdn_fused_update_w4k128v128_bf16", "gdn", "gdn_fused_update",
++     "gdn decode step as ONE launch: conv update -> grid barrier -> recurrent update",
++     "conv width 4, head_k/head_v 128, no fused row norm; needs a zeroed barrier counter",
++     "bf16 x / conv state / q,k,v; fp32 recurrent state",
++     ROW(cGdnFusedUpdate)},
++    {"gdn_fused_update_w4k128v128_bf16_bf16state", "gdn", "gdn_fused_update",
++     "gdn decode step as ONE launch: conv update -> grid barrier -> recurrent update",
++     "conv width 4, head_k/head_v 128, no fused row norm; needs a zeroed barrier counter",
++     "bf16 x / conv state / q,k,v; BF16 recurrent state (halves the state traffic that is this\n"
++     "kernel's whole cost; the accumulator stays fp32)",
++     ROW(cGdnFusedUpdateBf16St)},
++    {"gdn_fused_update_w4k128v128_bf16_f16state", "gdn", "gdn_fused_update",
++     "gdn decode step as ONE launch: conv update -> grid barrier -> recurrent update",
++     "conv width 4, head_k/head_v 128, no fused row norm; needs a zeroed barrier counter",
++     "bf16 x / conv state / q,k,v; F16 recurrent state (halves the state traffic that is this\n"
++     "kernel's whole cost; the accumulator stays fp32)",
++     ROW(cGdnFusedUpdateF16St)},
+     {"gdn_recurrent_update_k128_v128_bf16_fp32state", "gdn", "gdn_recurrent_update",
+      "gdn decode recurrent update: gating, qk l2norm, delta-rule state update, gated rms norm "
+      "and output",
+      "head_k 128, head_v 128, paged state, one state written per candidate token",
+      "bf16 q/k/v and out, fp32 a,b and state cache",
+      ROW(cGdnRecurrentUpdate)},
++    {"gdn_recurrent_update_k128_v128_bf16_bf16state", "gdn", "gdn_recurrent_update",
++     "gdn decode recurrent update: gating, qk l2norm, delta-rule state update, gated rms norm "
++     "and output",
++     "head_k 128, head_v 128, paged state, one state written per candidate token",
++     "bf16 q/k/v and out, fp32 a,b; BF16 state cache (halves the state traffic that is this\n"
++     "kernel's whole cost; the accumulator stays fp32)",
++     ROW(cGdnRecurrentUpdateBf16St)},
++    {"gdn_recurrent_update_k128_v128_bf16_f16state", "gdn", "gdn_recurrent_update",
++     "gdn decode recurrent update: gating, qk l2norm, delta-rule state update, gated rms norm "
++     "and output",
++     "head_k 128, head_v 128, paged state, one state written per candidate token",
++     "bf16 q/k/v and out, fp32 a,b; F16 state cache (halves the state traffic that is this\n"
++     "kernel's whole cost; the accumulator stays fp32)",
++     ROW(cGdnRecurrentUpdateF16St)},
++    {"gdn_lazy_update_k128_v128_bf16_fp32state", "gdn", "gdn_lazy_update",
++     "gdn decode recurrent update with lazy snapshots: one base state per sequence, the previous "
++     "step's accepted candidates replayed from a stash instead of read from per-candidate slots",
++     "head_k 128, head_v 128, paged state; slot sidx[n,0] = base, sidx[n,stash_col] = stash; "
++     "no fused row norm",
++     "bf16 q/k/v and out, bf16/fp32 a,b; fp32 state cache",
++     ROW(cGdnLazyUpdateF32St)},
++    {"gdn_lazy_update_k128_v128_bf16_f16state", "gdn", "gdn_lazy_update",
++     "gdn decode recurrent update with lazy snapshots: one base state per sequence, the previous "
++     "step's accepted candidates replayed from a stash instead of read from per-candidate slots",
++     "head_k 128, head_v 128, paged state; slot sidx[n,0] = base, sidx[n,stash_col] = stash; "
++     "no fused row norm",
++     "bf16 q/k/v and out, bf16/fp32 a,b; F16 state cache",
++     ROW(cGdnLazyUpdateF16St)},
++    {"gdn_lazy_update_k128_v128_bf16_bf16state", "gdn", "gdn_lazy_update",
++     "gdn decode recurrent update with lazy snapshots: one base state per sequence, the previous "
++     "step's accepted candidates replayed from a stash instead of read from per-candidate slots",
++     "head_k 128, head_v 128, paged state; slot sidx[n,0] = base, sidx[n,stash_col] = stash; "
++     "no fused row norm",
++     "bf16 q/k/v and out, bf16/fp32 a,b; BF16 state cache",
++     ROW(cGdnLazyUpdateBf16St)},
+     {"gdn_gated_rmsnorm_h128_bf16", "gdn", "gdn_gated_rmsnorm",
+      "gated rms norm over a row: out = rms(x) . w . act(z), for the prefill path only",
+      "128 channels per row, one wave per row; silu or sigmoid gate",
+@@ -177,6 +266,12 @@ static const R4DKernelInfo kKernels[] = {
+      "exactly 2 ranks, peer-accessible; groups of 64 elements; cudagraph-safe",
+      "bf16 / fp16 payload, 6 bits + bf16 scale per group on the wire, fp32 accumulate",
+      ROW(cArWht6)},
++    {"ar_oneshot_3rank_exact", "ar", "allreduce",
++     "all-reduce (sum), one-shot push over P2P IPC scratch, three ranks",
++     "exactly 3 ranks, all pairs peer-accessible; scratch holds two receive regions x two slots "
++     "of the full message; cudagraph-safe",
++     "bf16 / fp16 / fp32 payload, fp32 accumulate in rank order, bit-identical across ranks",
++     ROW(cAr3Exact)},
+     {"gemm_bf16_nt_m16", "gemm", "gemm_nt",
+      "skinny GEMM C[M,N] = A[M,K] @ W[N,K]^T, split-K reduced in LDS",
+      "M <= 16; K divisible by SK and K/SK by 256; N, K otherwise runtime",

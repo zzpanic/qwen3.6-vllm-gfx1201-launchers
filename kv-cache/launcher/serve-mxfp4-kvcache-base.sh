@@ -455,7 +455,14 @@ if [ "$GDN_LAZY" = 1 ]; then CACHE_SUF="$CACHE_SUF-lz"; fi
 # It keys the cache dir: a different kernel library can change the traced graph, and a stale
 # graph has cost us twice already.
 R4D_RX9=${R4D_RX9:-0}
-if [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
+# R4D_RX13 (default 0, opt-in): build libr4d v0.5.0 + r4d_kernels/r4d_kernels.patch instead -- the
+# radiance extras (rx10, a superset of rx9) plus deadcode's radiance-engine GDN chunk scan, which
+# fixes libr4d issue #4 (finite but WRONG prefill output and state on any chunk whose gate span
+# exceeds 160). It carries rx9's narrow-state kernels, so it stands in for R4D_RX9 and keys its own
+# cache dir. Sources, licence status and validation: r4d_kernels/README.md.
+R4D_RX13=${R4D_RX13:-0}
+if [ "$R4D_RX13" = 1 ]; then R4D_RX9=1; CACHE_SUF="$CACHE_SUF-rx13"
+elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
 # MAMBA_SSM_FP16 (default 0): pass --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16,
 # i.e. upstream's single-GPU-profile "lever" (serve-mxfp4.sh:686). ONLY the ssm (temporal) state
 # goes 16-bit; the CONV state must stay BFLOAT16, not float16 -- upstream measured fp16 there
@@ -782,6 +789,12 @@ fi
 # keeps the validated -rx5 entry, so this change rebuilds nothing today; any other content gets
 # its own key and builds once. Note the new tree ALSO carries r4d_radiance_extras_rx9.patch for
 # its single-GPU profile -- we do not use that profile (see the upgrade README, Stage B).
+# R4D_RX13 last: r4d_kernels.patch contains rx9 and rx10 (lazy kernels included), so it wins.
+if [ "$R4D_RX13" = 1 ]; then
+  R4D_PATCH="${R4D_PATCH_RX13:-$SCRIPT_DIR/../../r4d_kernels/r4d_kernels.patch}"
+  [ -f "$R4D_PATCH" ] || die "R4D_RX13=1 but $R4D_PATCH is missing"
+  R4D_PIN=${R4D_PIN_RX13:-v0.5.0}
+fi
 R4D_PATCH_RX5_SHA=6a03fb481f62
 R4D_KEY_EXPLICIT=${R4D_KEY:+1}
 if [ -z "${R4D_KEY:-}" ]; then            # an explicit R4D_KEY in the environment still wins
@@ -1776,6 +1789,8 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # 2026-09-05. Full write-up: bench-history/draft-sample-isolation-20260905/notes.md.
 DRAFT_SAMPLE=${DRAFT_SAMPLE:-probabilistic}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
+elif [ "$SPEC_METHOD" = none ]; then
+  SPEC_CFG=""                # no speculative decoding (serial decode), for numerical comparisons
 else
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$ATTN\",\"disable_padded_drafter_batch\":$UNPAD}"
 fi
@@ -1928,6 +1943,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_FP8_STREAM="$FP8S" \
   -e RADIANCE_FP8_STREAM_TP1="$FP8S_TP1" \
   -e RADIANCE_GDN_LAZY="$GDN_LAZY" \
+  -e RADIANCE_GDN_LAZY_INVALIDATE="${RADIANCE_GDN_LAZY_INVALIDATE:-1}" \
+  -e RADIANCE_GDN_LAZY_STALE_EVERY="${RADIANCE_GDN_LAZY_STALE_EVERY:-512}" \
+  -e RADIANCE_DYNAMIC_DRAFT="${RADIANCE_DYNAMIC_DRAFT:-1}" \
   -e RADIANCE_RMS_QUANT_FUSION="${RADIANCE_RMS_QUANT_FUSION:-$NQF}" \
   -e RADIANCE_MXFP4_SHADOW="${RADIANCE_MXFP4_SHADOW:-}" \
   -e RADIANCE_MXFP4_SANITIZE="${RADIANCE_MXFP4_SANITIZE:-0}" \
@@ -2170,6 +2188,16 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # stock ~21.5 s warmup -- a cost, not a failure.
     PYTHONPATH=/patches python3 /house/patch_skip_mm_warmup.py \
       || echo "[radiance] WARNING: skip-mm-warmup patch did not apply; the startup mm warmup will run"
+    # House patch: an fp16 ssm state is read and written natively by the r4d_kernels chunk scan
+    # (R4D_RX13=1) instead of widened in Python. Dormant on an fp32 cache or an older libr4d.
+    PYTHONPATH=/patches python3 /house/patch_gdn_state_fp16.py \
+      || echo "[radiance] WARNING: gdn-state-fp16 patch did not apply; fp16 prefill widens in Python"
+    # House patch, lazy GDN only (UNVALIDATED, keep RADIANCE_GDN_LAZY=0): a prefill zeroes its stash
+    # headers (r4d_kernels mode 2) and stale-stash events are counted. Fatal if it fails: lazy
+    # without the invalidation is known to corrupt multi-turn chat.
+    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then
+      PYTHONPATH=/patches python3 /house/patch_gdn_lazy_invalidate.py
+    fi
     # END patch prelude
     fi
     # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~30 s per start). Keyed on
@@ -2216,7 +2244,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   ${KVOFF_TIER_ARG:+--kv-transfer-config "$KVOFF_TIER_ARG"} \
     --max-model-len "$MAXLEN" --max-num-seqs "${MAXSEQS:-8}" --max-num-batched-tokens "$CHUNK" \
     --attention-backend "$ATTN" \
-    --speculative-config "$SPEC_CFG" \
+    ${SPEC_CFG:+--speculative-config "$SPEC_CFG"} \
     $ASYNC_FLAG $EXTRA $MMIMG_ARG $SKIPMM_ARG \
     --enable-prefix-caching --mamba-cache-mode align --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
     --enable-per-request-metrics --enable-force-include-usage --enable-prompt-tokens-details \

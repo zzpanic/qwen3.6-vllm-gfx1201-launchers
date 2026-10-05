@@ -26,6 +26,10 @@
  15  patch_offload_miss_deferral_metrics.py           counters only; order-independent (task 65)
  16  patch_skip_mm_warmup.py                          boot speed only, not a KV patch; always
                                                    applied (last, after the upstream patches)
+ 17  patch_gdn_state_fp16.py                          always applied, non-fatal; dormant unless the
+                                                   ssm cache is fp16 AND libr4d is R4D_RX13 (r4d_kernels)
+ 18  patch_gdn_lazy_invalidate.py                     RADIANCE_GDN_LAZY=1 only (UNVALIDATED -- keep lazy
+                                                   off); FATAL on failure; needs R4D_RX13 (r4d_kernels)
  
  This order is a dependency, not a preference. 11 extends the get_stats() that 2
  creates on the fs tier, and refuses to apply if 2 has not run -- it says so

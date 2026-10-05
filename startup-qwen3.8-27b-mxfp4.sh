@@ -291,6 +291,10 @@ FP8S=${RADIANCE_FP8_STREAM:-1}
 CACHE_SUF=""
 if [ "$GDN_MERGE" = 1 ]; then CACHE_SUF="$CACHE_SUF-gdnm"; fi
 if [ "$AR_OVERLAP" = 1 ]; then CACHE_SUF="$CACHE_SUF-arov"; fi
+# R4D_RX13 (default 0, opt-in): libr4d v0.5.0 + r4d_kernels/r4d_kernels.patch, which fixes libr4d
+# issue #4 (wrong GDN prefill on chunks whose gate span exceeds 160). See r4d_kernels/README.md.
+R4D_RX13=${R4D_RX13:-0}
+if [ "$R4D_RX13" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx13"; fi
 # -nqft, not -nqf: -nqf was the pass-only null experiment. TRACED_QUANT flips the traced graph
 # via env alone (no hashed file changes), so it MUST key the cache dir.
 if [ "$NQF" = 1 ]; then CACHE_SUF="$CACHE_SUF-nqft"; fi
@@ -628,6 +632,11 @@ R4D_CACHE=${R4D_CACHE:-$HOME/.cache/radiance-libr4d}
 # pinned commit, a content hash of the patch (so an edited patch rebuilds with no suffix to
 # remember to bump), the image (its hipcc builds it) and the GPU arch (build.sh's GFX_ARCH).
 R4D_PATCH="$REPO/r4d_radiance_extras.patch"
+if [ "$R4D_RX13" = 1 ]; then
+  R4D_PATCH="${R4D_PATCH_RX13:-$SCRIPT_DIR/r4d_kernels/r4d_kernels.patch}"
+  [ -f "$R4D_PATCH" ] || { echo "[radiance] FATAL: R4D_RX13=1 but $R4D_PATCH is missing" >&2; exit 1; }
+  R4D_PIN=${R4D_PIN_RX13:-v0.5.0}
+fi
 R4D_KEY="$R4D_PIN"
 if [ -f "$R4D_PATCH" ]; then R4D_KEY="$R4D_PIN-p$(sha256sum "$R4D_PATCH" | cut -c1-8)"; fi
 R4D_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"
@@ -1199,6 +1208,8 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # sample, which is how a phantom +2.3% prefill win got past us earlier the same day.
   DRAFT_SAMPLE=${DRAFT_SAMPLE:-probabilistic}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
+elif [ "$SPEC_METHOD" = none ]; then
+  SPEC_CFG=""                # no speculative decoding (serial decode), for numerical comparisons
 else
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$ATTN\",\"disable_padded_drafter_batch\":$UNPAD}"
 fi
@@ -1443,7 +1454,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     ${KV_MEM:+--kv-cache-memory "$KV_MEM"} \
     --max-model-len "$MAXLEN" --max-num-seqs "${MAXSEQS:-8}" --max-num-batched-tokens "$CHUNK" \
     --attention-backend "$ATTN" \
-    --speculative-config "$SPEC_CFG" \
+    ${SPEC_CFG:+--speculative-config "$SPEC_CFG"} \
     $ASYNC_FLAG $EXTRA $MMIMG_ARG $SKIPMM_ARG \
     --enable-prefix-caching --mamba-cache-mode align --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
     --enable-per-request-metrics --enable-force-include-usage --enable-prompt-tokens-details \
