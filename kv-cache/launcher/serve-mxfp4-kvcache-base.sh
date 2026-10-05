@@ -59,7 +59,8 @@
 #         patch prelude is replaced by a verified boot overlay, built automatically on a
 #         miss, whose key includes KVOFF_MINIMAL, RADIANCE_GDN_LAZY and the /house patches.
 #         comgr, tvm-ffi and tilelang, which cache under the container's HOME, persist
-#         under $CACHE too (startup_cache_jit_mounts). Measured 2026-10-05: cold 527 s,
+#         under $CACHE too (startup_cache_jit_mounts), and stale sibling trees are
+#         pruned when the disk passes 65% (startup_cache_reap). Measured 2026-10-05: cold 527 s,
 #         cached 196 s after a host reboot, 161 s on a restart (launch to first reply).
 #       - RADIANCE_SKIP_MM_WARMUP defaults to 1 (house patch /house/patch_skip_mm_warmup.py):
 #         skips the ~21.5 s startup multi-modal processor warmup; the first image request
@@ -509,6 +510,7 @@ STARTUP_CACHE_DEFER_OVERLAY=1
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
 startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
+startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4
@@ -1867,23 +1869,6 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL RADIANCE_GDN_LAZY=$GDN_LAZY"
 STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
 startup_cache_overlay
-# --- prune stale radiance cache trees (stale permutations), before the exec ---------
-# The live tree is known by construction (CACHE at :340, CACHE_SUF at :311-340), so the
-# pruner takes it as --live and can never touch it. It is capacity-governed, whole-tree-
-# first, floor-protected, and bounded by a hard time budget (timeout) so it cannot delay
-# first token: a slow scan that cannot finish within the budget simply retains (gives up
-# rather than overrun). It is a NO-OP when DRY_RUN is set (the launcher's dry run stays
-# side-effect free), and a missing pruner or any failure is a no-op for the boot
-# (existence check + `|| true`). The pruner defaults to dry-run; the launcher calls it
-# --apply so it actually reclaims. The base prefix is derived from CACHE/CACHE_SUF (not
-# hard-coded): ${CACHE%$CACHE_SUF}.
-if [ -z "${DRY_RUN:-}" ]; then
-  if [ -x "${RADIANCE_CACHE_REAP:-$HOME/bin/radiance-cache-reap.sh}" ]; then
-    timeout 20 "${RADIANCE_CACHE_REAP:-$HOME/bin/radiance-cache-reap.sh}" \
-      --live "$CACHE" --base "${CACHE%$CACHE_SUF}" --apply \
-      >/dev/null 2>&1 || true
-  fi
-fi
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host --ulimit memlock=-1 \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
   --security-opt seccomp=unconfined --cap-add SYS_PTRACE \

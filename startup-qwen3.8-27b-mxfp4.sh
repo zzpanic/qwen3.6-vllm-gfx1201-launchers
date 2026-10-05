@@ -607,6 +607,7 @@ STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
 startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
+startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
 
 # A libr4d checkout DIRECTORY whose r4d.so is copied over the image's at container start. Leave
 # unset and it is built for you (see AUTO_R4D just below); set it to use your own checkout.

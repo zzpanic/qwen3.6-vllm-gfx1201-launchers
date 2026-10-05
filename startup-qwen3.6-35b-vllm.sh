@@ -92,6 +92,7 @@ STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE_DIR="${CACHE_DIR:-./vllm-cache/$STARTUP_CACHE_KEY}"
 startup_cache_jit_mounts "$CACHE_DIR"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
+startup_cache_reap "$CACHE_DIR" ./vllm-cache/   # stale trees (startup-cache/README.md)
 MAXLEN="${MAXLEN:-262144}"     # = max_position_embeddings.
 GPUUTIL="${GPUUTIL:-0.95}"
 ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}"   # or TRITON_ATTN, ROCM_ATTN -- see header.

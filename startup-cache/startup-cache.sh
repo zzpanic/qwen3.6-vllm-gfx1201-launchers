@@ -38,6 +38,9 @@
 #   startup_cache_jit_mounts <dir>  persists comgr, tvm-ffi and tilelang under <dir>, which should
 #                                   already carry STARTUP_CACHE_KEY (the launcher's /cache dir).
 #   STARTUP_CACHE_CONTAINER_HOME    the image's HOME (default /root, the radiance image).
+# Stale-tree pruning (call once the launcher's cache dir is set):
+#   startup_cache_reap <dir> <prefix>  runs cache-reap.sh over the sibling trees "<prefix>"*; <dir>
+#                                   is the live tree and must sit under <prefix>, or nothing runs.
 
 STARTUP_CACHE_DIR="$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")"
 _sc_die() {
@@ -119,6 +122,36 @@ startup_cache_jit_mounts() {
   STARTUP_CACHE_RUN_ARGS+=(-v "$dir/comgr":"$home/.cache/comgr":z
                            -v "$dir/tvm-ffi":"$home/.cache/tvm-ffi":z
                            -v "$dir/tilelang":"$home/.tilelang":z)
+}
+
+# ---------------------------------------------------------------- stale cache trees
+# Each image, arch or flag change gets a new keyed tree, and nothing else removes the old ones.
+# This runs cache-reap.sh over the siblings "<prefix>"* before the boot: only when the disk is
+# above 65% used, never the live tree, never one launched or read in the last 24 h (the rule is in
+# cache-reap.sh's header). It stamps the live tree first, so a tree any launcher is using is
+# protected even on a filesystem mounted noatime. A live dir outside <prefix> (a custom CACHE)
+# skips pruning: its siblings are not ours to judge. Output goes to the boot log as [cache-reap]
+# lines; a DRY_RUN only reports. A slow or failed run never stops the boot.
+startup_cache_reap() {
+  local live base mode=--apply
+  live="$(realpath -m "$1")"
+  base="$2"
+  case "$base" in              # absolute, keeping a trailing / (it decides what the siblings are)
+    /*) ;;
+    */) base="$(realpath -m "$base")/";;
+    *)  base="$(realpath -m "$base")";;
+  esac
+  case "$live" in "$base"?*) ;; *)
+    echo "[cache-reap] $live is not under $base -- custom cache dir, not pruning" >&2; return 0;;
+  esac
+  if [ -n "${DRY_RUN:-}" ]; then
+    mode=--dry-run
+  else
+    mkdir -p "$live"
+    printf 'ts=%s\nhost=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HOSTNAME:-}" > "$live/.last-boot-ok" 2>/dev/null || true
+  fi
+  timeout 20 "$STARTUP_CACHE_DIR/cache-reap.sh" --live "$live" --base "$base" "$mode" 2>&1 \
+    | sed 's/^cache-reap: /[cache-reap] /' >&2 || true
 }
 
 startup_cache_overlay() {

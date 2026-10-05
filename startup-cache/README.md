@@ -12,6 +12,7 @@ A miss is always safe: the slow path rebuilds.
 | `build-boot-overlay.sh` | host | snapshots what the patch prelude changes in site-packages; run for you on a miss |
 | `overlay-apply.sh` | container, sourced | copies the verified overlay in, or leaves the prelude to run |
 | `hip-so-cache.sh` | container | compiles a `.hip` to a `.so` once per key |
+| `cache-reap.sh` | host | removes stale sibling cache trees when the disk fills; run for you at launch |
 
 ## Wiring a launcher
 
@@ -31,11 +32,13 @@ three JIT caches that live under the container's HOME instead of under any `*_CA
 
 ```bash
 CACHE=${CACHE:-$HOME/.my-launcher-cache-$STARTUP_CACHE_KEY}
-startup_cache_jit_mounts "$CACHE"   # comgr, tvm-ffi, tilelang
+startup_cache_jit_mounts "$CACHE"                       # comgr, tvm-ffi, tilelang
+startup_cache_reap "$CACHE" "$HOME/.my-launcher-cache-"  # stale sibling trees
 ```
 
-Without it a `--rm` container rebuilds all three on every boot; tvm-ffi's torch DLPack addon alone
-is about 22 s. Set `STARTUP_CACHE_CONTAINER_HOME` if the image's HOME is not `/root`.
+Without the first line a `--rm` container rebuilds all three JIT caches on every boot; tvm-ffi's
+torch DLPack addon alone is about 22 s. Set `STARTUP_CACHE_CONTAINER_HOME` if the image's HOME is
+not `/root`. The second line keeps old trees from piling up (see "Pruning stale trees").
 
 **2. Container, around the patch prelude** (optional, for the boot overlay):
 
@@ -105,6 +108,32 @@ What a cached boot still spends is fixed cost: Python imports in vLLM's two proc
 image processor set up in both (~25 s, only for a model that takes images), the weights (~20–40 s)
 and loading the compiled graphs (~15 s).
 
+## Pruning stale trees
+
+Every new image, card or flag combination gets a new keyed tree, and the old ones stay behind:
+on the box this was written on, nine stale trees held 17 GiB. `startup_cache_reap <dir> <prefix>`
+runs `cache-reap.sh` over the siblings `<prefix>*` before each boot. The launchers pass
+`$HOME/.radiance-cache-w4a8-` or `./vllm-cache/`, so trees left by an old image are covered too.
+
+The rule, in order:
+
+1. Nothing happens below **65% disk use**. The trigger is space, not age.
+2. The live tree is never touched, and neither is a tree with the same flag suffix.
+3. A tree with a **stamp** (`.last-boot-ok`) from the last 24 h is kept. Every launch stamps its
+   tree, and the kvcache launcher's container stamps it again once the server answers.
+4. Otherwise a tree goes only if **no file in it was read in the last 24 h**. The stamp file is
+   left out of that check: reading the stamp refreshes its own access time, and counting it once
+   made every tree look in use, so the pruner removed nothing for weeks without saying so.
+5. Whole trees, oldest first, at most 8 a run, stopping as soon as the disk is back under 65%.
+
+Getting it wrong costs one slow boot (everything recompiles), never a wrong answer, so it is
+deliberately simple. Its result is in the boot log as `[cache-reap]` lines. A custom `CACHE` or
+`CACHE_DIR` outside those prefixes is never pruned, and neither are its neighbours.
+
+To see what it would do: `startup-cache/cache-reap.sh --live <tree> --base <prefix>` (a dry run
+unless you add `--apply`). Knobs: `CACHE_REAP_TARGET_PCT` (65), `CACHE_REAP_MIN_AGE_HOURS` (24),
+`CACHE_REAP_MAX_DELETE` (8).
+
 ## Knobs
 
 - `ARCH=<gfx...>` overrides the arch read from `/sys/class/kfd`.
@@ -149,5 +178,6 @@ installer that skips itself), the key still says "configured" and not "happened"
 can be produced by a no-op needs a check of the artifact itself, or a documented `rm` of its cache
 dir. The overlay builder's warning refusal is one such check.
 
-Nothing is pruned automatically. Each new image leaves its old keyed directories behind, so remove
-them by hand when you rotate images.
+Only the launcher cache trees are pruned (see "Pruning stale trees"). The libr4d builds under
+`~/.cache/radiance-libr4d/` are keyed per image too and are not, so clear old ones by hand when you
+rotate images. Boot overlays are replaced in place and do not pile up.
