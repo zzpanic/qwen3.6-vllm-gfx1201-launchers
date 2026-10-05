@@ -145,6 +145,7 @@ STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 # shellcheck source=startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE_DIR="${CACHE_DIR:-./vllm-cache/$STARTUP_CACHE_KEY}"
+startup_cache_jit_mounts "$CACHE_DIR"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
 MAXLEN="${MAXLEN:-131072}"
 GPUUTIL="${GPUUTIL:-0.98}"
 ATTN="${ATTN:-ROCM_AITER_UNIFIED_ATTN}"

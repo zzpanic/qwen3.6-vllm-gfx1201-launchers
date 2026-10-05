@@ -58,6 +58,9 @@
 #         persists under $CACHE; radiance_mxfp4_fp8.so is compiled once per key; and the
 #         patch prelude is replaced by a verified boot overlay, built automatically on a
 #         miss, whose key includes KVOFF_MINIMAL, RADIANCE_GDN_LAZY and the /house patches.
+#         comgr, tvm-ffi and tilelang, which cache under the container's HOME, persist
+#         under $CACHE too (startup_cache_jit_mounts). Measured 2026-10-05: cold 527 s,
+#         cached 196 s after a host reboot, 161 s on a restart (launch to first reply).
 #       - RADIANCE_SKIP_MM_WARMUP defaults to 1 (house patch /house/patch_skip_mm_warmup.py):
 #         skips the ~21.5 s startup multi-modal processor warmup; the first image request
 #         of a boot pays it once. Set 0 for stock behaviour.
@@ -505,6 +508,7 @@ STARTUP_CACHE_DEFER_OVERLAY=1
 # shellcheck source=../../startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
+startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4

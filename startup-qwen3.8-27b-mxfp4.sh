@@ -599,11 +599,14 @@ preflight
 # reusing a stale artifact. The machinery lives in startup-cache/ (see its README.md) and is
 # shared by any launcher: this sets IMG_KEY, ARCH and STARTUP_CACHE_KEY ("$IMG_KEY-$ARCH"),
 # verifies the boot overlay, and fills STARTUP_CACHE_RUN_ARGS for the container run below.
+# startup_cache_jit_mounts adds comgr, tvm-ffi and tilelang, which otherwise cache under the
+# container's HOME and are rebuilt by every --rm container (tvm-ffi alone is ~22 s a boot).
 # ARCH=<gfx...> overrides the detected arch; BOOT_OVERLAY=0 disables the overlay.
 STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 # shellcheck source=startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
+startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
 
 # A libr4d checkout DIRECTORY whose r4d.so is copied over the image's at container start. Leave
 # unset and it is built for you (see AUTO_R4D just below); set it to use your own checkout.

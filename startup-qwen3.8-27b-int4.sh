@@ -203,6 +203,7 @@ STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 # shellcheck source=startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE_DIR="${CACHE_DIR:-./vllm-cache/$STARTUP_CACHE_KEY}"
+startup_cache_jit_mounts "$CACHE_DIR"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
                                # 0.9.3 = vLLM 0.27.1, DFlash2 native. Every benchmark in
                                # benchmarks/ was measured on this tag. 0.5.8 (vLLM 0.26.0)
                                # still works but needs DFLASH2_PATCH=1; see the header.

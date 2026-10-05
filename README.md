@@ -88,6 +88,22 @@ Nothing needs editing to run: the defaults **are** the measured production confi
   card. See "The KV pin, which is the one that will bite you" below; it is the one default
   here that is genuinely hardware-specific.
 
+### Boot time
+
+The first boot on a new image or card compiles everything, which takes about 9 minutes here. Later
+boots reuse keyed caches. `startup-qwen3.8-27b-kvcache.sh`, launch to first reply, measured
+2026-10-05:
+
+| Boot | Time |
+|---|---|
+| First boot: no caches | 527 s |
+| After a host reboot: caches kept, weights read from disk | 196 s |
+| After a restart: weights still in the page cache | 161 s |
+
+There is nothing to set up. The caches are built on the first boot and invalidate themselves when
+the image or the GPU changes. What they hold and what each one saves:
+[startup-cache/README.md](startup-cache/README.md).
+
 ### Requirements
 
 - An **AMD gfx1201** card with **32 GiB** (Radeon AI PRO R9700). This is tuned for that

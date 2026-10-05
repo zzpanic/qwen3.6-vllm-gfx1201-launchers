@@ -34,6 +34,10 @@
 #   STARTUP_CACHE_DEFER_OVERLAY=1   do not check the overlay at source time: the launcher calls
 #                                   startup_cache_overlay itself, later, once the knobs above are
 #                                   resolved (they may only be known after the keys are needed).
+# JIT caches under the container's HOME (call once the launcher's cache dir is set):
+#   startup_cache_jit_mounts <dir>  persists comgr, tvm-ffi and tilelang under <dir>, which should
+#                                   already carry STARTUP_CACHE_KEY (the launcher's /cache dir).
+#   STARTUP_CACHE_CONTAINER_HOME    the image's HOME (default /root, the radiance image).
 
 STARTUP_CACHE_DIR="$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")"
 _sc_die() {
@@ -96,6 +100,26 @@ BOOT_OVERLAY=${BOOT_OVERLAY:-$HOME/.cache/startup-cache/boot-overlay/$(basename 
 BOOT_OVERLAY_OK=""
 STARTUP_CACHE_RUN_ARGS=(-v "$STARTUP_CACHE_DIR":/startup-cache:ro,z
                         -e LAUNCH_IMG_KEY="$IMG_KEY" -e LAUNCH_GFX_ARCH="$ARCH")
+
+# ---------------------------------------------------------------- JIT caches under HOME
+# Three JIT caches default to the container's HOME, not to any of the *_CACHE_DIR variables the
+# launchers already point at /cache, so a --rm container throws them away on every boot:
+#   comgr     ~/.cache/comgr     ROCm code-object cache (GPU code compiled while the engine starts)
+#   tvm-ffi   ~/.cache/tvm-ffi   the torch DLPack addon tvm-ffi compiles from C++ on import (~22 s
+#                                of every boot, measured -- it was the largest avoidable cost left)
+#   tilelang  ~/.tilelang        tilelang's kernel cache
+# Bind-mounting them from a dir that already carries STARTUP_CACHE_KEY gives them the same
+# invalidation as everything else: a new image or arch gets a fresh, empty set. comgr names its
+# entries by content hash and the tvm-ffi addon carries the torch version in its file name, so a
+# stale entry cannot be picked up by mistake inside one key either.
+startup_cache_jit_mounts() {
+  local dir home="${STARTUP_CACHE_CONTAINER_HOME:-/root}"
+  dir="$(realpath -m "$1")"              # container runtimes want an absolute host path
+  mkdir -p "$dir"/{comgr,tvm-ffi,tilelang}
+  STARTUP_CACHE_RUN_ARGS+=(-v "$dir/comgr":"$home/.cache/comgr":z
+                           -v "$dir/tvm-ffi":"$home/.cache/tvm-ffi":z
+                           -v "$dir/tilelang":"$home/.tilelang":z)
+}
 
 startup_cache_overlay() {
   local patches have="" expect

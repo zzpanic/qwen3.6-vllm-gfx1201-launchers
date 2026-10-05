@@ -7,7 +7,7 @@ A miss is always safe: the slow path rebuilds.
 
 | File | Side | What it does |
 |---|---|---|
-| `startup-cache.sh` | host, sourced | image ID + arch → `STARTUP_CACHE_KEY`; checks (and on a miss builds) the boot overlay; builds the container run args |
+| `startup-cache.sh` | host, sourced | image ID + arch → `STARTUP_CACHE_KEY`; checks (and on a miss builds) the boot overlay; builds the container run args; persists the JIT caches that live under the container's HOME |
 | `boot-overlay-meta.sh` | host, sourced | the one formula for the overlay's identity (shared by the check and the builder) |
 | `build-boot-overlay.sh` | host | snapshots what the patch prelude changes in site-packages; run for you on a miss |
 | `overlay-apply.sh` | container, sourced | copies the verified overlay in, or leaves the prelude to run |
@@ -25,6 +25,17 @@ STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 
 Put `$STARTUP_CACHE_KEY` into every cache directory or key the launcher owns. Add
 `"${STARTUP_CACHE_RUN_ARGS[@]}"` to the `podman run` / `docker run` command.
+
+Then, once the launcher's own cache dir is set (it should carry `$STARTUP_CACHE_KEY`), persist the
+three JIT caches that live under the container's HOME instead of under any `*_CACHE_DIR`:
+
+```bash
+CACHE=${CACHE:-$HOME/.my-launcher-cache-$STARTUP_CACHE_KEY}
+startup_cache_jit_mounts "$CACHE"   # comgr, tvm-ffi, tilelang
+```
+
+Without it a `--rm` container rebuilds all three on every boot; tvm-ffi's torch DLPack addon alone
+is about 22 s. Set `STARTUP_CACHE_CONTAINER_HOME` if the image's HOME is not `/root`.
 
 **2. Container, around the patch prelude** (optional, for the boot overlay):
 
@@ -60,6 +71,40 @@ they are final. `kv-cache/launcher/serve-mxfp4-kvcache-base.sh` does this.
 bash /startup-cache/hip-so-cache.sh foo.hip "$SP"/foo.so -O3 -fPIC -shared $(python3 -m pybind11 --includes)
 ```
 
+## What it saves
+
+Measured 2026-10-05 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 with DFlash2 ×7, a
+16 GiB KV offload tier. Launch to first reply:
+
+| Boot | `startup-qwen3.8-27b-kvcache.sh` |
+|---|---|
+| Cold: no caches, the overlay built on this boot, page cache dropped | 527 s |
+| Cached, page cache dropped (what a host reboot looks like) | 196 s |
+| Cached, page cache warm (a restart) | 161 s |
+
+The gap between the last two rows is reading 20 GiB of weights from disk, which no cache here helps
+with.
+
+Where the cold boot's extra time goes, by phase. These come from the production launcher on the
+same image and model (cold 470 s, cached 183 s), attributed from log timestamps, so treat them as
+approximate:
+
+| Cache | Saved per boot |
+|---|---|
+| vLLM's torch.compile / inductor / Triton caches under `/cache` | ~140 s |
+| engine start: Triton kernels and comgr code objects | ~50 s |
+| API-server start, including the tvm-ffi addon | ~30 s |
+| `radiance_mxfp4_fp8.so` (`hip-so-cache.sh`) | ~30 s |
+| aiter JIT (`module_aiter_core`) | ~30 s |
+| boot overlay instead of the patch prelude | ~5 s |
+
+The comgr / tvm-ffi / tilelang mounts on their own, measured as an A/B with every other cache warm:
+189 s → 151 s, almost all of it the tvm-ffi addon no longer being rebuilt.
+
+What a cached boot still spends is fixed cost: Python imports in vLLM's two processes (~50 s), the
+image processor set up in both (~25 s, only for a model that takes images), the weights (~20–40 s)
+and loading the compiled graphs (~15 s).
+
 ## Knobs
 
 - `ARCH=<gfx...>` overrides the arch read from `/sys/class/kfd`.
@@ -91,7 +136,9 @@ It is not fully generic yet:
 5. **Linux tools.** It needs bash and GNU `realpath`.
 
 How much time it saves depends on how much work the launcher does at boot (patching, `hipcc`,
-aiter JIT). A stock `vllm serve` in a stock image gains correct keys but no speed. vLLM already
+aiter JIT). A stock `vllm serve` in a stock image gains correct keys and the JIT-cache mounts (in
+the radiance image the tvm-ffi addon alone is ~22 s a boot), but nothing from the overlay or the
+`.so` cache. vLLM already
 fingerprints its own compile cache, so for that cache the image-ID key is insurance against
 reusing a stale graph, not a speedup.
 
