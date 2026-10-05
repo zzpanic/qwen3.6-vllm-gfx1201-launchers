@@ -481,12 +481,15 @@ fi
 # LOCAL OVERLAY (separate from the DFlash2 backport above, and not upstream code).
 # patches/radiance-<tag>/vllm holds patched COPIES of files the image already ships. Each
 # one carries a header naming its base version and marking every local hunk. Today there
-# are two, both for the 0.9.3 base:
+# are three, all for the 0.9.3 base:
 #   v1/core/kv_cache_utils.py                  KV cache group padding (KV_GROUP_SIZE below)
 #   model_executor/models/qwen3_dflash.py      packed-int4 draft checkpoint load fix
+#   v1/worker/gpu/model_runner.py              uniform-decode guard: a prefill chunk of exactly
+#                                              1 + SPECTOK tokens replayed the spec-decode
+#                                              cudagraph (kv-cache/patches/patch_uniform_decode_guard.py)
 # Mounted read-only, file-by-file, exactly like the backport. An overlay directory is
 # VERSION-BOUND: these are copies of 0.9.3 sources, so bumping the image tag silently
-# reverts the image's own fixes in those two files back to 0.9.3. Rebase by diffing this
+# reverts the image's own fixes in those files back to 0.9.3. Rebase by diffing this
 # overlay against the NEW image's stock file, never by replaying the patch blind.
 LOCAL_OVERLAY="${LOCAL_OVERLAY:-1}"
 if [[ "$LOCAL_OVERLAY" == "1" && "$IMAGE" != *:0.5.8 ]]; then

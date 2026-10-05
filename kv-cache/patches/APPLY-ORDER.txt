@@ -28,8 +28,12 @@
                                                    applied (last, after the upstream patches)
  17  patch_gdn_state_fp16.py                          always applied, non-fatal; dormant unless the
                                                    ssm cache is fp16 AND libr4d is R4D_RX13 (r4d_kernels)
- 18  patch_gdn_lazy_invalidate.py                     RADIANCE_GDN_LAZY=1 only (UNVALIDATED -- keep lazy
-                                                   off); FATAL on failure; needs R4D_RX13 (r4d_kernels)
+ 18  patch_gdn_lazy_invalidate.py                     RADIANCE_GDN_LAZY=1 only (opt-in, see r4d_kernels/
+                                                   README.md); FATAL on failure; needs R4D_RX13
+ 19  patch_uniform_decode_guard.py                    always applied, FATAL on failure. Correctness fix
+                                                   for the V2 runner: a prefill chunk of exactly
+                                                   1 + num_speculative_tokens tokens replayed the
+                                                   spec-decode cudagraph (garbage reply). Order-free.
  
  This order is a dependency, not a preference. 11 extends the get_stats() that 2
  creates on the fs tier, and refuses to apply if 2 has not run -- it says so

@@ -487,6 +487,15 @@ elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
 # its own KVOFF_DISK_SUBDIR -- the on-disk config.json is not rewritten when geometry changes),
 # which also finally answers R3.12.5. READ THE BOOT LOG before assuming it halved: upstream's 880
 # is their shape, not a measurement of ours.
+#
+# *** MEASURED 2026-10-05: BROKEN THROUGH THE OFFLOAD TIER -- KEEP IT 0. *** With an fp16 ssm cache, a
+# resume whose GDN state is restored from the CPU/disk tier answers garbage (every reply
+# "</think><|im_end|>", KL 4.8 nats vs a cold run), with or without lazy GDN and with the disk
+# nowhere near full. fp32 restores bit-exactly through the same path, and a GPU-resident fp16
+# resume is exact, so the fault is in how the connector saves/restores an fp16 state page. The
+# block did halve here (1648 -> 880). Drift against fp32 also grows with context (KL ~2.3x the
+# spec on/off noise floor at 25k). Gate any retry on kv-cache/tools/val_resume.py --evict 9
+# being bit-exact at fp16. The capacity at stake is small: +4.1% KV over fp32 + lazy GDN.
 MAMBA_SSM_FP16=${MAMBA_SSM_FP16:-0}
 if [ "$MAMBA_SSM_FP16" = 1 ]; then CACHE_SUF="$CACHE_SUF-f16ssm"; fi
 # RADIANCE_GDN_FUSED_MAX_ITEMS (default 32 = the module default, i.e. no behaviour change):
@@ -2198,6 +2207,11 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then
       PYTHONPATH=/patches python3 /house/patch_gdn_lazy_invalidate.py
     fi
+    # House patch 2026-10-06: uniform-decode guard (V2 runner). A prefill chunk of exactly
+    # 1 + num_speculative_tokens tokens -- every prompt of k x block_size + that many tokens --
+    # was dispatched to the spec-decode FULL cudagraph and answered with a 1-2 token fragment.
+    # FATAL if it fails: the bug would return silently. Regression test: kv-cache/tools/lenprobe.py.
+    PYTHONPATH=/patches python3 /house/patch_uniform_decode_guard.py
     # END patch prelude
     fi
     # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~30 s per start). Keyed on

@@ -606,6 +606,13 @@ preflight
 # startup_cache_jit_mounts adds comgr, tvm-ffi and tilelang, which otherwise cache under the
 # container's HOME and are rebuilt by every --rm container (tvm-ffi alone is ~22 s a boot).
 # ARCH=<gfx...> overrides the detected arch; BOOT_OVERLAY=0 disables the overlay.
+# HOUSE: this repo's own vLLM patches (kv-cache/patches), mounted at /house beside ggz14's tree
+# at /patches. The prelude applies the uniform-decode guard from there, and the boot overlay
+# builder needs the same mount, so it is set before startup-cache.sh is sourced.
+HOUSE="$(realpath -m "${HOUSE:-$SCRIPT_DIR/kv-cache/patches}")"
+[ -f "$HOUSE/patch_uniform_decode_guard.py" ] || {
+  echo "[radiance] FATAL: HOUSE=$HOUSE has no patch_uniform_decode_guard.py (kv-cache/patches)" >&2; exit 1; }
+STARTUP_CACHE_OVERLAY_MOUNTS="${STARTUP_CACHE_OVERLAY_MOUNTS:+$STARTUP_CACHE_OVERLAY_MOUNTS }$HOUSE:/house"
 STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
 # shellcheck source=startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
@@ -1387,6 +1394,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -v "$MODELS":/models \
   -v "$CACHE":/cache \
   -v "${PATCHES:-$REPO}":/patches:z \
+  -v "$HOUSE":/house:z \
   ${CT_MOUNT[@]+"${CT_MOUNT[@]}"} \
   ${R4D_SO:+-v "$R4D_SO":/r4d:z} \
   ${R4D_SO:+-e R4D_SO="$R4D_SO"} \
@@ -1420,6 +1428,11 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # Non-fatal: fixes content=null on thinking-off requests; not required to serve.
     python3 patch_qwen3_thinkoff.py \
       || echo "[radiance] WARNING: thinkoff patch did not apply; thinking-off requests will return empty content"
+    # House patch 2026-10-06 (kv-cache/patches): uniform-decode guard for the V2 runner. A prefill
+    # chunk of exactly 1 + num_speculative_tokens tokens -- every prompt of k x block_size + that
+    # many tokens -- replayed the spec-decode FULL cudagraph and answered with a 1-2 token fragment.
+    # FATAL if it fails: the bug would return silently. Regression test: kv-cache/tools/lenprobe.py.
+    PYTHONPATH=/patches python3 /house/patch_uniform_decode_guard.py
     cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
     # radiance_drafthead.py is copied too so RADIANCE_DRAFT_RERANK can be swept without an
     # image rebuild. The repo copy was byte-identical to the 0.9.3 one before that knob existed.

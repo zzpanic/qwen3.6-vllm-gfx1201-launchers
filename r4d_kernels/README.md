@@ -47,13 +47,32 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
 - `gdn_chunk_scan_k128_v128_c64_bf16_st`: the scan with the state width as an argument. With an fp16
   ssm cache, `kv-cache/patches/patch_gdn_state_fp16.py` lets prefill read and write the state
   natively instead of widening it in Python (same arithmetic, two fewer copies). Dormant on fp32.
-- **Lazy GDN (UNVALIDATED -- keep `RADIANCE_GDN_LAZY=0`).** `gdn_lazy_materialize` mode 2 zeroes a
+- **Lazy GDN (opt-in, `RADIANCE_GDN_LAZY=1`; see Validation below).** `gdn_lazy_materialize` mode 2 zeroes a
   prefilling request's stash headers in every row-split region (a recycled stash block could
   otherwise replay another request's candidates -- the multi-turn corruption ggz14 reported in
   0cadf57), plus stale-stash counters (`gdn_lazy_stale_counts_<tag>`), wired by
   `kv-cache/patches/patch_gdn_lazy_invalidate.py`. The multi-turn gate
   (`kv-cache/tools/mt_lazy_gate.py`) did NOT reproduce the corruption even with the fix off, so the
   fix is unproven. None of this runs while lazy GDN is off.
+
+## Validation, 2026-10-05/06 (one R9700, Qwen3.8-27B MXFP4, DFlash x7, fp8 KV, MAXSEQS=2)
+
+- **Kernel vs fp64:** the deployed build passes all 12 cases of the independent fp64 recurrence
+  check (output error 0.23-0.36%) including CUDA-graph replay.
+- **Lazy GDN, concurrent soak:** two concurrent multi-turn copy streams for 72 rounds (5,472 turns)
+  with lazy on, then 37 rounds (2,812 turns) with lazy off as the control. Same failures at the
+  same rate in both, all traced to the uniform-decode bug below -- none specific to lazy; 0 engine
+  faults. Lazy drift vs eager stays at or below the spec on/off noise floor (KL 0.0008-0.0023).
+  It is still opt-in: ggz14's original multi-turn corruption was never reproduced, so the fix for
+  it is unproven, not disproven. With fp32 state it adds +13.2% KV (228,737 -> 259,011 tokens) and
+  measured +7% decode for 1-3% prefill.
+- **fp16 ssm state (`MAMBA_SSM_FP16=1`): do not use with the KV offload tier.** A resume restored
+  from the CPU/disk tier answers garbage; see the knob's block in the kvcache launcher.
+- **Not a kernel bug, found by this validation:** vLLM 0.27.1's V2 runner replayed the
+  speculative-decode CUDA graph over any prefill chunk of exactly `1 + num_speculative_tokens`
+  tokens -- an empty reply for roughly 1 prompt in 1,648. All three 0.9.3 launchers now apply
+  `kv-cache/patches/patch_uniform_decode_guard.py` (int4 as an overlay copy);
+  `kv-cache/tools/lenprobe.py` is the regression test.
 
 ## Sources and licence status
 

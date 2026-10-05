@@ -95,3 +95,26 @@ If the engine appears FASTER than the calibrated device, the two were not
 measuring the same thing -- the calibration reads whole files one at a time
 while the engine reads many blocks per job in parallel. The tool says so instead
 of picking whichever number supports a purchase.
+
+# Correctness tools (no special build; any OpenAI-compatible endpoint)
+
+All default to llama-swap on `127.0.0.1:1234` and model `qwen3.8-27b-vllm`; pass `--base` /
+`--model` otherwise. Greedy, batch 1 unless stated, with a fresh `cache_salt` per run so runs
+cannot hit each other's cached prefixes.
+
+- **`lenprobe.py`** -- regression test for the V2 uniform-decode bug
+  (`patches/patch_uniform_decode_guard.py`): prompts whose last prefill chunk is exactly
+  `1 + num_speculative_tokens` tokens. Exit 0 = guard working. `--block` is the attention block
+  size from the boot log, `--spec` the draft count. About 2 minutes.
+- **`val_resume.py`** -- the same long prompts answered cold and resumed from the prefix cache,
+  compared token by token. `--evict 9` first pushes the cache out of the GPU with ~310k unrelated
+  tokens so the resume is restored from the CPU/disk tier -- the test that caught fp16 ssm state
+  failing there. Expect bit-exact at fp32.
+- **`val_long.py`** -- ~25k-token registry with checkable answers (verbatim copies, deep lookups).
+- **`mt_lazy_gate.py`** -- multi-turn, prefix-reuse gate. `--copy N` makes every turn copy N records
+  back verbatim, so answers cross cache-block boundaries during decode.
+- **`spec_ab.py`** -- greedy output with speculation on vs off (`SPEC_METHOD=none`).
+- **`errmargin.py`, `klstat.py`** -- how far apart two runs of the above are: token agreement,
+  |delta logprob|, flip margins in bf16 steps, and approximate per-token KL from the top-5
+  logprobs. Measure a change against a noise floor -- e.g. `spec_ab.py` on vs off, 99.13% agreement
+  and KL 0.0021 on the reference box -- not against zero.

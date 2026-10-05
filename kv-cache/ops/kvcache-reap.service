@@ -6,5 +6,9 @@ ConditionPathIsDirectory=/kvcache/blocks
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/kvcache-reap.sh
+# Free space that must remain after every run: peak store rate x the gap between runs x 1.25.
+# 24 GB = 225 MB/s (measured peak on the reference box) x 80 s (1-min timer + 10 s accuracy)
+# x 1.25. In GB, so it does not depend on the volume size. 0 = off (percentage triggers only).
+Environment=KVCACHE_MIN_FREE_GB=24
 Nice=10
 IOSchedulingClass=idle

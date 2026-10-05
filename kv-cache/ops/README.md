@@ -19,6 +19,17 @@ leaves blocks younger than 15 minutes (`KVCACHE_MIN_AGE_MIN`) alone unless the v
 holds `KVCACHE_ROOT` (default `/kvcache/blocks`), so **give the tier its own filesystem**:
 anything else stored there is paid for by deleting cache blocks.
 
+**Size the free-space floor to the write rate, not the volume** (`KVCACHE_MIN_FREE_GB`, 24 in
+the shipped unit). A percentage trigger alone is not enough: at 90% a 94 GB volume has ~9 GB
+left, which peak prefill fills in about 40 s -- less than one timer cycle -- and below 90% the
+15-minute floor stops the normal stage from touching the hot blocks. The reference box logged
+15,486 ENOSPC store failures in five days that way. Below `KVCACHE_MIN_FREE_GB` the emergency
+stage runs whatever `%use` says, and both stages delete until usage is at or below the target
+AND that much is free. Size it as **peak store rate x gap between runs x 1.25**: read the peak
+from the engine's `kv_offload_tier_store_bytes:('fs',)` metric (per 10 s interval), and the gap
+is the timer cadence plus its accuracy. A failed store itself is safe -- each block file is
+written to a temp name and renamed -- it just wastes the recompute.
+
 ## After every reload: check it is serving
 
     watch -n 5 python3 ../tools/kvwatch.py   # either build: hit rates and bytes moved

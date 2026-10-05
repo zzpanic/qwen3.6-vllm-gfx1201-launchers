@@ -25,6 +25,7 @@ turns and the first divergence of each conversation (exit 0 when all turns are i
 USAGE
   mt_lazy_gate.py --model qwen3.8-27b-vllm --label lazyoff-a --out /tmp/mt-lazyoff-a.json
   mt_lazy_gate.py --compare /tmp/mt-lazyoff-a.json /tmp/mt-lazyoff-b.json
+  mt_lazy_gate.py --copy 8 --max-tokens 1400 --label copy-a --out /tmp/mt-copy-a.json   # long turns
 """
 import argparse
 import json
@@ -41,6 +42,12 @@ TEAMS = ["Kestrel", "Osprey", "Heron", "Wren", "Plover", "Curlew", "Merlin", "Av
 REGIONS = ["north-1", "east-2", "south-3", "west-4", "core-5"]
 
 
+def record_line(r):
+    return (f"Record {r['id']:03d}: service {r['name']} listens on port {r['port']}, is owned by "
+            f"team {r['team']}, runs in region {r['region']}, and has been in its current state "
+            f"since day {r['day']}.")
+
+
 def registry(seed, n):
     rnd = random.Random(seed)
     names, recs = set(), []
@@ -52,16 +59,24 @@ def registry(seed, n):
         recs.append({"id": len(recs) + 1, "name": name, "port": rnd.randint(2000, 9899),
                      "team": rnd.choice(TEAMS), "region": rnd.choice(REGIONS),
                      "day": rnd.randint(2, 89)})
-    lines = [f"Record {r['id']:03d}: service {r['name']} listens on port {r['port']}, is owned by "
-             f"team {r['team']}, runs in region {r['region']}, and has been in its current state "
-             f"since day {r['day']}." for r in recs]
+    lines = [record_line(r) for r in recs]
     doc = "SERVICE REGISTRY (authoritative; answer only from this text)\n\n" + "\n".join(lines)
     return doc, recs
 
 
-def questions(recs, conv, turns, seed):
+def questions(recs, conv, turns, seed, copy=0):
     rnd = random.Random(seed * 1000 + conv)
     out = []
+    if copy:
+        # --copy N: every turn copies N records back verbatim, so each answer is several hundred
+        # tokens and the conversation crosses GDN cache-block boundaries DURING decode -- where a
+        # stale stash would be replayed. Checked exactly: every copied line must be present.
+        for _ in range(turns):
+            lo = rnd.randint(1, len(recs) - copy + 1)
+            q = (f"Copy records {lo:03d} to {lo + copy - 1:03d} from the registry verbatim, one per "
+                 f"line, nothing else.")
+            out.append((q, [record_line(recs[i - 1]) for i in range(lo, lo + copy)]))
+        return out
     for _ in range(turns):
         r = rnd.choice(recs)
         kind = rnd.choice(["port", "team", "region", "day"])
@@ -106,13 +121,18 @@ def looped(text, n=6, reps=4):
     return False
 
 
+def copy_loop(text):
+    ls = [x.strip() for x in text.splitlines() if x.strip().startswith("Record ")]
+    return len(ls) != len(set(ls))
+
+
 def run(a):
     doc, recs = registry(a.seed, a.records)
     salt = f"mtgate-{a.label}-{int(time.time())}"
     convs = []
     for c in range(a.convs):
         sysmsg = {"role": "system", "content": f"You are assistant #{c + 1}. Be terse and exact."}
-        convs.append({"messages": [sysmsg], "qs": questions(recs, c, a.turns, a.seed), "turns": []})
+        convs.append({"messages": [sysmsg], "qs": questions(recs, c, a.turns, a.seed, a.copy), "turns": []})
     healthy = correct = total = 0
     for t in range(a.turns):
         for c, cv in enumerate(convs):
@@ -124,8 +144,13 @@ def run(a):
             r = chat(a.base, a.model, cv["messages"], salt, a.max_tokens, a.timeout)
             text = r["content"].strip()
             r.update({"conv": c + 1, "turn": t + 1, "question": q, "expected": want,
-                      "empty": text == "", "loop": looped(r["content"] + " " + r["reasoning"]),
-                      "correct": re.search(rf"\b{re.escape(want)}\b", text) is not None})
+                      "empty": text == "",
+                      # copy turns repeat the registry's phrasing by design, so the n-gram test would
+                      # flag every one: there a loop is a copied line that comes back twice
+                      "loop": (copy_loop(text) or looped(r["reasoning"])) if a.copy
+                              else looped(r["content"] + " " + r["reasoning"]),
+                      "correct": (all(x in re.sub(r"[`*|]", "", text) for x in want) if isinstance(want, list)
+                                  else re.search(rf"\b{re.escape(want)}\b", text) is not None)})
             r["healthy"] = (not r["empty"]) and (not r["loop"]) and r["finish"] == "stop"
             healthy += r["healthy"]; correct += r["correct"]; total += 1
             cv["turns"].append(r)
@@ -175,6 +200,8 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--max-tokens", type=int, default=400)
     p.add_argument("--min-accuracy", type=float, default=0.9)
+    p.add_argument("--copy", type=int, default=0, metavar="N",
+                   help="long turns: copy N records back verbatim each turn (raise --max-tokens)")
     p.add_argument("--timeout", type=float, default=1800)
     p.add_argument("--compare", nargs=2, metavar=("A", "B"))
     a = p.parse_args()
