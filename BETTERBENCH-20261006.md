@@ -1,126 +1,69 @@
-# BetterBench, 2026-10-06: the release configuration
+# BetterBench report
 
-This is the final BetterBench run of the configuration this repository ships. It covers long decode,
-prefill to 128k, and concurrency 1 and 2. It is compared with the morning's release on the same box.
-The raw output (`results.json`, the charted `results.html`, the config and the log) is in
-[`benchmarks/betterbench-20261006/`](benchmarks/betterbench-20261006/).
+- **endpoint**: `http://127.0.0.1:1234/v1`  ·  **model**: `qwen3.8-27b-vllm`  ·  **host**: llama
+- **corpus**: v1.0  ·  **sampling**: temp 1.0  ·  **passes/cat**: 20  ·  prefix-cache: cold (nonce)
+- **notes**: `image=vllm-radiance-0.9.3`  ·  `libr4d=rx16-dsplit-clamp`  ·  `ssm=fp32`  ·  `lazy_gdn=on`  ·  `fast_draft=on`  ·  `verifyhead=global-256`  ·  `embed_host=on`  ·  `kv_mem=11.8e9`  ·  `mxfp4=house-sly-decode-band`  ·  `dflash=dflash2x7-probabilistic`  ·  `max_num_seqs=2`  ·  `nonce=salted-per-run`  ·  `config=config-prod-20260823+prefill128k`
+- **gpu**: amd ['device,Card Series,Card Model,Card Vendor,Card SKU,Subsystem ID,Device Rev,Node ID,GUID,GFX Version', 'card0,AMD Radeon AI PRO R9700,0x7551,Advanced Micro Devices Inc. [AMD/ATI],APM107573,0x5413,0xc0,1,27203,gfx1201']
 
-## Headline
+## Single-stream (batch = 1)
 
-| | Morning release | **This release** | Change |
-|---|--:|--:|--:|
-| Decode, combined (weighted median) | 110.6 t/s | **129.7 t/s** | **+17%** |
-| Decode step, p50 / p99 | 41.7 / 46.8 ms | **35.7 / 40.1 ms** | -14% / -14% |
-| Concurrency 1, aggregate | 99.1 t/s | **114.7 t/s** | +16% |
-| Concurrency 2, aggregate | 175.5 t/s | **202.0 t/s** | **+15%** |
-| Prefill at 32k | 2,775 t/s | **2,802 t/s** | +1% |
-| GPU KV pool | 259,011 tokens | **329,035 tokens** | **+27%** |
-| Stalls, engine faults | 0, 0 | **0, 0** | |
+This server packs several tokens into one stream update (speculative decoding), so there is no per-token latency to report — the tokens in an update arrive together. **update p50/p99** is the measured wall-clock gap between updates (p99 is the stutter); **tok/update** is how many tokens land per update. TTFT in ms; decode = per-run tok/s.
 
-**What changed between the two runs:**
-- the int2 draft head and the global top-256 verify head (`FAST_DRAFT=1` plus vllm-radiance PR #9 and
-  the fixes that make it arm on vLLM 0.27.1);
-- the input embedding in host RAM (`EMBED_HOST=1`, the KV gain);
-- the DFlash2 sampling-RNG fix;
-- exact-wide DSPLIT prefill and the block-table clamp (libr4d rx14 -> rx16);
-- the MXFP4 decode band for M 9-64.
+| category | passes | TTFT p50 | TTFT p99 | update p50 (ms) | update p99 (ms) | tok/update | decode t/s (med) | ±IQR | CV |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| chat | 20 | 101.5 | 107.2† | 35.6 | 40.5 | 3.52 | 93.0 | 19.9 | 19.5% |
+| code | 20 | 99.4 | 111.5† | 35.8 | 40.1 | 4.80 | 142.9 | 20.5 | 13.0% |
+| file_edit | 20 | 100.8 | 107.1† | 35.8 | 40.7 | 5.92 | 176.4 | 19.6 | 9.3% |
+| json | 20 | 99.5 | 105.9† | 35.7 | 40.2 | 5.13 | 165.4 | 44.1 | 17.6% |
+| math | 20 | 98.1 | 100.8† | 35.8 | 39.3 | 5.74 | 163.1 | 9.0 | 7.5% |
+| prose | 20 | 98.9 | 101.1† | 35.7 | 40.2 | 2.73 | 78.8 | 13.9 | 10.9% |
+| reasoning | 20 | 99.2 | 105.1† | 35.8 | 40.2 | 3.39 | 93.0 | 45.9 | 28.4% |
+| summarization | 20 | 102.2 | 108.1† | 35.8 | 39.5 | 4.85 | 139.8 | 10.2 | 9.9% |
 
-The decode gain is almost all step time: about 6 ms less per verify step, at the same tokens per
-step. The details are in [KERNEL.md](KERNEL.md).
+**Combined (weighted code:0.3, reasoning:0.2, prose:0.15, json:0.15, file_edit:0.1, summarization:0.1)** — decode t/s median ≈ **129.7**, update p99 ≈ **40.1 ms**, TTFT p50 ≈ **100 ms**
 
-## Setup
+*160 of 160 runs streamed several tokens per update (`chunk_token_mismatch`). Per-token ITL is not reported for them — see METHODOLOGY.md §chunk-token.*
 
-| | |
-|---|---|
-| Hardware | 1 x AMD Radeon AI PRO R9700 (gfx1201, 32 GB), VFIO passthrough to a 4-vCPU / 40 GiB Ubuntu 24.04 VM ([SYSTEM.md](SYSTEM.md)) |
-| Image | `stilldeadcode/vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model runner) |
-| Model | Qwen3.8-27B MXFP4 W4A8, DFlash2 drafter (FP8), 7 speculative tokens, probabilistic draft sampling |
-| Kernels | libr4d v0.5.0 + `r4d_kernels.patch` (rx16: exact GDN scan, DSPLIT, clamp, lazy-GDN invalidation), MXFP4 decode band |
-| State, KV | fp32 GDN state, lazy GDN on, fp8 KV, `KV_MEM=11.8e9` (329,035 tokens), `EMBED_HOST=1` |
-| Serving | `MAXSEQS=2`, `CHUNK=2048`, context **204,800** (see the note below), KV offload GPU -> RAM (16 GiB) -> disk |
-| BetterBench | 0.4.0, corpus v1.0, 3 warmup + **20 measured passes** per category, temperature 1.0, top_p 0.95, top_k 20 |
-| Cache | Cold: a salted nonce per run, so no request is served from the prefix cache |
-| Load | The LAN was quiet: 0 outside requests during the run (checked from the llama-swap log) |
+## Reasoning / answer split
 
-**Note:** this run used the production entry's 204,800-token context and 16 GiB RAM tier. The
-launcher as shipped defaults to the model's full 262,144 tokens and a 19 GiB RAM tier (KV-CACHE.md).
-The GPU pool and the kernels are the same, so decode and prefill up to 128k are unaffected. Prefill
-beyond 128k at 262,144 has not been benchmarked.
+A per-token rate cannot see how much of a run was spent thinking. Two configs with identical decode t/s can take very different times to reach an answer. **TTFA** is time to the first *answer* token — the wait a reader actually feels.
 
-## Single stream
+| category | runs w/ split | reasoning share (est) | TTFA p50 (ms) | never reached answer |
+|---|--:|--:|--:|--:|
+| chat | 20/20 | 78% | 1382.4 | 15/20 |
+| code | 20/20 | 79% | 2064.2 | 7/20 |
+| file_edit | 20/20 | 86% | 745.4 | 6/20 |
+| json | 20/20 | 53% | 655.3 | 4/20 |
+| math | 20/20 | 68% | 1241.3 | 8/20 |
+| prose | 20/20 | 70% | 3199.2 | 8/20 |
+| reasoning | 20/20 | 74% | 988.1 | 11/20 |
+| summarization | 20/20 | 54% | 923.3 | 0/20 |
 
-| Category | Decode t/s (median) | ± IQR | Tokens / step | Step p50 / p99 (ms) | TTFT p50 (ms) | vs morning |
-|---|--:|--:|--:|--:|--:|--:|
-| file_edit | **176.4** | 19.6 | 5.92 | 35.8 / 40.7 | 100.8 | +18% |
-| json | **165.4** | 44.1 | 5.13 | 35.7 / 40.2 | 99.5 | +19% |
-| math | **163.1** | 9.0 | 5.74 | 35.8 / 39.3 | 98.1 | +13% |
-| code | **142.9** | 20.5 | 4.80 | 35.8 / 40.1 | 99.4 | +17% |
-| summarization | **139.8** | 10.2 | 4.85 | 35.8 / 39.5 | 102.2 | +26% |
-| chat | **93.0** | 19.9 | 3.52 | 35.6 / 40.5 | 101.5 | +24% |
-| reasoning | **93.0** | 45.9 | 3.39 | 35.8 / 40.2 | 99.2 | +12% |
-| prose | **78.8** | 13.9 | 2.73 | 35.7 / 40.2 | 98.9 | +13% |
-| **Combined** | **129.7** | | | **35.7 / 40.1** | **100** | **+17%** |
+*A `—` means too few runs reached an answer to say (fewer than 5, or under half the passes). Runs cut off before any answer began are counted, not folded in: crediting their output as an answer would flatter the result. Token counts are apportioned by character count, so the share is an estimate — punctuation-dense answers (json, code) are under-counted.*
 
-The combined figure is a weighted median: code 0.30, reasoning 0.20, prose 0.15, json 0.15, file_edit
-0.10, summarization 0.10.
+*Stopped at `max_tokens`: **113/160** runs (71%). On a thinking model a truncated run measures the thinking phase, not a complete answer.*
 
-**Decode speed follows the tokens accepted per step.** The step time is flat at about 35.7 ms in every
-category. The rate differs only in how many of the 7 drafted tokens the target accepts: about 6 for
-predictable edits and structured output, under 3 for free prose. All 160 runs streamed several tokens
-per update, so per-token latency is not meaningful and BetterBench reports the step gap instead.
+## Concurrency sweep
 
-**Most runs end at the token cap.** 113 of the 160 runs stopped at `max_tokens`. This is a thinking
-model, and many runs were still reasoning when they hit it, so these numbers measure generation speed,
-not time to a finished answer. Time to the first answer token (TTFA p50) ranged from 0.66 s (json)
-to 3.2 s (prose).
+| level | ok/req | aggregate t/s | TTFT p50 | TTFT p99 | per-req decode t/s (med) |
+|--:|--:|--:|--:|--:|--:|
+| 1 | 24/24 | 114.7 | 99.7 | 107.8† | 144.8 |
+| 2 | 24/24 | 202.0 | 167.7 | 224.3† | 138.0 |
 
-## Concurrency
+## Prompt processing (prefill) sweep
 
-| Clients | OK / requests | Aggregate t/s | Per-request decode t/s | TTFT p50 (ms) |
-|--:|--:|--:|--:|--:|
-| 1 | 24/24 | 114.7 | 144.8 | 99.7 |
-| 2 | 24/24 | **202.0** | 138.0 | 167.7 |
+Prefill throughput = prompt tokens ÷ TTFT, at increasing input depth (tiny decode, cold prefix cache). PP t/s columns: 1% low / median / 99% high.
 
-The second client costs each stream under 5% of its speed (144.8 -> 138.0 t/s) and nearly doubles
-throughput (1.76x). `MAXSEQS=2` is the served limit, so concurrency 2 is the top of the sweep.
+| target depth | prompt tokens (med) | TTFT p50 (ms) | PP t/s 1% low | PP t/s median | PP t/s 99% high |
+|--:|--:|--:|--:|--:|--:|
+| 2000 | 1551 | 512.3 | 3000.0† | 3025.3 | 3031.0† |
+| 8000 | 5954 | 1942.7 | 3056.1† | 3065.3 | 3085.7† |
+| 16000 | 11830 | 4079.6 | 2870.5† | 2899.8 | 2902.2† |
+| 32000 | 23580 | 8415.9 | 2799.3† | 2801.8 | 2805.7† |
+| 64000 | 47092 | 18333.3 | 2561.4† | 2568.6 | 2571.8† |
+| 128000 | 94102 | 43071.3 | 2173.6† | 2184.8 | 2187.3† |
 
-## Prefill
+---
+*† this percentile rests on fewer samples than `n · tail ≥ 5` requires — a p99 needs 500 observations, and 20 passes give 20. Read it as "roughly the worst observed", not as a percentile. The full list is under `sample_gate` in `results.json`.*
 
-Cold prefix cache, minimal decode. Throughput = prompt tokens / TTFT.
-
-| Target depth | Prompt tokens | TTFT p50 | Prefill t/s (median) | 1% low | 99% high | vs morning |
-|--:|--:|--:|--:|--:|--:|--:|
-| 2k | 1,551 | 0.51 s | **3,025** | 3,000 | 3,031 | +0.1% |
-| 8k | 5,954 | 1.94 s | **3,065** | 3,056 | 3,086 | +0.6% |
-| 16k | 11,830 | 4.08 s | **2,900** | 2,871 | 2,902 | +0.7% |
-| 32k | 23,580 | 8.42 s | **2,802** | 2,799 | 2,806 | +1.0% |
-| 64k | 47,092 | 18.3 s | **2,569** | 2,561 | 2,572 | +0.7% |
-| 128k | 94,102 | 43.1 s | **2,185** | 2,174 | 2,187 | (not run in the morning) |
-
-- Prefill is essentially unchanged, which is expected: the release's changes target decode and
-  capacity.
-- DSPLIT only speeds up *short final chunks over a deep cache*, as in an agent's follow-up turn. These
-  cold, whole-prompt prefills don't exercise that.
-- The 1% / 99% band is within 1% at every depth.
-- The 128k prompt is 94k tokens of the corpus, so that is the real depth.
-
-## Correctness checks run alongside
-
-These were run in the same session, on the same boot sequence, with the LAN quiet.
-
-| Check | Result |
-|---|---|
-| Approximate lm_head (int2 verify head) vs exact head, no logprobs (`quality_ab.py`) | Open-ended: 24/24 texts identical. Arithmetic: 40/40 both. Lookups over a 300-record registry: 29/30 both, same question missed. |
-| Stress: two 158k sequences resident, KV at 96.6% (317,714 of 329,035 tokens), plus a 2048x2048 image request | 0 preemptions, 0 faults. Peak VRAM 31.23 of 31.86 GiB; host RAM peak 27.0 GB. |
-| Soak: two concurrent agents for 40 minutes | 836 turns, 834 correct, 0 engine faults, memory flat. Both misses were the model copying a record wrong, not the engine. |
-| Resume from the offload tier vs cold run | Token-identical (`val_resume.py --evict`) |
-
-## Reading the numbers
-
-- **p99 values** rest on 20 passes, so read them as "about the worst seen", not as true percentiles.
-  BetterBench marks every such value with † in the raw report.
-- **Temperature 1.0** is the model card's preset and what is served. Draft acceptance, and therefore
-  decode t/s, depend on it; greedy decoding would score higher.
-- **Morning release** is the 2026-10-06 run `betterbench-final-full` on the same box: libr4d rx14,
-  `EMBED_HOST` off, `FAST_DRAFT` off. It used the same BetterBench config apart from the
-  128k prefill depth.
+*Generated by BetterBench. See METHODOLOGY.md §sample-size.*
