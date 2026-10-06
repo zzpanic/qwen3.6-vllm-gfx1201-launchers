@@ -17,34 +17,35 @@ it is not expected under concurrent batches, where the batch shape changes the n
 
 ## Two options
 
-Both run from `startup-qwen3.8-27b-kvcache.sh`; one variable chooses between them.
+Both run from `startup-qwen3.8-27b-mxfp4.sh` at the repository root; one variable chooses between
+them. The overview is [KV-CACHE.md](../KV-CACHE.md).
 
 ```bash
-./startup-qwen3.8-27b-kvcache.sh                    # option 1 (default)
-KVCACHE_DISK_TIER=1 ./startup-qwen3.8-27b-kvcache.sh   # option 2
-DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh        # print the command, run nothing
+./startup-qwen3.8-27b-mxfp4.sh                       # option 2, GPU -> RAM -> disk (default, as served)
+KVCACHE_DISK_TIER=0 ./startup-qwen3.8-27b-mxfp4.sh   # option 1, GPU -> RAM
+DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh             # print the command, run nothing
 ```
 
-| | Option 1 — GPU → RAM (default) | Option 2 — GPU → RAM → disk |
+| | Option 1 — GPU → RAM | Option 2 — GPU → RAM → disk (default) |
 |---|---|---|
-| select with | nothing | `KVCACHE_DISK_TIER=1` |
+| select with | `KVCACHE_DISK_TIER=0` | nothing (`KVCACHE_DISK_TIER=1`) |
 | house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
 | tools | `kvwatch.py`, `kvtable.py` | those, plus `kvvalidate.py` and `tierreport.py` |
 
-Option 1 is the release default (`KVOFF_MINIMAL=1`, no disk tier). Option 2 adds the disk tier
-and the full instrumented set; `kvvalidate.py` is option 2 only — its counters are not exported
+Option 2 is the served configuration (`KVOFF_MINIMAL=0`, disk tier at `/kvcache`, 128 GiB or more
+recommended). Option 1 drops the disk tier and runs the minimal patch set; `kvvalidate.py` is option 2 only — its counters are not exported
 on option 1, and it reports false FAILs there.
 
-**Sizing — one rule.** The RAM tier holds **at least 2 × the smaller of the GPU KV pool and
-max-model-len**, both in tokens. The GPU pool is the `GPU KV cache size` line in the boot log;
+**Sizing.** The RAM tier holds **one full max-model-len prefill** (73,728 B/token offloaded;
+KV-CACHE.md). The GPU pool is the `GPU KV cache size` line in the boot log;
 Qwen3.8's max-model-len tops out at 262,144.
 
 | smaller of GPU pool and max-model-len | RAM tier, at least |
 |---|---|
-| 100k | 200k tokens |
-| 200k | 400k tokens |
-| 262,144 (e.g. a 300k pool) | 524,288 tokens |
+| 100k | 8 GiB |
+| 204,800 | 15 GiB |
+| 262,144 (the default) | 19 GiB |
 
 `KVCACHE_TIER_GIB=auto` applies this and checks it against `/dev/shm` and system RAM (keeping
 15 GiB back). **If it does not fit, offload is disabled for that boot and the log says why.**

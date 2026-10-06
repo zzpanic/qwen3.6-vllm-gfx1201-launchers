@@ -25,35 +25,34 @@ Persist it by editing the `tmpfs /dev/shm` line in `/etc/fstab` (back the file u
 
 ## Sizing
 
-**The RAM tier holds at least 2× the smaller of the GPU KV pool and max-model-len**, both in
-tokens. That is the only sizing rule.
+**The RAM tier holds one full max-model-len prefill**, at 73,728 B/token offloaded.
 
-| smaller of GPU pool and max-model-len | RAM tier, at least | at 61,440 B/token |
-|---|---|---|
-| 100k | 200k tokens | 11.4 GiB |
-| 200k | 400k tokens | 22.9 GiB |
-| 262,144 (Qwen3.8's max) | 524,288 tokens | 30.0 GiB |
+| max-model-len | RAM tier |
+|---|---|
+| 100k | 8 GiB |
+| 204,800 | 15 GiB |
+| 262,144 (Qwen3.8's max) | 19 GiB |
 
 **The launcher applies it for you.** `KVCACHE_TIER_GIB` defaults to `auto`: it takes the GPU pool
 from `KV_MEM` (or, if the pool is not pinned, uses `MAXLEN` alone, which can only over-size),
-computes the minimum, rounds up to a whole GiB, and checks that it fits both `/dev/shm` and
-`MemTotal − KVOFF_RAM_RESERVE_GIB` (15 GiB by default, kept for the engine, drafter and OS). **If it
-does not fit, offload is disabled for that boot** and the log says what did not fit:
+computes `MAXLEN` × bytes/token (+2% for chunk rounding), rounds up to a whole GiB, and checks it
+fits both `/dev/shm` and `MemTotal − KVOFF_RAM_RESERVE_GIB` (15 GiB by default, kept for the engine,
+drafter and OS). **If it does not fit, offload is disabled for that boot** and the log says what did
+not fit. On a 40 GiB box with a 28 GiB `/dev/shm`:
 
 ```
-[kvcache] tier auto: 2 x min(GPU pool ~228,771, MAXLEN 204,800) x 61440 B/token = 23.4 GiB recommended minimum -> 24 GiB
-[kvcache] *** KV-CACHE OFFLOAD DISABLED: the recommended minimum does not fit this system.
+[kvcache] tier auto: one full 262,144-token prefill x 73728 B/token = 19 GiB; fits 24.2 GiB (/dev/shm 28.0, MemTotal 39.2 - reserve 15)
 ```
 
 To run a different size anyway, set `KVCACHE_TIER_GIB=<GiB>`. An explicit size is taken as given,
 still refused if `/dev/shm` cannot hold it, and still clamped to `MemTotal − KVOFF_RAM_RESERVE_GIB`.
 
-The two bytes-per-token figures are model-specific (`KVCACHE_OFFLOAD_BPT`, `KVCACHE_GPU_BPT`). To
-derive yours: the GPU figure is `--kv-cache-memory` bytes divided by the boot log's `GPU KV cache
-size` in tokens. The offloaded figure is per-group bytes per token × the number of groups actually
-stored per chunk. Here every stored block is 27,000,832 B for 1,648 tokens = 16,384 B/token per
-group, and a chunk stores 2 attention groups + 1 draft group + 6 Mamba groups at the 1-in-8 stride:
-16,384 × (2 + 1 + 6/8) = 61,440 B/token.
+The bytes-per-token figure is model-specific (`KVCACHE_OFFLOAD_BPT`). To derive yours: it is
+per-group bytes per token × the number of groups actually stored per chunk. Here every stored block is 27,000,832 B for 1,648 tokens = 16,384 B/token per
+group, and a chunk stores 2 attention groups + 1 draft group + 6 Mamba groups at the launcher's
+1-in-4 stride (`KVOFF_MAMBA_STRIDE=4`): 16,384 × (2 + 1 + 6/4) = 73,728 B/token. Check: the engine
+reports 636 slots for a 16 GiB tier = 141 chunks = ~233k tokens. (Earlier versions of this page used
+61,440, the 1-in-8 figure, which over-stated what a tier holds by ~20%.)
 
 ## The reaper — *disk build*, and then required
 
@@ -76,9 +75,9 @@ mid-test and produce a failure that is not real.
 ## Running
 
 ```bash
-DRY_RUN=1 ./startup-qwen3.8-27b-kvcache.sh                         # prints the container command, runs nothing
-./startup-qwen3.8-27b-kvcache.sh                                   # serve, default build
-KVCACHE_DISK_TIER=1 ./startup-qwen3.8-27b-kvcache.sh            # serve, disk build
+DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh                           # prints the container command, runs nothing
+./startup-qwen3.8-27b-mxfp4.sh                                     # serve, disk build (default)
+KVCACHE_DISK_TIER=0 ./startup-qwen3.8-27b-mxfp4.sh               # serve, RAM tier only
 ```
 
 | setting | meaning |

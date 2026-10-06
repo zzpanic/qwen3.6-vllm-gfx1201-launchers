@@ -36,7 +36,7 @@ from _patchlib import apply
 
 `_patchlib` is **not in this repository.** It comes from the ggz14 /
 `radiance-vllm-mxfp4` repo, which the launcher bind-mounts at `/patches`. That is
-why every invocation in `launcher/serve-mxfp4-kvcache-base.sh` looks like:
+why every invocation in `startup-qwen3.8-27b-mxfp4.sh` (repository root) looks like:
 
 ```
 PYTHONPATH=/patches python3 /house/patch_offload_mixed_hit.py

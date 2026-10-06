@@ -1,13 +1,21 @@
 # r4d_kernels
 
-An opt-in libr4d build for the radiance launchers: **`R4D_RX13=1`**. It is libr4d v0.5.0 plus
-`r4d_kernels.patch`, built once per image and GPU arch by the launcher's existing libr4d build step
-(cached under `~/.cache/radiance-libr4d/v0.5.0-p<patch sha>-<image key>`). It is not the default yet:
-the fix below was validated on one production launcher, and the shipped launchers' own defaults
-have not been boot-tested with it.
+This repository's kernel work, applied by `startup-qwen3.8-27b-mxfp4.sh` by default (**`R4D_RX13=1`**).
+[KERNEL.md](../KERNEL.md) at the repository root explains what each piece does and why; this page is
+the reference for the files.
+
+| file | what |
+|---|---|
+| `r4d_kernels.patch` | libr4d v0.5.0 + radiance extras + the exact-decay GDN scan (libr4d #4), exact-wide DSPLIT prefill, the prefill block-table clamp, lazy-GDN invalidation. Built once per image and GPU arch by the launcher (cached under `~/.cache/radiance-libr4d/v0.5.0-p<patch sha>-<image key>`). |
+| `radiance_mxfp4_fp8.patch` | ggz14's MXFP4 W4A8 kernel with the decode band M 9-64 re-tuned (two or more concurrent sequences). Applied to a copy of your clone's `radiance_mxfp4_fp8.hip`. |
+| `LICENSE.r4dx` | the MIT notice that must travel with the DSPLIT code from Crssz/r4dx |
+| `tests/dsplit_bench.py`, `tests/dsplit_cmp.py` | DSPLIT bit-identity and speed against DS=1 |
 
 ```bash
-R4D_RX13=1 ./startup-qwen3.8-27b-kvcache.sh      # or ./startup-qwen3.8-27b-mxfp4.sh
+./startup-qwen3.8-27b-mxfp4.sh                 # R4D_RX13=1 is the default
+R4D_RX13=0 ./startup-qwen3.8-27b-mxfp4.sh      # the stock pinned libr4d and the clone's MXFP4 kernel
+R4D_PREFILL_DSPLIT=1 ./startup-qwen3.8-27b-mxfp4.sh   # DSPLIT off (2 / 4 force it)
+RADIANCE_MXFP4_DECODE_TUNE16=0 ./startup-qwen3.8-27b-mxfp4.sh   # MXFP4 decode band back to stock
 ```
 
 ## Why: libr4d issue #4, wrong GDN prefill on large decay spans
@@ -39,6 +47,15 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
 8k / 48k / 112k) and the clamp as moving code perplexity +0.5-0.6% off the reference.
 
 ## What else is in the build
+
+- **Exact-wide prefill (DSPLIT)**, from Crssz/r4dx (MIT), merged into the QK8/PV8 prefill kernel:
+  `DSPLIT` workgroups share one q-block, each doing the full QK/softmax and 1/DSPLIT of PV, so the
+  output is bit-identical to DS=1 (10 shapes, fp8 and f16 legs) and 1.26-1.42x faster for final
+  chunks of 64 tokens or fewer on a deep cache. Launch law: DS4 when the grid is at most 4
+  workgroups per sequence and the context is 2k or more, DS2 when at most 16; `R4D_PREFILL_DSPLIT`
+  overrides it.
+- **Prefill block-table clamp** (deadcode's engine): the next-tile prefetch reads
+  `bt[min(i, last block)]`.
 
 - Everything from the radiance extras rx10 (ggz14): narrow-state GDN decode, the fused GDN update,
   the lazy-snapshot kernels, fp8 prefill-attention legs. `R4D_RX13=1` therefore stands in for
@@ -82,7 +99,11 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
 | radiance extras rx10 | ggz14, codeberg.org/ggz14/radiance-vllm-mxfp4 | none published -- uncertain |
 | rx12 rebase onto v0.5.0, bf16-state lazy unit | J-Nova, github.com/J-Nova/mtp-offload-r9700 | none published -- uncertain |
 | GDN chunk scan kernel | deadcode, codeberg.org/StillDeadcode/radiance | Apache-2.0 (NOTICE: "radiance Copyright 2026 Deadcode and the radiance contributors"); engine plugin-ABI wrapper removed |
-| `_st` binding, lazy mode 2, stale-stash counters, launcher knobs, house patches, tools | this repository | Apache-2.0 |
+| prefill block-table prefetch clamp | deadcode, codeberg.org/StillDeadcode/radiance | Apache-2.0 |
+| exact-wide prefill (DSPLIT) | Crssz, github.com/Crssz/r4dx | MIT, "Copyright (c) 2026 narawit" -- notice in `LICENSE.r4dx` |
+| `radiance_mxfp4_fp8.hip` (context of `radiance_mxfp4_fp8.patch`) | ggz14, codeberg.org/ggz14/radiance-vllm-mxfp4 | none published -- uncertain |
+| MXFP4 decode band measurements (M 9-64) | SlyBase, github.com/SlyBase/vllm-sly-radiance 0.2.1 | none published -- uncertain |
+| `_st` binding, lazy mode 2, stale-stash counters, DSPLIT launch law, launcher knobs, house patches, tools | this repository | Apache-2.0 |
 
 The first three are redistributed here without a licence grant from their authors; the patch header
 says so too. If you are one of them and want this changed or removed, open an issue.

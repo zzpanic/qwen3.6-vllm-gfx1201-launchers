@@ -1,58 +1,44 @@
 #!/bin/bash
-# startup-qwen3.8-27b-mxfp4.sh -- Qwen3.8-27B in NATIVE MXFP4 (W4A8) with an FP8 DFlash2
-# drafter, on ONE AMD Radeon AI PRO R9700 (gfx1201 / RDNA4, 32 GiB).
+# startup-qwen3.8-27b-mxfp4.sh -- Qwen3.8-27B in native MXFP4 (W4A8) with the FP8 DFlash2 drafter on one
+# AMD Radeon AI PRO R9700 (gfx1201 / RDNA4, 32 GB), the way it is served: one launcher carrying all of
+# this repository's work.
 #
-# This is the MXFP4 sibling of startup-qwen3.8-27b-int4.sh (int4 W4A16) in this repo. Same
-# model, same card, different quantisation path and a different kernel stack. Run whichever
-# suits you; they cannot run at the same time (each takes the whole GPU).
+#   kv-cache/      prefix-cache offload GPU -> RAM (/dev/shm) -> disk, and the house vLLM patches
+#                  (kv-cache/patches, mounted at /house). KV-CACHE.md explains the benefit.
+#   startup-cache/ keyed build caches and the verified boot overlay (cold boot 527 s -> ~160-200 s).
+#   r4d_kernels/   the libr4d build (exact GDN scan, exact-wide prefill, lazy-GDN invalidation) and the
+#                  MXFP4 decode-band re-tune, both on by default (R4D_RX13=1). KERNEL.md explains them.
+#   patches/       the radiance-0.9.3 overlay copies used by the int4 path (old_work/); not needed here.
 #
-# WHAT THIS IS NOT: it is not a fork of anyone's kernels. The MXFP4 GEMM, the R4D attention
-# and the DFlash2 integration are ggz14's radiance work, shipped in the
-# stilldeadcode/vllm-radiance image. What this script contributes is the ARRANGEMENT --
-# which knobs, at which values, on this card -- and every one of those values below carries
-# the measurement that chose it. That is the part that is ours, and per the benchmarks in
-# ./benchmarks it is worth a great deal more than it looks.
+#   ./startup-qwen3.8-27b-mxfp4.sh --port <N>   serve on http://<host>:<N>/v1 (llama-swap's contract)
+#   ./startup-qwen3.8-27b-mxfp4.sh -h           every knob, its default and what it does
+#   DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh    print the container command, run nothing
 #
-# PROVENANCE
-#   image      docker.io/stilldeadcode/vllm-radiance:0.9.3  (vLLM 0.27.1, ROCm, AITER)
-#   kernels    codeberg.org/ggz14/radiance-vllm-mxfp4       (clone it; see REPO below)
-#   libr4d     pinned by the image. The pin is a CORRECTNESS pin, not a speed pin --
-#              v0.4.0 produced NaNs in the GDN path (perplexity 653586) that looked exactly
-#              like broken speculative decoding. Do not float it.
+# DEFAULTS = THE SERVED CONFIGURATION (2026-10-06), on one R9700 with 40 GiB host RAM:
+#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=2048, KV pinned at 11.8e9 bytes
+#   (329,035 tokens of fp8 KV with the input embedding in host RAM, EMBED_HOST=1), fp32 GDN state +
+#   lazy GDN, DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
+#   head, R4D attention with 8-bit prefill legs, RAM tier sized to hold at least one full 262,144-token
+#   context (19 GiB; KVCACHE_TIER_GIB), disk tier at /kvcache (KVCACHE_DISK_TIER=1; 128 GiB or more
+#   recommended, and the reaper in kv-cache/ops is REQUIRED with it).
 #
-# TWO CHECKPOINTS are needed under $MODELS, both produced by setup-mxfp4.sh -- which lives in
-# ggz14's radiance repo (the $REPO clone below), NOT in the launcher repo this script is in:
-#   Qwen3.8-27B-MXFP4-mtpfp8   AMD's amd/Qwen3.8-27B-Quark-AWQ-MXFP4 with the MTP head
-#                              requantized to fp8 by ./fp8_mtp.py. NOT optional for THAT
-#                              checkpoint: its exclude list names the mtp.* layers as TENSOR
-#                              names among 112 MODULE names, and quark matches modules -- so
-#                              the exclusion never fires, vLLM applies the mxfp4 scheme to a
-#                              bf16 head, and it asserts on a half-width parameter. A
-#                              checkpoint that declares mtp.* in layer_quant_config loads
-#                              as-is: point SNAP at it and skip fp8_mtp.py.
-#   Qwen3.8-27B-DFlash2-FP8    the block-diffusion drafter used by SPEC_METHOD=dflash.
-#                              fp8 and not mxfp4 on purpose -- 4-bit costs more acceptance
-#                              than it saves in bandwidth, and AWQ does not rescue it.
+# Lineage: ggz14's serve-mxfp4.sh (codeberg.org/ggz14/radiance-vllm-mxfp4, image
+# stilldeadcode/vllm-radiance:0.9.3), which owns the MXFP4 GEMM, the R4D attention path and the DFlash2
+# integration -- clone it beside this file as radiance-vllm-mxfp4 (README.md, Quick start). This file is
+# that script plus the llama-swap edits, the offload delta (kv-cache/launcher history in old_work/) and
+# the house patches. The pre-merge launchers are kept in old_work/ for reference.
 #
-# Everything below is `${VAR:-default}`, so any of it can be overridden from the environment
-# without editing this file. THE DEFAULTS ARE THE MEASURED PRODUCTION CONFIGURATION -- unlike
-# most launchers, you are not expected to tune this before it is fast.
-#
-# WHAT TO CHECK IN THE LOG (in order; the first two are the ones that matter)
-#   "Using RadianceMxfp4W4A8LinearKernel for MXFP4 GEMM"  -> our kernel won the selection
-#   "[radiance] native MXFP4 enabled on gfx12x"           -> the aiter fp4 gate was relaxed
-#   "[radiance] kv cache groups: size 8, 9 groups"        -> the KV group-padding patch fired
-#   "[run] sampling=" / "[run] reasoning-effort="         -> what you will actually be served
-#   The stock "current platform does not support native MXFP4/MXFP6" notice still prints and
-#   is a FALSE ALARM -- it comes from a separate supports_mx() call, not the kernel gate.
-#
-#   startup-qwen3.8-27b-mxfp4.sh          serve on http://<host>:$PORT/v1
-#   startup-qwen3.8-27b-mxfp4.sh -h       every knob, its default and what it does
-#
-# See ./TUNING.md for the measurement log behind these defaults and ./BACKGROUND.md for what
-# the image is and which decisions here are ours rather than its defaults.
-
-set -euo pipefail
+# llama-swap edits relative to upstream:
+#   * takes --port <N>; the container uses --network=host and binds 0.0.0.0:<N> directly
+#   * NAME defaults to qwen38-27b-mxfp4; SERVED (new knob) defaults to qwen3.8-27b-mxfp4 and is the
+#     single --served-model-name
+#   * MODELS defaults to $HOME/models-mxfp4
+#   * adds --rm, so a killed launcher cannot orphan its container
+#   * REPO (new knob, defaults to radiance-vllm-mxfp4 beside this file) locates the upstream tree
+#     (gpu-detect.sh, the chat template, the /patches mount)
+#   * build caches and the boot overlay via startup-cache/ (see its README.md); each degrades to the
+#     stock behaviour when absent. RADIANCE_SKIP_MM_WARMUP defaults to 1 (skips the ~21.5 s startup
+#     multi-modal warmup; the first image request of a boot pays it once).
 
 # ---------------------------------------------------------------- usage / arguments
 usage() {
@@ -68,10 +54,9 @@ edited to run on a host with a different number of cards.
 
 Everything is an environment variable; these are the ones worth knowing.
 
-  MODELS=~/ai/models-mxfp4  directory holding the checkpoints (bind-mounted at /models)
+  MODELS=$HOME/models-mxfp4  directory holding the checkpoints (bind-mounted at /models)
   PORT=<--port value>       listen port; the --port argument (llama-swap) wins over this
-  IMAGE=...:0.9.3           container image (every build cache is keyed on its image ID, so a
-                            new image or a re-pull under the same tag rebuilds by itself)
+  IMAGE=...:0.9.3           container image (CACHE is keyed to it -- move both together)
   RUNTIME=podman|docker     container runtime (auto-detected)
   CHAT_TEMPLATE=./qwen-fixed-v22.3.jinja
                             chat template; must be readable on the host
@@ -79,33 +64,39 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC_METHOD=dflash        speculative drafter: dflash (fastest, needs the DFlash2 checkpoint)
                             or mtp (uses the head inside the target, no extra download)
   SPEC=7 dflash / 4 mtp     speculative depth
-  MAXSEQS=8                 max concurrent sequences
-  MAXLEN=262144             max context length
-  CHUNK=8192                prefill chunk (--max-num-batched-tokens)
-  GPU_UTIL=0.98             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
+  MAXSEQS=2                 max concurrent sequences
+  MAXLEN=262144             max context length (Qwen3.8's maximum)
+  CHUNK=2048                prefill chunk (--max-num-batched-tokens)
+  GPU_UTIL=0.97             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
                             detected cards can fill (head counts rule out 3, 6 and 12)
   GPUS=0,1                  HIP indices to serve on; defaults to every card with enough VRAM
   MIN_GPU_MIB=8192          VRAM floor for "usable"; excludes iGPUs from the count
-  KV_MEM=auto               KV cache size: auto uses a pin measured for your hardware if
+  KV_MEM=11800000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1; auto uses a pin
+                            measured for your hardware if
                             kv-profiles.tsv has one and lets vLLM profile if not; <bytes> pins
                             explicitly; 0 forces profiling. ./calibrate-kv.sh measures a pin
   ./gpu-detect.sh           print what was detected and which of these it would pick
 
   R4D_ATTN=1                R4D paged attention backend (0 = AITER unified attention)
   FAST_DRAFT=1              int2 draft head with an exact rerank
+  EMBED_HOST=1              input embedding (2.37 GiB) in pinned host RAM; frees it for KV
+  RADIANCE_GDN_LAZY=1       lazy GDN state snapshots (+13% KV, +7% decode)
+  R4D_RX13=1                r4d_kernels: libr4d v0.5.0 + r4d_kernels.patch, MXFP4 decode band
+
+  KVCACHE_TIER_GIB=auto     RAM tier = one full MAXLEN prefill (19 GiB at 262144); off if it does not
+                            fit /dev/shm and RAM; <GiB> sets it outright
+  KVCACHE_DISK_TIER=1       disk tier on (0 = RAM tier only, minimal patch set)
+  KVCACHE_DISK=/kvcache     disk tier filesystem; 128 GiB or more recommended, reaper required
   MIN_M=0                   M above which the W4A8 kernel takes over from aiter (0 = always)
   AUTO_R4D=1                build the pinned libr4d on first run (cached); 0 uses the image's
   R4D_SO=<dir>              use your own libr4d checkout instead of building one
-  ARCH=<auto>               GPU arch the kernels are built for; read from the KFD topology
-  BOOT_OVERLAY=<dir>|0      pre-patched site-packages, built automatically on a miss (used only
-                            when its meta matches this boot exactly; 0 = off)
   EXTRA="--enforce-eager"   extra `vllm serve` flags (same as passing them as arguments)
   DRY_RUN=1                 print the container command instead of running it
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
 
-Full knob reference: README.md. Design notes and measurements: MXFP4-NOTES.md.
+Full knob reference: README.md. KV-cache offload: KV-CACHE.md. Kernels: KERNEL.md.
 USAGE
 }
 
@@ -123,7 +114,20 @@ die() { echo "[serve-mxfp4] ERROR: $1" >&2; shift; for l in "$@"; do echo "  $l"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # This file lives outside the repo it was copied from, so the repo's own files (gpu-detect.sh,
 # the r4d patch, the chat template, the /patches mount) are resolved from REPO instead.
-REPO="$(realpath -m "${REPO:-$(dirname "$(realpath -m "$0")")/radiance-vllm-mxfp4}")"
+# 2026-09-18: repointed from ggz14-mxfp4 (v0.11.0 @ 22c69cd, 09-04) to v0.13.0 @ 980f891 (09-17).
+# 112 commits; assessed and dry-run in vllm/ggz-upgrade-20260918/ (README.md, STAGE-A.md).
+# ROLLBACK is one knob: REPO=<repo>/ggz14-mxfp4, which is still on disk untouched.
+# Deliberately NOT adopted with it: the tree's single-GPU profile (MAXLEN 65536, fp16 ssm cache,
+# libr4d rx9/rx10, CHUNK 4096) lives in THEIR serve-mxfp4.sh, which this launcher does not use --
+# it would trade our 204800 context and halve the 1648-token block every KV number derives from.
+REPO="$(realpath -m "${REPO:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/radiance-vllm-mxfp4}")"
+# HOUSE is our own code that runs against ggz14's tree but is NOT part of it: the offload
+# boundary patch and the KV tier bench. It used to live loose inside $REPO, which is an
+# upstream clone ignored by .gitignore -- so those files were tracked by nothing and a
+# `git clean` in that checkout would have deleted them with no copy anywhere. They now live in
+# a tracked directory and ride their own mount; $REPO stays pristine.
+HOUSE="$(realpath -m "${HOUSE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/kv-cache/patches}")"
+[ -d "$HOUSE" ] || die "HOUSE=$HOUSE does not exist (house patches + KV bench live there)"
 # Hardware detection: how many usable AMD GPUs there are, which HIP indices they are, what TP
 # fits them and the model's head counts, and whether a KV pin has been measured for them. Sets
 # RAD_GPU_* / RAD_TP and defines rad_kv_lookup. See gpu-detect.sh for why a VRAM floor and not
@@ -192,21 +196,45 @@ preflight() {
   # a bare `exec 3>&- 2>/dev/null` would apply that redirection to the shell itself and silence
   # every error message after it.
   if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-    # Name the container holding it. "stop the container you find in `podman ps`" was not
-    # enough on 2026-09-01: the server on the port had been started by running its script
-    # directly, so `systemctl --user stop` was a no-op against it, the port stayed held, and
-    # this check aborted a switch that looked like it should have worked. A container started
-    # outside systemd is stopped with the runtime, not the unit -- so print the runtime command.
-    local holder=""
-    holder=$("$RUNTIME" ps --format '{{.Names}}' 2>/dev/null | head -20 | tr '\n' ' ')
-    die "port $PORT is already in use" \
-        "another server is running -- this one needs every GPU it serves on:" \
-        "  running containers: ${holder:-<none: the port is held by a host process>}" \
-        "  $RUNTIME stop <name>                   # works however the container was started" \
-        "  systemctl --user stop qwen_vllm_paro   # ONLY if that unit started it -- check" \
-        "                                         # \`systemctl --user is-active\` first, a" \
-        "                                         # hand-started container is not systemd's" \
-        "or serve on a different port: PORT=8081 ./serve-mxfp4.sh"
+    # OUR OWN ORPHAN IS NOT A CONFLICT, measured 2026-09-06: this cost a recovery. A crash, or
+    # a stop whose SIGKILL landed on the podman client rather than the container, leaves a
+    # container of our own $NAME Up -- holding the port, the GPU and the /dev/shm region. The
+    # launch already reclaims that name (podman `--replace` at RT_FLAGS, docker the `rm -f`
+    # just before exec) and BOTH stop a running container before creating the new one, so the
+    # port is free by the time podman binds it. But this guard ran first and killed the
+    # launcher, which llama-swap surfaces only as "upstream command exited prematurely" -- an
+    # error naming neither the port nor the orphan. Recovery then needed a hand-typed
+    # `podman stop`, which is not something to have to remember at the wrong moment.
+    #
+    # Scope is strictly a container named EXACTLY $NAME. Any other holder still aborts: that
+    # really is a second server wanting a GPU this entry needs all of. With --network=host
+    # there is no port mapping to inspect, so "a container of our name is Up" is the closest
+    # available proof of ownership -- and if it is up on our port, replacing it is right
+    # whichever process is listening.
+    local self_st=""
+    self_st="$("$RUNTIME" ps --filter "name=^${NAME}$" --format '{{.Status}}' 2>/dev/null | head -1)"
+    if [[ "$self_st" == Up* ]]; then
+      echo "[serve-mxfp4] port $PORT is held by our OWN container $NAME ($self_st)." >&2
+      echo "[serve-mxfp4]   Treating it as an orphan from a crash or a killed stop; the launch" >&2
+      echo "[serve-mxfp4]   will replace it. If your supervisor thought this model was stopped," >&2
+      echo "[serve-mxfp4]   it was holding the GPU the whole time -- $RUNTIME ps ; amd-smi monitor" >&2
+    else
+      # Name the container holding it. "stop the container you find in `podman ps`" was not
+      # enough on 2026-09-01: the server on the port had been started by running its script
+      # directly, so `systemctl --user stop` was a no-op against it, the port stayed held, and
+      # this check aborted a switch that looked like it should have worked. A container started
+      # outside systemd is stopped with the runtime, not the unit -- so print the runtime command.
+      local holder=""
+      holder=$("$RUNTIME" ps --format '{{.Names}}' 2>/dev/null | head -20 | tr '\n' ' ')
+      die "port $PORT is already in use" \
+          "another server is running -- this one needs every GPU it serves on:" \
+          "  running containers: ${holder:-<none: the port is held by a host process>}" \
+          "  $RUNTIME stop <name>                   # works however the container was started" \
+          "  systemctl --user stop qwen_vllm_paro   # ONLY if that unit started it -- check" \
+          "                                         # \`systemctl --user is-active\` first, a" \
+          "                                         # hand-started container is not systemd's" \
+          "or serve on a different port: PORT=8081 ./serve-mxfp4.sh"
+    fi
   fi
 
   [ -r "$CHAT_TEMPLATE" ] || die "chat template not readable: $CHAT_TEMPLATE" \
@@ -218,24 +246,16 @@ preflight() {
 # not be shared across configurations. Both defaulted to 0.7.4 / -074 long after production moved to
 # 0.9.3 / -093, so anyone taking the defaults got a DIFFERENT server than the one being measured.
 IMAGE=${IMAGE:-stilldeadcode/vllm-radiance:0.9.3}
-# NAME and SERVED move together with the entry key (the SAFETY rule in ~/ai/config.yaml):
+# NAME and SERVED move together with the entry key (the SAFETY rule in <your llama-swap config.yaml>):
 # llama-swap forwards the requested model id verbatim and vLLM validates it, so if they
 # drift apart the request 404s AFTER the model is already loaded.
 NAME=${NAME:-qwen38-27b-mxfp4}
 SERVED=${SERVED:-qwen3.8-27b-mxfp4}
 PORT=${PORT:-8080}
-# CHUNK 2048, and the reason is NOT alignment. Under R4D attention (R4D_ATTN=1 below) chunk
-# alignment is worth exactly 0% -- a full 2x2 against KV pool size found it did nothing at any
-# size. The "align BATCHTOK to n*block_size" rule is an AITER property and is inert here. 2048
-# is chosen on three secondary criteria: it is the smallest torch.compile activation transient
-# (which is the peak the KV pin below must leave room for), it drops AR_MAX_KB from 29696 to
-# 24576, and it is a power of two. Read max_num_scheduled_tokens off the boot if you change it.
-CHUNK=${CHUNK:-2048}
-# 2 concurrent sequences. This is a SINGLE-USER box config: the whole 32 GiB goes to one long
-# context rather than many short ones. Note MAXSEQS also moves the attention block size (1648 at
-# K=7/seqs=2 under R4D; 1664 under AITER), so never carry a block size across entries -- read it
-# off the boot. Raising it costs context roughly linearly.
+HSA_ENABLE_MWAITX=${HSA_ENABLE_MWAITX:-1}
+GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
 MAXSEQS=${MAXSEQS:-2}
+CHUNK=${CHUNK:-2048}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -266,6 +286,20 @@ NQF=${RADIANCE_NORMQUANT_FUSION:-1}
 # (measured 2026-08-30: epilogue kernels 0/step, bench byte-identical). After fixing whatever
 # made the installer skip, rm the -fp8s cache dir.
 FP8S=${RADIANCE_FP8_STREAM:-1}
+# FP8S_TP1: the TP=1-only fp8 residual-stream epilogues without an all-reduce (64 mid + 63 down
+# + 64 act + 48 GDN sites), added to radiance_arnq.py by the 2026-09-17 ggz14 tree.
+# It was 0 here at first, deliberately, although the module itself defaults it ON
+# (radiance_arnq.py: ENABLED_TP1 = os.environ.get("RADIANCE_FP8_STREAM_TP1", "1") == "1",
+# gated world_size == 1 -- and we serve TP=1). Two reasons, both found 2026-09-18 while
+# dry-running the ggz14 update (ggz-upgrade-20260918/):
+#   1. It changes the traced graph, and our CACHE_SUF had no term for it, so repointing REPO at
+#      the new tree would have reused the compiled graph from the old radiance_arnq -- the same
+#      silent stale-artifact class as the libr4d key above. The -tp1s term below fixes that;
+#      upstream has the identical clause (their serve-mxfp4.sh:379).
+#   2. Inheriting a numerical change as a side effect of a repo pin makes a regression
+#      unattributable. Turn it on as its own measured step, with its own cache.
+# It was then turned on as its own step and is ON in the served configuration (default 1).
+FP8S_TP1=${RADIANCE_FP8_STREAM_TP1:-1}
 # NQF=1 and FP8S=1 are the DEFAULTS as of 2026-09-02: prod has served on them since 2026-08-30
 # and a bare ./serve-mxfp4.sh must reproduce prod (it did not -- every restart needed the two
 # overrides). Set either to 0 to fall back; the cache suffix follows.
@@ -291,10 +325,6 @@ FP8S=${RADIANCE_FP8_STREAM:-1}
 CACHE_SUF=""
 if [ "$GDN_MERGE" = 1 ]; then CACHE_SUF="$CACHE_SUF-gdnm"; fi
 if [ "$AR_OVERLAP" = 1 ]; then CACHE_SUF="$CACHE_SUF-arov"; fi
-# R4D_RX13 (default 0, opt-in): libr4d v0.5.0 + r4d_kernels/r4d_kernels.patch, which fixes libr4d
-# issue #4 (wrong GDN prefill on chunks whose gate span exceeds 160). See r4d_kernels/README.md.
-R4D_RX13=${R4D_RX13:-0}
-if [ "$R4D_RX13" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx13"; fi
 # -nqft, not -nqf: -nqf was the pass-only null experiment. TRACED_QUANT flips the traced graph
 # via env alone (no hashed file changes), so it MUST key the cache dir.
 if [ "$NQF" = 1 ]; then CACHE_SUF="$CACHE_SUF-nqft"; fi
@@ -321,8 +351,130 @@ if [ "$SGATES" = 1 ]; then CACHE_SUF="$CACHE_SUF-sg"; fi
 # cache dir because the fill kernel leaves the graph.
 EOUT=${RADIANCE_GDN_EMPTY_OUT:-0}
 if [ "$EOUT" = 1 ]; then CACHE_SUF="$CACHE_SUF-eo"; fi
-# CACHE itself is set after preflight (see "cache identity"): its default is keyed on the
-# image ID, which is only known once preflight has pulled the image.
+# RADIANCE_GDN_LAZY=1 (default 1 since 2026-10-06; see KERNEL.md): lazy GDN state snapshots -- one base
+# state plus one candidate stash per sequence instead of a snapshot per draft token, so a GDN
+# MambaSpec asks for 3 pages per request per layer group instead of 2+SPEC=9. Needs the repo's
+# patch_gdn_lazy.py, radiance_gdn_lazy.py and the rx10 libr4d extras patch (all selected below
+# off this one knob). ggz14 measured it at 65536 ctx / MAXSEQS 8: GPU KV pool 77k -> 99k tokens,
+# decode step at parity. It does NOT move block_size or page_size_bytes -- kv_cache_interface.py
+# multiplies page_size_bytes by (2 + num_speculative_blocks) -- so the 1648-token block, the 6592
+# store grid and the dead zone are untouched, and the offload tier keeps its geometry.
+#
+# THE RISK this default was gated on: the patch makes the align precopy
+# and postprocess Triton kernels skip TEMPORAL states, with a lazy materialize kernel providing
+# them instead -- and the Mamba temporal states are exactly what our offload tier stores and
+# serves back. Their serve script has no kv-transfer-config at all, so nobody has ever run lazy
+# GDN with an offload tier. Gate every change of this knob on reaskbench: a tier hit must stay
+# bit-identical. It keys the cache dir because the spec-block count changes the traced graph.
+# Cleared 2026-10-05/06 on this offload stack: a tier resume is token-identical to a cold run
+# (kv-cache/tools/val_resume.py --evict), and a concurrent multi-turn soak with a lazy-off control
+# showed no lazy-specific failure. With fp32 state: +13.2% KV, +7% decode, -1..3% prefill.
+GDN_LAZY=${RADIANCE_GDN_LAZY:-1}
+if [ "$GDN_LAZY" = 1 ]; then CACHE_SUF="$CACHE_SUF-lz"; fi
+# *** 2026-09-18: RADIANCE_GDN_LAZY IS REVERTED AND MUST STAY 0. Upstream 0cadf57 -- it corrupts
+# *** multi-turn chat: their A/B (flag the only variable, rx10 both legs) read lazy=1 10/50 turns
+# *** healthy, 35 empty replies, one 198-token repeat loop, first failure at turn 5 on only 3,298
+# *** tokens; lazy=0 49/50 healthy. Suspect: gdn_lazy_materialize mode 1 fails OPEN -- a stash
+# *** whose magic or base_slot mismatches replays NOTHING and writes an aligned checkpoint
+# *** silently short by `count` tokens, and its only validity check is a physical block id, which
+# *** is recycled across turns. It is NOT a long-context bug, which is why our gate missed it:
+# *** reaskbench is SINGLE-TURN and passed seven times bit-identical. Everything above this block
+# *** describing lazy as "under test" is the pre-revert record.
+#
+# R4D_RX9 (default 0): build libr4d from the rx9 extras patch instead of the base one. rx9 = rx6 +
+# narrow-state GDN decode kernels; upstream select it for ANY TP=1 serve (serve-mxfp4.sh:551, off
+# SINGLE_GPU_PROFILE) and it is INDEPENDENT of lazy -- their rx10 is defined as "rx9 + the
+# lazy-snapshot kernels" (:554), a strict superset.
+#
+# Why this knob now: the lazy revert dropped rx10, and with it rx9's kernels, because our only
+# rx10 selector was the lazy flag. The measured cost of the revert was -4.1% weighted decode
+# (119.4 -> 114.5, BetterBench --quick decode phase, 2026-09-18), and upstream measured lazy
+# ITSELF at decode-step parity -- so the 4% is most likely the rx9 kernels leaving, not lazy.
+# This knob tests exactly that, with no correctness flag attached.
+#
+# Why it is believed safe: upstream's corruption A/B pinned rx10 -- which CONTAINS rx9 -- on BOTH
+# legs, and the eager leg was 49/50 healthy. So the presence of these kernels is not what breaks
+# multi-turn chat; only RADIANCE_GDN_LAZY=1 is. Still gate it on reaskbench like everything else.
+#
+# Open question this is meant to answer: rx9's narrow-state kernels are built for a 16-bit ssm
+# state and we run fp32, so they may bind nothing here and measure 0%. That is a real possible
+# outcome, not a failure -- it would mean the 4% was lazy after all and is unrecoverable.
+# It keys the cache dir: a different kernel library can change the traced graph, and a stale
+# graph has cost us twice already.
+R4D_RX9=${R4D_RX9:-0}
+# R4D_RX13 (default 1): build libr4d v0.5.0 + r4d_kernels/r4d_kernels.patch instead -- the
+# radiance extras (rx10, a superset of rx9) plus deadcode's radiance-engine GDN chunk scan, which
+# fixes libr4d issue #4 (finite but WRONG prefill output and state on any chunk whose gate span
+# exceeds 160). It carries rx9's narrow-state kernels, so it stands in for R4D_RX9 and keys its own
+# cache dir. It also selects r4d_kernels/radiance_mxfp4_fp8.patch (MXFP4 decode band, M 9-64) and
+# exact-wide DSPLIT prefill. Sources, licence status and validation: KERNEL.md, r4d_kernels/README.md.
+R4D_RX13=${R4D_RX13:-1}
+if [ "$R4D_RX13" = 1 ]; then R4D_RX9=1; CACHE_SUF="$CACHE_SUF-rx13"
+elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
+# MAMBA_SSM_FP16 (default 0): pass --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16,
+# i.e. upstream's single-GPU-profile "lever" (serve-mxfp4.sh:686). ONLY the ssm (temporal) state
+# goes 16-bit; the CONV state must stay BFLOAT16, not float16 -- upstream measured fp16 there
+# making radiance_gdn decline every layer ("step not handled by the fused path: conv state dtype
+# torch.float16", 2026-09-16). Both are 16-bit so the page is the same either way; the dtypes are
+# not interchangeable. Needs R4D_RX9=1 to be worth anything: rx9's narrow-state kernels are what
+# stop a 16-bit ssm cache declining to the FLA fallback, and this script FAILS below if it is set
+# without rx9 rather than serving a silent slow path.
+#
+# *** THIS IS A PRECISION CHANGE TO A RECURRENT STATE, NOT A LAYOUT CHANGE. *** GDN temporal state
+# accumulates along the sequence, so error compounds with context rather than staying local. It is
+# the same class of change as lazy GDN, which passed reaskbench SEVEN times bit-identical while
+# corrupting chat from turn 5. reaskbench is single-turn and CANNOT clear this on its own.
+#
+# *** IT ALSO RE-BASES THE KV GEOMETRY. *** Halving the mamba page lets vLLM pick a smaller
+# attention block, and our offload chunk IS the attention block: upstream's figure is 1648 -> ~880,
+# which would take the store grid 6592 -> ~3520 and the dead zone 13184 -> ~7040. Halving the dead
+# zone is a Phase 1 win (short prefixes become cacheable) but halving the chunk is a Phase 2 LOSS:
+# the CPU tier is ROW-bound, not byte-bound, so half-size rows cover half the tokens in the same
+# 22 GiB. pat 2026-09-18: *"I think I'd like to keep the store grid the same size - to maximise the
+# cpu memory kv cache store."* If the block does halve, the lever is KVOFF_BLOCKS_PER_CHUNK=2 (on
+# its own KVOFF_DISK_SUBDIR -- the on-disk config.json is not rewritten when geometry changes),
+# which also finally answers R3.12.5. READ THE BOOT LOG before assuming it halved: upstream's 880
+# is their shape, not a measurement of ours.
+#
+# *** MEASURED 2026-10-05: BROKEN THROUGH THE OFFLOAD TIER -- KEEP IT 0. *** With an fp16 ssm cache, a
+# resume whose GDN state is restored from the CPU/disk tier answers garbage (every reply
+# "</think><|im_end|>", KL 4.8 nats vs a cold run), with or without lazy GDN and with the disk
+# nowhere near full. fp32 restores bit-exactly through the same path, and a GPU-resident fp16
+# resume is exact, so the fault is in how the connector saves/restores an fp16 state page. The
+# block did halve here (1648 -> 880). Drift against fp32 also grows with context (KL ~2.3x the
+# spec on/off noise floor at 25k). Gate any retry on kv-cache/tools/val_resume.py --evict 9
+# being bit-exact at fp16. The capacity at stake is small: +4.1% KV over fp32 + lazy GDN.
+MAMBA_SSM_FP16=${MAMBA_SSM_FP16:-0}
+if [ "$MAMBA_SSM_FP16" = 1 ]; then CACHE_SUF="$CACHE_SUF-f16ssm"; fi
+# RADIANCE_GDN_FUSED_MAX_ITEMS (default 32 = the module default, i.e. no behaviour change):
+# radiance_gdn.py:645 takes the fused GDN decode kernel only when nseq*H <= this, and our
+# checkpoint has linear_num_value_heads=48, so at TP=1 ONE sequence is 48 items and the fused
+# path has never fired here -- the threshold is tuned for TP=2's 24 heads. 48 lets a single
+# sequence take it; two (96 items) still take the pair.
+#
+# *** READ THIS BEFORE SETTING IT: it is INERT while RADIANCE_GDN_LAZY=1. The lazy branch at
+# *** radiance_gdn.py:626-635 calls lazy_update and RETURNS before the :645 check, which is the
+# *** only place the knob is read. ggz14 ship both in their single-GPU profile (serve-mxfp4.sh
+# *** :278 and :669) and the combination is dead there too -- their =48 measurement is dated
+# *** 2026-09-16 and lazy landed 2026-09-17. Confirmed live 09-18: decode(lazy) once,
+# *** decode(fused) never.
+# Upstream does not cache-key this; we do, because the dispatch picks a different kernel and a
+# stale traced graph has already cost us twice. Keying also preserves the validated default tree.
+GDN_FUSED_ITEMS=${RADIANCE_GDN_FUSED_MAX_ITEMS:-32}
+if [ "$GDN_FUSED_ITEMS" != 32 ]; then CACHE_SUF="$CACHE_SUF-f$GDN_FUSED_ITEMS"; fi
+CACHE_EXPLICIT=${CACHE:+1}   # did the caller pin CACHE? (-tp1s below must not override that)
+# Build caches (startup-cache/, see its README.md): sets IMG_KEY, ARCH and
+# STARTUP_CACHE_KEY ("$IMG_KEY-$ARCH") and the container run args. Sourced HERE, before
+# anything is keyed. The boot-overlay check is deferred to just before the run
+# (startup_cache_overlay), because the prelude branches on KVOFF_MINIMAL and
+# RADIANCE_GDN_LAZY, which are only resolved further down.
+STARTUP_CACHE=${STARTUP_CACHE:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/startup-cache}
+STARTUP_CACHE_DEFER_OVERLAY=1
+# shellcheck source=startup-cache/startup-cache.sh
+. "$STARTUP_CACHE/startup-cache.sh"
+CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
+startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
+startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4
@@ -340,7 +492,7 @@ MAXPIX=${MAXPIX:-4194304}          # empty = leave processor_config.json alone. 
                             # at this many PIXELS via the idempotent repair further down.
                             # Visual tokens = pixels/1024 (16px patch x 2x2 merge), so
                             # 4194304 = 4096 tokens, the int4 entry's value.
-MMIMGMAX=${MMIMGMAX:-2}      # empty = pass no --limit-mm-per-prompt. Non-empty = max images per
+MMIMGMAX=${MMIMGMAX:-999}    # empty = pass no --limit-mm-per-prompt. Non-empty = max images per
                             # request (vLLM 400s above it). The ViT activation spike scales
                             # with the NUMBER of images in one request, not just their pixels,
                             # so this is the second line of defence after MAXPIX.
@@ -369,41 +521,6 @@ SKIPMMPROF=${SKIPMMPROF:-0} # 1 = --skip-mm-profiling. Drops the dummy encoder r
 #                      which is the polling path. Default on ROCm 7.14 is NOT documented
 #                      anywhere in the install on this box -- if it is already 1, setting it
 #                      is a no-op. Forwarded so the A/B can answer that.
-# THE GFX1201 KERNEL / RUNTIME FLAGS -- the short version
-#
-# If you take one thing from this script, take this block and the four RADIANCE_* defaults
-# further down. They are what separates a tuned R9700 from a stock one, they cost nothing, and
-# almost nobody sets them.
-#
-#   R4D_ATTN=1            radiance's own attention instead of ROCM_AITER_UNIFIED_ATTN. Worth
-#                         +1.7 / +5.6 / +24.9% PREFILL at 4k / 16k / 64k and +1.3/+1.5/+2.9%
-#                         decode steps/s. The win GROWS with depth, which is why a shallow
-#                         benchmark will tell you it does not matter. It also changes the
-#                         attention block size (1648 vs AITER's 1664) and gives a slightly
-#                         LARGER KV pool. Set below, not here.
-#   GPU_MAX_HW_QUEUES=1   ROCm default is 4. Fewer hardware queues means less round-robin
-#                         scheduling between them, which is where a dispatch-bound decode
-#                         loses time. At MAXSEQS=2 this decode IS dispatch-bound.
-#   HSA_ENABLE_MWAITX=1   ROCm default 0. Lets the host thread wait on the MWAITX instruction
-#                         rather than a hot spin poll, shortening the launch gap on short
-#                         kernels without burning a core.
-#
-# MEASURED AND REJECTED, so you do not have to repeat them:
-#   HSA_ENABLE_INTERRUPT=1  radlight sets it; we measured it FLAT (decode -0.06/-0.18/-0.31%
-#                         steps/s, prefill within cross-boot noise) and did not adopt it. It
-#                         lets a host thread block on a KFD event + GPU interrupt instead of
-#                         polling -- in direct tension with MWAITX above, which is the polling
-#                         path. Forwarded but unset, so a re-test costs one line.
-#   RADIANCE_MRV2=1       -29% steps/s here. MAXSEQS=2 leaves it nothing to amortise.
-#   COMPILE_SIZES/COOP_RED  neither recovers the 22.66 ms/step it was supposed to; the static
-#                         specializations change numerics enough to cost the drafter acceptance.
-#   RADIANCE_FAST_DRAFT=1 2-bit draft head: 3.8 GiB of KV pool for +2.3% decode. The vendor's
-#                         +16.6% is a TP=2 number and does not transfer to one card.
-#
-# These are read by the HIP/HSA runtime INSIDE the container, so they do nothing unless
-# forwarded with -e. Unset = not passed at all.
-GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
-HSA_ENABLE_MWAITX=${HSA_ENABLE_MWAITX:-1}
 ROCM_ENV=()
 if [ -n "${GPU_MAX_HW_QUEUES:-}" ]; then ROCM_ENV+=(-e "GPU_MAX_HW_QUEUES=$GPU_MAX_HW_QUEUES"); fi
 if [ -n "${HSA_ENABLE_MWAITX:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_MWAITX=$HSA_ENABLE_MWAITX"); fi
@@ -415,27 +532,12 @@ if [ -n "${HSA_ENABLE_INTERRUPT:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_INTERRUPT=
 # memory AFTER its own HIP context and torch init exist, so it sees 31980 MiB. 0.99 asks for
 # 31.54 GiB and fails at startup. 0.98 gives 857,399 KV tokens against 840,019 at 0.97 and
 # survives a full 260k-prefill sweep with no OOM.
-# 0.97. Note this is LARGELY INERT while KV_MEM below is set -- an explicit --kv-cache-memory
-# overrides it and skips vLLM's memory profiling entirely. To trade context for decode speed,
-# lower the PIN, not this. (Bigger KV pool = ~5% SLOWER decode over a 2.3 GiB swing; prefill is
-# unaffected. This is also why a cold boot looks fast: never compare cold decode to warm.)
-# For perplexity work set GPU_UTIL=0.75 and KV_MEM=0 -- prompt_logprobs allocates a 1-1.7 GiB
-# transient vLLM does not reserve for, and 0.97 OOMs the engine.
 GPU_UTIL=${GPU_UTIL:-0.97}
 # KV cache size. Resolved further down, once the batch shape it depends on is known.
-# THE SINGLE MOST IMPORTANT LINE IN THIS FILE if you run long contexts. 8.66 GiB, pinned.
-#
-# vLLM profiles free memory at boot and sizes the KV pool from what it sees. A COLD boot (empty
-# torch.compile cache) sees ~2.3 GiB less than a warm one, because compile scratch is counted as
-# permanent. So a MAXLEN sized against the warm pool serves happily for weeks and then REFUSES
-# TO START the first time the compile cache is invalidated: "7.8 GiB KV cache is needed, which
-# is larger than the available KV cache memory (7.08 GiB)". We hit exactly that.
-#
-# --kv-cache-memory skips profiling altogether, so the pool is identical cold and warm and the
-# trap disappears. It is safe because compile peaks BEFORE the pool is allocated (~24.7 vs ~31.1
-# GiB) -- the two peaks never coexist. vLLM prints the value it would "fully utilize" on its own
-# boot line; this is set just under it. Set KV_MEM=0 to force profiling back on.
-KV_MEM=${KV_MEM:-9300000000}
+# 11.8e9 = 329,035 tokens, measured on one R9700 WITH EMBED_HOST=1 (the 2.37 GiB input embedding
+# lives in host RAM). Stress peak with two 158k sequences and a 2048x2048 image: 31.23 of 31.86 GiB.
+# With EMBED_HOST=0 the embedding is back on the card: lower this by ~2.5e9 or the boot OOMs.
+KV_MEM=${KV_MEM:-11800000000}
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
 #             speculative position, so RADIANCE_DYNAMIC_DRAFT can stop the loop early.
@@ -452,11 +554,19 @@ SPEC_METHOD=${SPEC_METHOD:-dflash}
 # is right for the reference box and wrong for every host that is not it: a single-card user got
 # a startup failure from inside a TP worker, and a four-card user got two idle cards.
 TP=${TP:-$RAD_TP}
+# -tp1s has to be decided HERE, not with the other cache-suffix terms: those are built at :324
+# before TP exists, and under `set -euo pipefail` (:59) a $TP reference up there aborts the
+# launcher on every boot with "TP: unbound variable". Upstream places its identical clause after
+# its own TP block too (serve-mxfp4.sh:379). Inert while FP8S_TP1=0, which is our default.
+if [ "$TP" = 1 ] && [ "$FP8S" = 1 ] && [ "$FP8S_TP1" = 1 ]; then
+  CACHE_SUF="$CACHE_SUF-tp1s"
+  [ -n "${CACHE_EXPLICIT:-}" ] || CACHE="$CACHE-tp1s"
+fi
 GPU_IDS=${GPU_IDS:-$RAD_GPU_INDICES}
 # MODELS is bind-mounted at /models below, so SNAP and DRAFTER must live somewhere under it.
 # Resolved HERE rather than next to SNAP further down: DRAFTER's default dereferences it, and under
 # `set -u` that made an un-exported MODELS an "unbound variable" abort rather than a default.
-MODELS="$(realpath -m "${MODELS:-$HOME/models-mxfp4}")"
+MODELS="$(realpath -m "${MODELS:-$HOME/ai/models-mxfp4}")"
 # Drafter checkpoint for SPEC_METHOD=dflash. Must live under MODELS -- only MODELS is mounted.
 DRAFTER=${DRAFTER:-$MODELS/Qwen3.8-27B-DFlash2-FP8}
 # The drafter's own attention backend. It has to support FULL cuda graphs or vLLM logs "running the
@@ -518,13 +628,11 @@ if [ "$SPEC_METHOD" = dflash ]; then RADIANCE_DRAFT_RERANK=${RADIANCE_DRAFT_RERA
 # completions byte-identical, and 24/24 SEEDED SAMPLED completions byte-identical at the serve's own
 # temperature 0.7 / top_p 0.95 / top_k 20.
 if [ "$SPEC_METHOD" = dflash ]; then RADIANCE_VERIFY_HEAD=${RADIANCE_VERIFY_HEAD:-1}; fi
-# Context length. Only lower it for diagnostics -- the FLA GDN fallback allocates against this,
-# not against the chunk size, and OOMs at 262144.
-# 204800, pinned. This is the largest context that fits ALONGSIDE the vision tower with the
-# KV pin below, verified on a genuinely cold boot: 228,737 tokens of pool, 1.12x concurrency.
-# Do NOT raise it by extrapolating tokens/GiB -- efficiency is max_model_len-dependent (218
-# blocks/request at 131072, 308 at 204800), so arithmetic from another MAXLEN will lie to you.
-MAXLEN=${MAXLEN:-204800}
+# Context length: 262,144 is Qwen3.8's maximum. The FLA GDN fallback allocates against this, not
+# against the chunk size, and OOMs at 262144 -- with R4D_RX13=1 every GDN layer runs on libr4d and
+# the fallback never runs; MAMBA_SSM_FP16=1 without the narrow-state kernels would bring it back.
+# The GPU pool (329,035 tokens) holds one full-length sequence with room for a second.
+MAXLEN=${MAXLEN:-262144}
 # Chat template. It is mounted into the container by path, so it must exist ON THE HOST: this was
 # hardcoded to a file under ~/.cache/huggingface that only ever existed on the box it was written
 # on, which made a fresh clone fail at startup with a missing-file error from vllm rather than
@@ -565,12 +673,6 @@ GEN_TOPP="${GEN_TOPP:-0.95}"
 GEN_TOPK="${GEN_TOPK:-20}"
 GENCFG_ARG="{\"temperature\":${GEN_TEMP},\"top_p\":${GEN_TOPP},\"top_k\":${GEN_TOPK}}"
 
-# Server-default thinking budget. 'low' matches the int4 launcher in this repo. This is a
-# SERVER DEFAULT ONLY -- a client sending its own reasoning_effort still wins -- so it steers
-# the agentic traffic that sends nothing without taking the knob away from anyone. Set it to
-# medium (the template's own fallback) or xhigh if you want longer chains of thought; the
-# guard below fails at BOOT if your template cannot honour the value, because
-# --default-chat-template-kwargs otherwise fails silently or at first request.
 REASONING_EFFORT="${REASONING_EFFORT:-low}"
 RSNEFF_ARG=""
 if [ -n "$REASONING_EFFORT" ]; then
@@ -596,30 +698,6 @@ case "$CHAT_TEMPLATE" in
 esac
 
 preflight
-
-# ---------------------------------------------------------------- build caches
-# Every build cache here is keyed on everything its artifact was built from -- image ID (not
-# tag), GPU arch, source content, flags -- so any upstream change rebuilds instead of silently
-# reusing a stale artifact. The machinery lives in startup-cache/ (see its README.md) and is
-# shared by any launcher: this sets IMG_KEY, ARCH and STARTUP_CACHE_KEY ("$IMG_KEY-$ARCH"),
-# verifies the boot overlay, and fills STARTUP_CACHE_RUN_ARGS for the container run below.
-# startup_cache_jit_mounts adds comgr, tvm-ffi and tilelang, which otherwise cache under the
-# container's HOME and are rebuilt by every --rm container (tvm-ffi alone is ~22 s a boot).
-# ARCH=<gfx...> overrides the detected arch; BOOT_OVERLAY=0 disables the overlay.
-# HOUSE: this repo's own vLLM patches (kv-cache/patches), mounted at /house beside ggz14's tree
-# at /patches. The prelude applies the uniform-decode guard from there, and the boot overlay
-# builder needs the same mount, so it is set before startup-cache.sh is sourced.
-HOUSE="$(realpath -m "${HOUSE:-$SCRIPT_DIR/kv-cache/patches}")"
-[ -f "$HOUSE/patch_uniform_decode_guard.py" ] || {
-  echo "[radiance] FATAL: HOUSE=$HOUSE has no patch_uniform_decode_guard.py (kv-cache/patches)" >&2; exit 1; }
-STARTUP_CACHE_OVERLAY_MOUNTS="${STARTUP_CACHE_OVERLAY_MOUNTS:+$STARTUP_CACHE_OVERLAY_MOUNTS }$HOUSE:/house"
-STARTUP_CACHE=${STARTUP_CACHE:-$(dirname "$(realpath -m "$0")")/startup-cache}
-# shellcheck source=startup-cache/startup-cache.sh
-. "$STARTUP_CACHE/startup-cache.sh"
-CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
-startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
-startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
-
 # A libr4d checkout DIRECTORY whose r4d.so is copied over the image's at container start. Leave
 # unset and it is built for you (see AUTO_R4D just below); set it to use your own checkout.
 # Needed because the GDN overflow fixes are upstream (StillDeadcode/libr4d PR #1, merged) but the
@@ -635,35 +713,107 @@ R4D_PIN=${R4D_PIN:-b9e42ab}
 R4D_CACHE=${R4D_CACHE:-$HOME/.cache/radiance-libr4d}
 # r4d_radiance_extras.patch carries this repo's libr4d additions on top of the pinned commit:
 # the 8-bit prefill attention legs (R4D_ATTN_FP8) and the fused GDN decode step
-# (RADIANCE_GDN_FUSED_UPDATE). The build cache key is everything the build is made from: the
-# pinned commit, a content hash of the patch (so an edited patch rebuilds with no suffix to
-# remember to bump), the image (its hipcc builds it) and the GPU arch (build.sh's GFX_ARCH).
+# (RADIANCE_GDN_FUSED_UPDATE). The build cache key carries a suffix so patched and stock builds
+# coexist; bump the suffix whenever the patch content changes, or a stale build serves silently.
 R4D_PATCH="$REPO/r4d_radiance_extras.patch"
+# GDN_LAZY needs a DIFFERENT extras patch. rx10 is a strict superset of the base one -- same 9
+# files plus 12 more, including r4d_gdn_lazy_update_k128_v128_bf16_fp32state.hip, which is the
+# variant our fp32 ssm state uses. radiance_gdn_lazy.py resolves its kernel by name
+# (getattr(r4d, "gdn_lazy_materialize_k128_v128_bf16_<tag>")), and that symbol exists ONLY in
+# rx10, so lazy on a base-patch libr4d is an AttributeError during init, not a slow path. Fail
+# loudly here instead. The key is content-derived (below), so rx10 gets its own cache entry and
+# the validated non-lazy build is never overwritten.
+# rx9 first, so the lazy branch below can still override it with rx10 (rx10 CONTAINS rx9).
+if [ "$R4D_RX9" = 1 ]; then
+  if [ -f "$REPO/r4d_radiance_extras_rx9.patch" ]; then
+    R4D_PATCH="$REPO/r4d_radiance_extras_rx9.patch"
+  else
+    echo "[radiance] FATAL: R4D_RX9=1 but $REPO has no r4d_radiance_extras_rx9.patch." >&2
+    exit 1
+  fi
+fi
+if [ "$GDN_LAZY" = 1 ]; then
+  if [ -f "$REPO/r4d_radiance_extras_rx10.patch" ]; then
+    R4D_PATCH="$REPO/r4d_radiance_extras_rx10.patch"
+  else
+    echo "[radiance] FATAL: RADIANCE_GDN_LAZY=1 but $REPO has no r4d_radiance_extras_rx10.patch." >&2
+    echo "[radiance] The lazy materialize kernel lives only in rx10. Set RADIANCE_GDN_LAZY=0." >&2
+    exit 1
+  fi
+fi
+# The key carries the patch CONTENT, not just the pin, because the "bump the suffix" rule above
+# was a rule nothing enforced. REPO is overridable and the build below is skipped whenever the
+# keyed directory already exists, so pointing REPO at a different tree swapped the patch under a
+# cache entry built from the old one: same key logged, stale libr4d served, no warning.
+# Found 2026-09-18 while costing the ggz14 update (ggz-upgrade-20260918/): the 09-17 tree ships a
+# 59,601-byte r4d_radiance_extras.patch where ours is 45,188 bytes, same filename.
+# R4D_PATCH_RX5_SHA is the patch rx5 was built from (ggz14-mxfp4 @ 22c69cd). Matching content
+# keeps the validated -rx5 entry, so this change rebuilds nothing today; any other content gets
+# its own key and builds once. Note the new tree ALSO carries r4d_radiance_extras_rx9.patch for
+# its single-GPU profile -- we do not use that profile (see the upgrade README, Stage B).
+# R4D_RX13 last: r4d_kernels.patch contains rx9 and rx10 (lazy kernels included), so it wins.
 if [ "$R4D_RX13" = 1 ]; then
   R4D_PATCH="${R4D_PATCH_RX13:-$SCRIPT_DIR/r4d_kernels/r4d_kernels.patch}"
-  [ -f "$R4D_PATCH" ] || { echo "[radiance] FATAL: R4D_RX13=1 but $R4D_PATCH is missing" >&2; exit 1; }
+  [ -f "$R4D_PATCH" ] || die "R4D_RX13=1 but $R4D_PATCH is missing"
   R4D_PIN=${R4D_PIN_RX13:-v0.5.0}
 fi
-R4D_KEY="$R4D_PIN"
-if [ -f "$R4D_PATCH" ]; then R4D_KEY="$R4D_PIN-p$(sha256sum "$R4D_PATCH" | cut -c1-8)"; fi
-R4D_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"
+R4D_PATCH_RX5_SHA=6a03fb481f62
+R4D_KEY_EXPLICIT=${R4D_KEY:+1}
+if [ -z "${R4D_KEY:-}" ]; then            # an explicit R4D_KEY in the environment still wins
+  R4D_KEY="$R4D_PIN"
+  if [ -f "$R4D_PATCH" ]; then
+    _r4d_sha=$(sha256sum "$R4D_PATCH" | cut -c1-12)
+    if [ "$_r4d_sha" = "$R4D_PATCH_RX5_SHA" ]; then
+      R4D_KEY="$R4D_PIN-rx5"              # rx5: fused_update zeroes the pad rows (o_rows arg)
+    else
+      R4D_KEY="$R4D_PIN-p$_r4d_sha"
+      echo "[radiance] libr4d extras patch is not the rx5 one ($_r4d_sha) -- building $R4D_KEY"
+    fi
+  fi
+fi
+# The build DIRECTORY also carries STARTUP_CACHE_KEY: the build runs inside $IMAGE (its hipcc)
+# for $ARCH, so a new image or GPU must not reuse it. An explicit R4D_KEY names its directory
+# as-is, so a hand-picked existing build is still used exactly.
+if [ -n "${R4D_KEY_EXPLICIT:-}" ]; then R4D_DIR_KEY="$R4D_KEY"; else R4D_DIR_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"; fi
 if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
-  if [ ! -f "$R4D_CACHE/$R4D_KEY/r4d.so" ]; then
-    echo "[radiance] building libr4d $R4D_KEY in $IMAGE -- one time, a few minutes"
+  if [ ! -f "$R4D_CACHE/$R4D_DIR_KEY/r4d.so" ]; then
+    echo "[radiance] building libr4d $R4D_DIR_KEY in $IMAGE -- one time, a few minutes"
     rm -rf "$R4D_CACHE/.build"
     mkdir -p "$R4D_CACHE/.build"
     git clone -q https://codeberg.org/StillDeadcode/libr4d.git "$R4D_CACHE/.build"
     git -C "$R4D_CACHE/.build" checkout -q "$R4D_PIN"
-    if [ -f "$R4D_PATCH" ]; then
+    if [ "$R4D_KEY" != "$R4D_PIN" ]; then
       git -C "$R4D_CACHE/.build" apply "$R4D_PATCH"
     fi
     "$RUNTIME" run --rm --entrypoint bash -v "$R4D_CACHE/.build":/work:z -w /work \
       -e GFX_ARCH="$ARCH" "$IMAGE" -c ./build.sh
     # publish only after a successful build, so an interrupted one is not cached as good
-    mv "$R4D_CACHE/.build" "$R4D_CACHE/$R4D_KEY"
+    mv "$R4D_CACHE/.build" "$R4D_CACHE/$R4D_DIR_KEY"
   fi
-  R4D_SO="$R4D_CACHE/$R4D_KEY"
-  echo "[radiance] libr4d $R4D_KEY -> $R4D_SO"
+  R4D_SO="$R4D_CACHE/$R4D_DIR_KEY"
+  echo "[radiance] libr4d $R4D_DIR_KEY -> $R4D_SO"
+fi
+# R4D_RX13=1 also patches the MXFP4 W4A8 kernel: r4d_kernels/radiance_mxfp4_fp8.patch is applied to
+# a COPY of $REPO/radiance_mxfp4_fp8.hip (the clone is never edited), cached under a key made of both
+# files' content, and mounted at /mfxsrc for the in-container compile. MFX_PATCH= (empty) keeps the
+# clone's kernel; RADIANCE_MXFP4_DECODE_TUNE16=0 turns the re-tune off at runtime instead.
+MFX_DIR=""
+if [ "$R4D_RX13" = 1 ]; then
+  MFX_PATCH=${MFX_PATCH-$SCRIPT_DIR/r4d_kernels/radiance_mxfp4_fp8.patch}
+  if [ -n "$MFX_PATCH" ]; then
+    [ -f "$MFX_PATCH" ] || die "R4D_RX13=1 but $MFX_PATCH is missing"
+    MFX_KEY=$(cat "$REPO/radiance_mxfp4_fp8.hip" "$MFX_PATCH" | sha256sum | cut -c1-16)
+    MFX_DIR="$CACHE/mfx-src/$MFX_KEY"
+    if [ ! -f "$MFX_DIR/radiance_mxfp4_fp8.hip" ]; then
+      rm -rf "$MFX_DIR.tmp"
+      mkdir -p "$MFX_DIR.tmp"
+      cp "$REPO/radiance_mxfp4_fp8.hip" "$MFX_DIR.tmp/"
+      patch -s -d "$MFX_DIR.tmp" radiance_mxfp4_fp8.hip < "$MFX_PATCH" \
+        || die "$MFX_PATCH does not apply to $REPO/radiance_mxfp4_fp8.hip"
+      mv "$MFX_DIR.tmp" "$MFX_DIR"
+    fi
+    echo "[radiance] MXFP4 kernel: $REPO/radiance_mxfp4_fp8.hip + $(basename "$MFX_PATCH") ($MFX_KEY)"
+  fi
 fi
 if [ "${PREPARE_ONLY:-0}" = 1 ]; then
   echo "[radiance] prepared: image pulled and libr4d built -- ready to serve"
@@ -706,6 +856,23 @@ fi
 # mxfp4 quantization squashes NaN to a finite code. RADIANCE_MXFP4_SANITIZE (default 1) fixes it.
 # Extra vllm serve args, for bisecting (e.g. EXTRA="--enforce-eager").
 EXTRA=${EXTRA:-}
+# Prefetch the checkpoint into page cache in parallel before loading (served configuration).
+case " $EXTRA " in *--safetensors-load-strategy*) ;; *) EXTRA="$EXTRA --safetensors-load-strategy prefetch" ;; esac
+# MAMBA_SSM_FP16 -- see the knob's block above for the risk and the geometry consequence.
+if [ "$MAMBA_SSM_FP16" = 1 ]; then
+  if [ "$R4D_RX9" != 1 ]; then
+    echo "[radiance] FATAL: MAMBA_SSM_FP16=1 needs R4D_RX9=1." >&2
+    echo "[radiance] Without rx9's narrow-state GDN kernels a 16-bit ssm cache declines every GDN" >&2
+    echo "[radiance] layer to the FLA fallback -- a silent slow path, not an error. Set R4D_RX9=1." >&2
+    exit 1
+  fi
+  # An explicit --mamba-*-cache-dtype from the caller still wins: EXTRA is placed before PASSTHRU
+  # on the command line, and argparse keeps the last occurrence.
+  case " $EXTRA " in
+    *--mamba-cache-dtype*|*--mamba-ssm-cache-dtype*) ;;
+    *) EXTRA="$EXTRA --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16" ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # CPU KV offload (second-tier prefix cache in system RAM).
@@ -714,8 +881,8 @@ EXTRA=${EXTRA:-}
 # plain `float | None`) -- there is no percentage form and no "auto", so any
 # machine-relative sizing has to happen out here.
 #
-#   KV_OFFLOAD=off     no offload at all (DEFAULT).
-#   KV_OFFLOAD=auto    size it from what this box actually has spare.
+#   KV_OFFLOAD=off     no offload at all.
+#   KV_OFFLOAD=auto    size it from what this box actually has spare (default).
 #   KV_OFFLOAD=50%     percentage of TOTAL system RAM, then clamped as below.
 #   KV_OFFLOAD=11.5    absolute GiB, still clamped -- an oversized value is
 #                      lowered to what fits rather than failing the boot.
@@ -734,20 +901,311 @@ EXTRA=${EXTRA:-}
 # Overshooting the tmpfs fails the START -- it does not degrade gracefully, and
 # on 0.27.1 it dies without a log line, which is a miserable thing to debug.
 # Hence the clamp is mandatory, not advisory.
-# Default OFF. Measured cost with a COLD cache is ~3.3% prefill (the store path
-# competes with prefill for PCIe and CPU); decode is untouched, -0.3..-0.7% on
-# steps/s, because offload_prompt_only defaults True so nothing is stored during
-# decode. That cost is unconditional, the benefit is not -- it only arrives once
-# prefixes actually repeat. Break-even is an external hit rate of roughly 3.3%,
-# since a hit skips essentially ALL the prefill for that prefix. A real
-# multi-agent workload measured 9.1% and still climbing, i.e. comfortably ahead;
-# a single-stream chat workload may never get there. Turn it on deliberately,
-# for a workload you know repeats prefixes.
 KV_OFFLOAD=${KV_OFFLOAD:-off}
 KVOFF_MIN_GIB=${KVOFF_MIN_GIB:-4}        # below this a second tier is not worth the RAM; -> off
 KVOFF_KEEP_FREE_GIB=${KVOFF_KEEP_FREE_GIB:-3}   # page cache + headroom left for the rest of the box
 KVOFF_SHM_MARGIN_MIB=${KVOFF_SHM_MARGIN_MIB:-256} # podman locks + multiprocessing semaphores
 KVOFF_BACKEND=${KVOFF_BACKEND:-native}
+
+# --- L3: disk-backed secondary tier (OPTIONAL, default OFF) ------------------
+# vLLM registers a filesystem secondary tier ("fs") behind the CPU primary tier,
+# reached through TieringOffloadingSpec. It is NOT reachable via
+# --kv-offloading-backend, whose only legal values are native|lmcache
+# (config/cache.py:40) -- it needs an explicit --kv-transfer-config, built below.
+#
+#   KVOFF_DISK=/kvcache   host path of a dedicated filesystem -> enables the tier
+#   KVOFF_DISK=""         off (DEFAULT)
+#
+# THREE THINGS THAT WILL BITE, all verified in the 0.27.1 tree:
+#
+#   1. PYTHONHASHSEED. Block filenames are content hashes chained from NONE_HASH,
+#      and kv_cache_utils.py:112 seeds that from os.urandom(32) when
+#      PYTHONHASHSEED is unset. Every restart would then hash the same tokens to
+#      DIFFERENT filenames, orphaning the entire cache on disk -- silently, with a
+#      100% miss rate and no error. We pin it. Changing it invalidates the cache.
+#   2. NO EVICTION. tiering/fs/manager.py has no capacity, quota or TTL parameter,
+#      and SecondaryTierManager exposes no eviction hook: this tier writes and
+#      never deletes. An external reaper is MANDATORY, not advisory. See
+#      kvcache-reap.service/.timer.
+#   3. O_DIRECT. tiering/fs/io.py probes it per-directory and uses it when the
+#      filesystem supports it (ext4 does). Reads and writes therefore BYPASS the
+#      page cache entirely, so spare RAM cannot act as a read cache in front of
+#      this tier -- the only productive home for spare RAM is the primary tier.
+# KVCACHE_DISK_TIER=1 (default, the served configuration) turns the tier on at KVCACHE_DISK
+# (default /kvcache, a dedicated filesystem; 128 GiB or more recommended). 0 = RAM tier only.
+# An explicit KVOFF_DISK still wins. If the directory does not exist the boot says so loudly and
+# serves with the RAM tier only, rather than refusing to start.
+KVCACHE_DISK_TIER="${KVCACHE_DISK_TIER:-1}"
+case "$KVCACHE_DISK_TIER" in 0|1) ;; *) die "KVCACHE_DISK_TIER must be 0 or 1, got '$KVCACHE_DISK_TIER'" ;; esac
+if [ -z "${KVOFF_DISK:-}" ] && [ "$KVCACHE_DISK_TIER" = 1 ]; then KVOFF_DISK="${KVCACHE_DISK:-/kvcache}"; fi
+KVOFF_DISK=${KVOFF_DISK:-}
+if [ -n "$KVOFF_DISK" ] && [ ! -d "$KVOFF_DISK" ]; then
+  echo "[kvcache] *** DISK TIER OFF: $KVOFF_DISK does not exist. Serving with the RAM tier only." >&2
+  echo "[kvcache]     Create a dedicated filesystem there (128 GiB or more; kv-cache/docs/SETUP.md)," >&2
+  echo "[kvcache]     install the reaper (kv-cache/ops), or set KVCACHE_DISK_TIER=0 to silence this." >&2
+  KVOFF_DISK=""
+fi
+if [ -n "$KVOFF_DISK" ]; then
+  # 128 GiB recommended: the reaper keeps KVCACHE_MIN_FREE_GB (24) free and works on a 5-minute
+  # cadence, so a smaller volume holds little more than a couple of full 256k conversations.
+  _kvc_disk_gib=$(df -P -B1G "$KVOFF_DISK" 2>/dev/null | awk 'NR==2 {print $2}')
+  if [ -n "$_kvc_disk_gib" ] && [ "$_kvc_disk_gib" -lt 128 ]; then
+    echo "[kvcache] WARNING: disk tier $KVOFF_DISK is ${_kvc_disk_gib} GiB; 128 GiB or more is recommended." >&2
+  fi
+  if ! systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
+    echo "[kvcache] *** WARNING: the disk tier is ON but kvcache-reap.timer is not enabled." >&2
+    echo "[kvcache]     This tier NEVER deletes on its own; $KVOFF_DISK fills until the filesystem is" >&2
+    echo "[kvcache]     full. Install the reaper: kv-cache/ops/README.md." >&2
+  fi
+fi
+KVOFF_DISK_MNT=/kvcache                                   # path INSIDE the container
+# Measured on the 512 GB zvol, 2026-09-07, O_DIRECT (the tier's own path), MB/s:
+#   reads    1 thr  87.6 | 4 thr 268.9 | 8 thr 719.3 | 16 thr 435.6  <- peak at 8
+#   writes   1 thr 1100                                              <- never the limit
+# So reads get 8 (I/O-bound waiting on the array, so exceeding the 4 cores is fine,
+# and 16 regresses on raidz contention); writes stay at 4, since 1.1 GB/s at a single
+# thread is already 24x the 44.6 MB/s this tier actually stores.
+# CAVEAT on those read figures: they were taken shortly after writing the test files,
+# and with sync=disabled the host may still have had them in a pending txg, so the
+# absolute numbers are optimistic. The SHAPE is what these settings rest on.
+KVOFF_DISK_RTHREADS=${KVOFF_DISK_RTHREADS:-8}             # vLLM default is 16
+KVOFF_DISK_WTHREADS=${KVOFF_DISK_WTHREADS:-4}             # vLLM default is 16; 4C4T box
+KVOFF_HASHSEED=${KVOFF_HASHSEED:-0}
+# RADIANCE_OFFLOAD_MIXED_HIT: 1 = serve mixed local+external hits, 0 = decline every
+# external hit on a request that also hit the GPU prefix cache. DEFAULT IS 1, and as of
+# 2026-09-10 that is no longer the crashing behaviour: the one-shot dump named the group
+# (always [8], the MTP/DFlash2 draft group, a SlidingWindowSpec) and
+# patch_offload_mixed_hit.py now fixes the two real defects instead of dodging them --
+# a boundary assertion that only holds for full-attention groups, and a lookup that
+# confirmed a narrower chunk range than the load actually reads. Flip to 0 only as a kill
+# switch; it costs external hits and buys nothing the fix does not already give.
+KVOFF_MIXED_HIT=${KVOFF_MIXED_HIT:-1}
+# RADIANCE_RECONCILE_REASK: 1 = when vLLM falls back from a GPU attention hit that has no
+# matching Mamba state (the stock hit_diverged fallback in Scheduler.schedule), ask the
+# offload tier again from the lowered boundary instead of recomputing the whole prompt.
+# 0 = stock behaviour exactly. Added 2026-09-17 for pattern A in
+# kv-cache/miss-analysis-20260917/README.md: 8 of the 14 real misses since the 09-15 boot
+# recomputed a prefix whose Mamba snapshots the tier already held (~270 s of prefill).
+# See kv-cache/patches/patch_reconcile_reask.py. Either value logs a `reconcile` event per
+# fallback to the debug_instrument sink, with what the GPU held per KV group.
+#   KVOFF_REASK_MIN_DROP_BLOCKS: only re-ask when the fallback dropped at least this many
+#     blocks. 2 leaves the normal one-block per-turn shortfall alone.
+#   KVOFF_REASK_MAX_DEFER_S: how long a request may wait for a tier store still landing
+#     before it gives up and recomputes. Bounds the wait, so it cannot park a request.
+KVOFF_RECONCILE_REASK=${KVOFF_RECONCILE_REASK:-1}
+KVOFF_REASK_MIN_DROP_BLOCKS=${KVOFF_REASK_MIN_DROP_BLOCKS:-2}
+KVOFF_REASK_MAX_DEFER_S=${KVOFF_REASK_MAX_DEFER_S:-10}
+#   KVOFF_REASK_MEMO: 1 = cache the re-ask answer on the request instead of re-deriving it on
+#     every scheduler pass while the request waits for a GPU slot. Default 0.
+#     Measured 2026-09-18 over 14 boots of sink archive: 118,871 connector lookups, 112,627 of
+#     them (94.7%) exact repeats of an answer already returned for that same request; only 490
+#     distinct reconcile answers. The inputs are fixed while a request waits, so the answer is
+#     invariant. This does NOT change the waiting -- waiting for a cache hit rather than
+#     discarding it and reprocessing is correct, and exists because two long contexts do not fit
+#     in the GPU pool at once. See kv-cache/storm-memo.md; test kv-cache/test_reask_memo.py.
+#   KVOFF_REASK_MEMO_TTL_S: re-validate the cached answer after this long (default 5), so an ARC
+#     eviction mid-wait cannot keep serving a stale hit. A 95 s wait goes 1,373 lookups -> 19.
+KVOFF_REASK_MEMO=${KVOFF_REASK_MEMO:-0}
+KVOFF_REASK_MEMO_TTL_S=${KVOFF_REASK_MEMO_TTL_S:-5}
+# RADIANCE_SWA_STORE_MAMBA_ALIGN: 1 = store a sliding-window (drafter) chunk only if a hit
+# can land on it. Hits are rounded down to the Mamba grid (stride x chunk), so the drafter
+# needs only its window + 1 eagle chunk before each grid point: 3 of every 4 chunks at
+# stride 4, about 6% less tier memory with no hit lost (test_swa_align.py). 0 = store every
+# drafter chunk, as before.
+# RADIANCE_TOUCH_ALL_GROUPS: 1 = refresh every group of a request in the eviction policy,
+# as attention already is, so the tier does not evict a prefix's Mamba/drafter snapshots
+# while its attention survives (pattern B). 0 = stock _touch. Upstream fixed the same thing
+# in PR #51787 (not backportable to 0.27.1).
+# Both added 2026-09-17; see kv-cache/patches/patch_swa_align_touch.py.
+# RADIANCE_TOUCH_POSITION_ORDER (2026-09-18, needs TOUCH_ALL_GROUPS=1): 1 = one touch per request
+# with every group's keys sorted by chunk position, so eviction removes whole positions from a
+# conversation's tail. 0 = touch group by group, which evicts all g0 Mamba snapshots first and
+# leaves the other groups' rows held but useless (evict_skew, 4 of 5 big tier_had losses under
+# three agents). Test: kv-cache/test_touch_order.py.
+KVOFF_SWA_MAMBA_ALIGN=${KVOFF_SWA_MAMBA_ALIGN:-1}
+KVOFF_TOUCH_ALL_GROUPS=${KVOFF_TOUCH_ALL_GROUPS:-1}
+KVOFF_TOUCH_POSITION_ORDER=${KVOFF_TOUCH_POSITION_ORDER:-1}
+# RADIANCE_LOOKUP_INVALIDATE: drop a cached `absent` lookup verdict when a store for
+# that key LANDS. Upstream's AsyncLookupManager caches per-key verdicts and re-checks
+# only when the entry is None, and the fs store path never tells it anything changed --
+# so a block we just wrote keeps reading as absent until every request referencing it
+# finishes. That is the long-context miss: hits drop to zero mid-conversation and come
+# back "shortly after" (when the request ends and the entry is finally cleared).
+# Drops rather than flips to present: the reaper deletes out-of-band, so a cached
+# `present` would age into a FALSE HIT -- a failed promotion and a full recompute.
+# 1 = fix on, 0 = upstream behaviour (default here). See kv-queue task 58; rehearsed
+# with a synthetic driver that reproduces the lie and shows it go to zero.
+#
+# 2026-09-12: DEFAULTED BACK TO 0 -- the measurement arm, not a verdict on the fix.
+# With it at 1 the tier answered only 8 of the 17 lookups that needed it; the 9 that
+# failed had deferred once or twice and given up in under 10 ms, while the 3 that
+# waited longer were all served. Chunk results were 42,300 HIT_PENDING against 130
+# MISS, so the blocks were present 99.8% of the time and the loss is entirely at the
+# resolution. This flag is the ONLY behavioural difference on the restore path from
+# the nine-patch set published in the public release, so 0 reproduces that release
+# and gives the A/B arm we never ran today. Aggregate cache hit was 87.5% before and
+# 87.9% after the reload that carried it, i.e. no measured effect either way yet.
+# Expect the stale `absent` back while this is 0 -- that is the defect task 58 fixes.
+# Revert to 1 if the tier's served/gave-up split gets worse rather than better.
+KVOFF_LOOKUP_INVALIDATE=${KVOFF_LOOKUP_INVALIDATE:-0}
+# RADIANCE_FS_FAILED_LOAD_FORGET: when an fs load (promotion) FAILS, drop the cached lookup
+# verdict for its keys. Without it the cached `present` outlives the failure: the waiting
+# request re-promotes a file io.py already deleted, forever -- measured 2026-09-19: one block
+# truncated, request hung 240 s to client timeout, 294 failed reads. The trigger in production
+# is the reaper deleting a block between a lookup and its promotion. 1 = fix (default), 0 =
+# upstream behaviour. Patch: kv-cache/patches/patch_fs_failed_load.py.
+KVOFF_FS_FAILED_LOAD_FORGET=${KVOFF_FS_FAILED_LOAD_FORGET:-1}
+# RADIANCE_ALIGN_PROMPT_LAST_BLOCK: stop the prompt's final prefill chunk at its last full
+# block boundary. Upstream exempts the final chunk from block alignment, so a prompt ending
+# <=~400 tokens past a boundary computes its last full block together with the tail; that
+# block's last 48 rows (1648 % 64) then differ from a cold prefill in the low bits, and every
+# later turn that loads it differs from cold (turnbench 2026-09-19: rule predicts 21/21).
+# Cost: one extra forward step for those prompts. 1 = fix (default), 0 = upstream.
+# Patch: kv-cache/patch_sched_align_last_block.py.
+KVOFF_ALIGN_LAST_BLOCK=${KVOFF_ALIGN_LAST_BLOCK:-1}
+# KVOFF_MINIMAL: 1 = apply ONLY the three behavioural KV-offload patches and skip every
+# instrumentation patch. The three are mixed-hit (crash guard + the cross-nonce
+# correctness fix), eagle-groups (stop labelling all nine KV groups as MTP draft) and
+# mamba-stride (the capacity lever). Skipped: store-path instrumentation, lookup
+# outcomes, fs fanout, the tier report, the promotion-refusal bundle, and the task
+# 58/50/65 lookup patches.
+# What you keep: upstream external_prefix_cache_hits/queries, kv_offload_store_bytes,
+# and llama-swap per-request cache_tokens -- enough to see WHETHER the tier serves.
+# What you lose: kvvalidate.py and tierreport.py stop working entirely, and with them
+# every answer to WHY it did not serve. fs fanout is dropped too: it is behavioural, but
+# the disk measured ~117 MB/s with and without it, so it is 5 hunks for a measured no-win.
+# Rehearsed 2026-09-12 by kv-queue/rehearse-minimal.sh: 12 hunks land once, idempotent,
+# all touched files byte-compile, connector and both tier managers import. That proves
+# the set is COHERENT, not that it serves -- no engine was started.
+# 2026-09-13, pat: DEFAULT FLIPPED TO 1. The minimal set has run production since the
+# 2026-09-12 late reload and is working well, so it is the recommended configuration; the
+# full instrumented set is the DISK build (KVCACHE_DISK_TIER=1 on the kvcache
+# wrapper, which sets this back to 0 along with the disk tier).
+# Here: 0 (the full instrumented set) with the disk tier, as served; 1 with the RAM tier only.
+if [ -n "$KVOFF_DISK" ]; then KVOFF_MINIMAL=${KVOFF_MINIMAL:-0}; else KVOFF_MINIMAL=${KVOFF_MINIMAL:-1}; fi
+# RADIANCE_LOOKUP_STALE_WATCH: diagnostic only -- counts lookups that returned a cached
+# `absent` for a key whose file exists. DEFAULT OFF and it should stay off: it costs one
+# unbatched os.path.exists per MISS, and on a cold cache every lookup misses, so the
+# ~45-minute warm-up is exactly when it is most expensive on a device-bound tier.
+KVOFF_STALE_WATCH=${KVOFF_STALE_WATCH:-0}
+# RADIANCE_OFFLOAD_EAGLE_GROUPS: 1 = annotate the EAGLE/MTP draft KV group positionally on
+# the hybrid grouping path; 0 = upstream, which only does it for DeepSeek-V4 and therefore
+# not for us. DEFAULT IS 1. Without it no group is annotated, and the offload scheduler's
+# fail-safe flags ALL NINE groups as draft groups -- the boot log says so verbatim
+# ("draft attention groups [0, 1, 2, 3, 4, 5, 6, 7, 8] detected"). That withholds the newest
+# chunk of every conversation from the store for the whole of a decode and shortens every
+# servable prefix by a chunk, nine times over. Verify after a restart: the line must read
+# "[8]". See kv-cache/patches/patch_eagle_groups.py and upstream PR #52047 (NOT merged as #55390; #52047 does not cover this model).
+KVOFF_EAGLE_GROUPS=${KVOFF_EAGLE_GROUPS:-1}
+# RADIANCE_MAMBA_STORE_STRIDE: keep every Nth Mamba/GDN snapshot instead of one per chunk.
+# 1 = off (upstream). DEFAULT IS 4. A Mamba group holds ONE recurrent state and the load
+# path reads exactly one chunk of it, but the store path writes 27 MB per group per chunk --
+# ~70 snapshots for a long conversation where the GPU itself keeps 2. At N=8 the bytes per
+# 8 chunks fall from 72 units to 30 (0.417x), so the CPU tier holds ~276,900 tokens instead
+# of 115,360: 1.21x the GPU cache instead of 0.50x. That is what lets a conversation still
+# be in RAM on the follow-up turn, and a CPU hit costs 1-2 s against the measured 64.26 s
+# fs->CPU promotion. It costs prefix: hits are truncated down to an N-chunk (13,184-token)
+# boundary. See kv-cache/patches/patch_mamba_stride.py, plan R3.13.
+KVOFF_MAMBA_STRIDE=${KVOFF_MAMBA_STRIDE:-4}
+# RADIANCE_SPLIT_POOL_SHARE (R3.16, 2026-09-19): store the drafter group at its real size.
+# EMPTY = off (upstream: one pool of uniform rows). The CPU tier is row-bound, and g8 (the
+# 5-layer DFlash2 drafter) fills 5 of the 8 slices of every row it takes, so each drafter row
+# reserves 10 MB it never writes. Set to a row-count share in (0,1) and the same mmap is split
+# into a main pool of full rows and a drafter pool of 5-slice rows, each with its own stock
+# manager and ARC policy. The value is the drafter pool's share of ROWS: measured 11.9% at
+# stride 8 (reaskbench adc8c9: 40 of 336), so 0.125 errs toward a slightly large drafter
+# pool -- too small evicts drafter rows before their partners and shrinks hits, too large only
+# wastes some of the gain. The router logs age-at-eviction per pool every 5 minutes; the two
+# medians should match. Worth ~+4.2% tier tokens at stride 8. REFUSED with KVOFF_MINIMAL=0:
+# those instrumentation patches read manager internals the router does not have.
+# See kv-cache/patch_offload_split_pool.py and kv-cache/test_split_pool.py.
+KVOFF_SPLIT_POOL_SHARE=${KVOFF_SPLIT_POOL_SHARE:-}
+if [ -n "$KVOFF_SPLIT_POOL_SHARE" ] && [ "$KVOFF_MINIMAL" != 1 ]; then
+  echo "[radiance] FATAL: KVOFF_SPLIT_POOL_SHARE needs KVOFF_MINIMAL=1." >&2
+  echo "[radiance] The KVOFF_MINIMAL=0 instrumentation reads _num_blocks and _policy off the" >&2
+  echo "[radiance] manager object, which is the split-pool router here and has neither." >&2
+  exit 1
+fi
+# RADIANCE_FS_FANOUT_TARGET_MB / RADIANCE_FS_FANOUT_MAX: how far one filesystem-tier job is
+# split across the tier's own thread pool. DEFAULT IS 256 MiB / 0 (0 = use the byte budget).
+# The tier is given 8 read and 4 write threads and, upstream, uses exactly one of them: both
+# submit paths call enqueue_*(job_id, 1, [task]) and that single task is a serial loop over
+# every block file in the job. vllm/fs_io_C.abi3.so has no threads of its own (no pthread, no
+# io_uring in its symbol table -- only PyEval_SaveThread), so a promotion reads ~200 files of
+# 27 MB one after another at queue depth 1. That is the 64.26 s fs->CPU promotion.
+# Upstream PR #49225 fixes this with a 32 MiB budget divided by the block size; our block is
+# already 27,000,832 bytes, so 32 would give a fanout of 2 (and 1 as soon as a second job is
+# in flight). 256 MiB gives 8 batches for a promotion and 4 for a store -- the whole pool.
+# Set KVOFF_FS_FANOUT_MAX=1 to restore upstream one-task-per-job exactly, without unpatching.
+# See kv-cache/patches/patch_offload_fs_fanout.py, plan R3.14.
+KVOFF_FS_FANOUT_MB=${KVOFF_FS_FANOUT_MB:-256}
+KVOFF_FS_FANOUT_MAX=${KVOFF_FS_FANOUT_MAX:-0}
+# KVOFF_BLOCKS_PER_CHUNK: connector 'blocks_per_chunk' -- how many KV blocks share one
+# offloaded chunk (and one file per group). Empty = omit the key = vLLM's default of 1.
+# Raising it coarsens the offload grid AND, via resolve_mamba_align_size, the external
+# hit-window rounding. Under test 2026-09-07 to find out whether a Mamba group's per-chunk
+# payload stays one fixed-size state (a free N-fold volume cut) or becomes N states
+# (bundling only). See kv-cache/cache-preemption-patch-plan.md R3.12.5. Leave EMPTY for
+# production until that is answered.
+KVOFF_BLOCKS_PER_CHUNK=${KVOFF_BLOCKS_PER_CHUNK:-}
+# KVOFF_DISK_SUBDIR: subdirectory of KVOFF_DISK holding the block tree. Change it to run an
+# experiment against an isolated tier -- the on-disk config.json is written once and NOT
+# rewritten when the geometry changes, so a differing blocks_per_chunk must not share a root.
+KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks}}
+
+# KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
+#   lru  = vLLM's default (cpu/manager.py:45, cpu/spec.py:133).
+#   arc  = Adaptive Replacement Cache: T1 (recency) + T2 (frequency) with B1/B2
+#          ghost lists that retune the split on every hit.
+# Why this matters here: the tier holds a few hundred thousand tokens -- about 339k at this
+# stride and size, a handful of long prompts. Under
+# LRU a single sweep of new material walks the whole tier out -- exactly the pattern
+# measured 2026-09-08, where p1..p10 fully evicted p0. ARC is scan-resistant: one-shot
+# blocks land in T1 and are evicted from there, while a prefix that has been hit twice
+# is promoted to T2 and survives the sweep. A recurring system prompt or document head
+# is precisely the T2 case.
+# SAFETY, verified 2026-09-08 by reading policies/arc.py:112-170: ARC.evict() skips any
+# block with ref_cnt != 0 AND any key in the `protected` set, so it honours the ref_cnt
+# eviction protection (tiering/manager.py principle 5) without needing the
+# mark_evictable/mark_non_evictable hooks -- those are no-op base methods
+# (policies/base.py:92,96) that LRU overrides only as an indexing optimisation.
+# COST: the ghost lists hold up to cache_capacity KEYS each (no block data), trimmed in
+# evict(). Keys only, so the overhead is metadata, not tier capacity. ARC is the served default.
+KVOFF_POLICY=${KVOFF_POLICY:-arc}
+
+# KVOFF_STORE_THRESHOLD: admission filter. A block must be SEEN in lookup() this many
+# times before it is eligible to be stored in the CPU tier (cpu/manager.py:173).
+#   0 or 1 = off (vLLM default; every block is admitted on first sight)
+#   2      = admit only on the second sighting
+# This is the other half of scan resistance: it stops single-use prompts from ever
+# entering the tier, rather than letting them in and then evicting something. The
+# trade-off is a one-occurrence admission delay -- content is not cached until its
+# second appearance, so a prefix reused exactly twice is never served from cache.
+# Independent of KVOFF_POLICY; A/B them separately.
+KVOFF_STORE_THRESHOLD=${KVOFF_STORE_THRESHOLD:-0}
+# spec_name is the single knob that decides whether store_threshold is a capability or a
+# boot-killer. Default is TieringOffloadingSpec (see KVOFF_TIER_ARG below), which raises
+# ValueError on store_threshold>=2 (tiering/spec.py). Kept as a variable so the emit gate
+# below can switch on it instead of hard-coding the spec name.
+KVOFF_SPEC_NAME=${KVOFF_SPEC_NAME:-TieringOffloadingSpec}
+# Offload generated tokens too, not just the prompt.
+#
+# vLLM defaults offload_prompt_only to TRUE (v1/kv_offload/base.py:685), so only prompt
+# tokens are ever written through to the offload tiers. For an agent workload at xhigh
+# reasoning effort a large fraction of every turn is GENERATED, and none of it reaches the
+# tier until it reappears as prompt on the following turn -- so a resume inside the same
+# turn, or a second agent picking up mid-stream, finds nothing.
+#
+# Measured 2026-09-11 (out/diag/diag2.log): a deliberate push-out test served 62.2% of a
+# re-requested prefix from disk with 0 promotion refusals, and the 37.8% shortfall tracked
+# HIT_PENDING (+49,980) almost exactly against recompute (+48,065) -- the data was not on
+# disk YET. Storing generated tokens is one of the two candidate causes.
+#
+# Storing generated tokens costs write volume. Default here is TRUE (prompt tokens only), the
+# served configuration. Applies to the RAM-only tier too (see the RAM-only block after the
+# disk-tier wiring). Set false to store generated tokens as well.
+KVOFF_PROMPT_ONLY=${KVOFF_PROMPT_ONLY:-true}
+KVOFF_TIER_ARG=""
 
 # --- garbage collection -----------------------------------------------------
 # Leftovers survive a restart and break the NEXT boot, in ways whose error
@@ -863,6 +1321,51 @@ EOF
   python3 -c "import math; print(f'{math.floor($req_b / $G * 10) / 10:g}')"
 }
 
+# ---------------------------------------------------------------------------
+# KVCACHE_TIER_GIB=auto (default): the RAM tier holds one full max-context prefill -- MAXLEN tokens --
+# so a conversation at the full context length survives eviction from the GPU and resumes from RAM.
+#
+# Offloaded bytes per token: every 1,648-token chunk stores 2 attention groups + 1 drafter group,
+# and the 6 GDN groups every KVOFF_MAMBA_STRIDE-th chunk; each group is 27,000,832 B per chunk =
+# 16,384 B/token. At stride 4: 16,384 x (3 + 6/4) = 73,728 B/token (checked against the engine:
+# a 16 GiB tier = 636 slots = ~233k tokens). These counts are Qwen3.8-27B's; override
+# KVCACHE_OFFLOAD_BPT for another model (kv-cache/docs/SETUP.md shows the derivation).
+#
+# auto = MAXLEN x 73,728 B + 2% for chunk rounding, rounded up to a whole GiB: 19 GiB at 262,144.
+# It must fit both /dev/shm and MemTotal - KVOFF_RAM_RESERVE_GIB; if it does not, offload is turned
+# off for the boot and the log says why. KVCACHE_TIER_GIB=<GiB> sets it outright (e.g. 2x MAXLEN for
+# two full-length sessions alternating); 0 disables the tier.
+KVCACHE_TIER_GIB=${KVCACHE_TIER_GIB:-auto}
+KVCACHE_OFFLOAD_BPT=${KVCACHE_OFFLOAD_BPT:-$((16384 * 3 + 16384 * 6 / ${KVOFF_MAMBA_STRIDE:-1}))}
+KVOFF_RAM_RESERVE_GIB=${KVOFF_RAM_RESERVE_GIB:-15}  # engine, drafter, pinned embedding, OS
+if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
+  if [ "$KVCACHE_TIER_GIB" = auto ]; then
+    KVCACHE_TIER_GIB="$(python3 - "$MAXLEN" "$KVCACHE_OFFLOAD_BPT" "$KVOFF_RAM_RESERVE_GIB" <<'PYSIZE'
+import math, os, re, sys
+maxlen, obpt, reserve = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+G = 2**30
+def log(msg): print("[kvcache] " + msg, file=sys.stderr)
+want = math.ceil(maxlen * obpt * 1.02 / G)
+s = os.statvfs("/dev/shm"); shm = s.f_blocks * s.f_frsize / G
+mem = int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read()).group(1)) / 1048576
+cap = min(shm - 0.25, mem - reserve)
+log("tier auto: one full %s-token prefill x %d B/token = %d GiB; fits %.1f GiB (/dev/shm %.1f, MemTotal %.1f - reserve %.0f)"
+    % (format(maxlen, ","), obpt, want, cap, shm, mem, reserve))
+if want <= cap:
+    print(want)
+else:
+    why = ("/dev/shm is %.1f GiB -- remount it larger (kv-cache/docs/SETUP.md)" % shm) if shm - 0.25 < mem - reserve \
+          else ("MemTotal %.1f GiB - reserve %.0f GiB is too little -- this box needs more RAM" % (mem, reserve))
+    log("*** KV-CACHE OFFLOAD DISABLED: a full-context tier (%d GiB) does not fit; %s." % (want, why))
+    log("    Serving WITHOUT offload. Lower MAXLEN, or set KVCACHE_TIER_GIB=<GiB> to run a smaller tier anyway.")
+    print(0)
+PYSIZE
+)"
+  fi
+  if [ "$KVCACHE_TIER_GIB" != 0 ]; then
+    EXTRA="$EXTRA --kv-offloading-size $KVCACHE_TIER_GIB --kv-offloading-backend $KVOFF_BACKEND"
+  fi
+fi
 # config.yaml may already pass --kv-offloading-size through EXTRA. That is the
 # explicit, per-entry setting and it wins; adding a second copy of the flag here
 # would leave vLLM parsing a duplicate.
@@ -879,6 +1382,150 @@ if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
   fi
 else
   echo "[kv-offload] --kv-offloading-size already set in EXTRA; leaving it alone." >&2
+  # ...but still check it against the tmpfs. An explicit size bypasses
+  # kvoff_resolve's clamp, and the offload region is pre-faulted with
+  # MADV_POPULATE_WRITE: asking for more than /dev/shm can hold does not degrade,
+  # it kills the START, and on 0.27.1 it does so without a log line. Refusing here
+  # with a message is strictly better than that. statvfs, never df -- df rounds up.
+  _kvoff_req="$(sed -n 's/.*--kv-offloading-size[= ]*\([0-9.]*\).*/\1/p' <<<"$EXTRA")"
+  if [[ -n "$_kvoff_req" ]]; then
+    _kvoff_shm="$(python3 -c "import os;s=os.statvfs('/dev/shm');print(s.f_blocks*s.f_frsize/2**30)")"
+    if python3 -c "import sys;sys.exit(0 if float('$_kvoff_req')+0.25>float('$_kvoff_shm') else 1)"; then
+      die "--kv-offloading-size $_kvoff_req GiB does not fit /dev/shm ($_kvoff_shm GiB usable).
+     The region is pre-faulted, so this would fail the START with no log line.
+     Fix ONE of:
+       * mount -o remount,size=28G /dev/shm   (and add it to /etc/fstab --
+         see kv-cache/ops/etc-fstab-snippets/kvcache.fstab; the kernel default is
+         50% of RAM, which is why more RAM alone does not lift this)
+       * lower --kv-offloading-size in the config.yaml entry
+     Note df will disagree with this check: it rounds the tmpfs UP."
+    fi
+    # SECOND guard: /dev/shm is only a LIMIT, so fitting the tmpfs proves nothing
+    # about the box actually having the RAM. Since 2026-09-08 shm is 28G to allow a
+    # 24 GiB tier after the 32 -> 40 GB upgrade -- which means a 24 GiB request now
+    # PASSES the tmpfs check on a 32 GB box and then OOMs it on the pre-fault. Clamp
+    # to what MemTotal can hold instead of trusting the mount.
+    # KVOFF_RAM_RESERVE_GIB is everything that is NOT the tier, plus headroom.
+    # Measured 2026-09-08 (free -m, 16 GiB tier resident): total 32090 MB, used 22687,
+    # shared 16728 -> non-tier usage ~5.9 GiB. 15 GiB of reserve leaves ~9 GiB spare,
+    # which is what the box runs with today, and makes the clamp land on exactly the
+    # right value at both sizes:  40 GB -> 24 GiB tier,  32 GB -> 16 GiB tier.
+    # So a missed or failed RAM upgrade silently degrades to today's known-good
+    # configuration instead of failing the boot.
+    KVOFF_RAM_RESERVE_GIB=${KVOFF_RAM_RESERVE_GIB:-15}
+    _kvoff_ram="$(python3 -c "
+import re
+mt=int(re.search(r'MemTotal:\s+(\d+)', open('/proc/meminfo').read()).group(1))
+print('%.2f' % (mt/1048576))")"
+    _kvoff_allow="$(python3 -c "print('%.2f' % max(0.0, float('$_kvoff_ram') - float('$KVOFF_RAM_RESERVE_GIB')))")"
+    if python3 -c "import sys;sys.exit(0 if float('$_kvoff_req')>float('$_kvoff_allow') else 1)"; then
+      _kvoff_clamped="$(python3 -c "import math;print(int(math.floor(float('$_kvoff_allow'))))")"
+      if [[ "$_kvoff_clamped" -lt 4 ]]; then
+        echo "[kv-offload] MemTotal ${_kvoff_ram} GiB - reserve ${KVOFF_RAM_RESERVE_GIB} GiB leaves" >&2
+        echo "[kv-offload]   only ${_kvoff_allow} GiB; too little for a useful tier. DISABLING offload." >&2
+        EXTRA="$(sed -E 's/--kv-offloading-size[= ]*[0-9.]+//; s/--kv-offloading-backend[= ]*[a-z]+//' <<<"$EXTRA")"
+        KVOFF_DISK=""
+      else
+        echo "[kv-offload] *** CLAMPED: requested ${_kvoff_req} GiB, but MemTotal is only ${_kvoff_ram} GiB." >&2
+        echo "[kv-offload]   ${_kvoff_ram} - ${KVOFF_RAM_RESERVE_GIB} reserve = ${_kvoff_allow} GiB usable -> tier ${_kvoff_clamped} GiB." >&2
+        echo "[kv-offload]   If you expected the full ${_kvoff_req} GiB, the RAM upgrade did not reach this" >&2
+        echo "[kv-offload]   guest -- it is a VM, so the HYPERVISOR allocation must be raised too." >&2
+        EXTRA="$(sed -E "s/(--kv-offloading-size[= ]*)[0-9.]+/\1$_kvoff_clamped/" <<<"$EXTRA")"
+        _kvoff_req="$_kvoff_clamped"
+      fi
+    fi
+    echo "[kv-offload] explicit size ${_kvoff_req} GiB fits /dev/shm (${_kvoff_shm} GiB) and RAM (${_kvoff_ram} GiB)." >&2
+  fi
+fi
+
+# Wire the secondary tier. cpu_bytes_to_use is deliberately ABSENT from this JSON:
+# config/vllm.py:933 unconditionally .update()s it from --kv-offloading-size, so
+# putting it here too would just be a value that loses. Everything else we set
+# survives, because _post_init_kv_transfer_config only creates a default config
+# when none was passed -- ours is preserved and merged into.
+# NOTE: $EXTRA is word-split at the call site, so this JSON must contain NO spaces.
+# kv_load_failure_policy: scheduler.py:130 defaults to recompute, but line 148
+# overwrites it from the config WHENEVER one is passed -- and the dataclass
+# default (config/kv_transfer.py:69) is "fail". Reaching the fs tier requires
+# passing a config, so without this field we silently take "fail" instead of
+# the default. Set it back to what we would have had.
+# CAVEAT, measured 2026-09-06: this is INERT for OffloadingConnector. The
+# recompute path is driven by get_block_ids_with_load_errors(), which only
+# nixl, mooncake, flexkv and lmcache implement; OffloadingConnector inherits
+# the base returning an empty set. Worse, offloading/worker.py:361 is a bare
+# `assert transfer_result.success`, so a failed load kills EngineCore outright
+# rather than failing the request either way. Keep the field for when upstream
+# wires it up; do NOT rely on it to survive a reaped block.
+if [[ -n "$KVOFF_DISK" ]]; then
+  if [[ "$EXTRA" != *--kv-offloading-size* ]] && [[ -z "${KVOFF_GIB:-}" ]]; then
+    echo "[kv-offload] KVOFF_DISK is set but there is no CPU primary tier; the fs tier" >&2
+    echo "[kv-offload]   cannot reach the GPU on its own (tiering/spec.py) -- disabling it." >&2
+    KVOFF_DISK=""
+  elif [[ ! -d "$KVOFF_DISK" ]]; then
+    echo "[kv-offload] KVOFF_DISK=$KVOFF_DISK does not exist; disabling the disk tier." >&2
+    KVOFF_DISK=""
+  else
+    KVOFF_BPC_JSON=""
+    KVOFF_POLICY_JSON=""
+    KVOFF_ST_TG_LOG=""
+    if [[ "$KVOFF_POLICY" != lru ]]; then
+      KVOFF_POLICY_JSON=",\"eviction_policy\":\"$KVOFF_POLICY\""
+    fi
+    # Gate store_threshold on spec support: TieringOffloadingSpec raises ValueError on
+    # store_threshold>=2 (tiering/spec.py), so emitting it for the pinned spec kills the
+    # boot. Emit only for a spec that supports it; for an unsupported spec, warn loudly
+    # (a named knob must not silently no-op) and boot at the spec default.
+    if [[ "$KVOFF_SPEC_NAME" != TieringOffloadingSpec ]]; then
+      if [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+        KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"store_threshold\":$KVOFF_STORE_THRESHOLD"
+        KVOFF_ST_TG_LOG=" store_threshold=$KVOFF_STORE_THRESHOLD"
+      fi
+    elif [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+      echo "[kv-offload] WARNING: KVOFF_STORE_THRESHOLD=$KVOFF_STORE_THRESHOLD is set, but" >&2
+      echo "[kv-offload]   spec_name=$KVOFF_SPEC_NAME does not support it (ValueError at boot," >&2
+      echo "[kv-offload]   tiering/spec.py). NOT emitted; booting at the spec default (0)." >&2
+    fi
+    if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
+      KVOFF_BPC_JSON=",\"blocks_per_chunk\":$KVOFF_BLOCKS_PER_CHUNK"
+    fi
+    if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
+      KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"offload_prompt_only\":false"
+    fi
+    KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"$KVOFF_SPEC_NAME\"$KVOFF_BPC_JSON$KVOFF_POLICY_JSON,\"secondary_tiers\":[{\"type\":\"fs\",\"root_dir\":\"$KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR\",\"n_read_threads\":$KVOFF_DISK_RTHREADS,\"n_write_threads\":$KVOFF_DISK_WTHREADS}]}}"
+    mkdir -p "$KVOFF_DISK/$KVOFF_DISK_SUBDIR"
+    echo "[kv-offload] L3 disk tier: $KVOFF_DISK -> $KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR (PYTHONHASHSEED=$KVOFF_HASHSEED," >&2
+    if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
+      echo "[kv-offload]   NON-DEFAULT blocks_per_chunk=$KVOFF_BLOCKS_PER_CHUNK" >&2
+    fi
+    echo "[kv-offload]   CPU tier policy=$KVOFF_POLICY$KVOFF_ST_TG_LOG" >&2
+    if [[ "$KVOFF_PROMPT_ONLY" != true ]]; then
+      echo "[kv-offload]   offload_prompt_only=FALSE -- generated tokens are written through too" >&2
+    else
+      echo "[kv-offload]   offload_prompt_only=true (vLLM default; generated tokens NOT offloaded)" >&2
+    fi
+    echo "[kv-offload]   ${KVOFF_DISK_RTHREADS}r/${KVOFF_DISK_WTHREADS}w threads, $(df -h --output=size "$KVOFF_DISK" | tail -1 | tr -d ' ') volume, NO built-in eviction)" >&2
+  fi
+fi
+# RAM-only (no disk tier): the CPU tier still takes KVOFF_POLICY, KVOFF_STORE_THRESHOLD and
+# KVOFF_PROMPT_ONLY. Without a config, --kv-offloading-size alone gives vLLM's defaults (LRU,
+# prompt tokens only), so turning the disk off would ALSO silently swap the eviction
+# policy and stop storing generated tokens -- two changes nobody asked for. All three keys
+# are read by the stock CPUOffloadingSpec (cpu/spec.py:118, base.py:597; "arc" is built in,
+# cpu/manager.py:33), so this needs no patch. Emitted only when a key is off its vLLM
+# default, so an all-default RAM tier is exactly what upstream would have built.
+# Also catches the fallbacks above that clear KVOFF_DISK (no such directory).
+if [[ -z "$KVOFF_TIER_ARG" && -z "$KVOFF_DISK" && "$EXTRA" == *--kv-offloading-size* ]]; then
+  KVOFF_RAM_JSON=""
+  [[ "$KVOFF_POLICY" != lru ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"eviction_policy\":\"$KVOFF_POLICY\""
+  if [[ "$KVOFF_STORE_THRESHOLD" -ge 2 ]] 2>/dev/null; then
+    KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"store_threshold\":$KVOFF_STORE_THRESHOLD"
+  fi
+  [[ "$KVOFF_PROMPT_ONLY" != true ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"offload_prompt_only\":false"
+  [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]] && KVOFF_RAM_JSON="$KVOFF_RAM_JSON,\"blocks_per_chunk\":$KVOFF_BLOCKS_PER_CHUNK"
+  if [[ -n "$KVOFF_RAM_JSON" ]]; then
+    KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"CPUOffloadingSpec\"$KVOFF_RAM_JSON}}"
+  fi
+  echo "[kv-offload] RAM-only tier (no disk): policy=$KVOFF_POLICY store_threshold=$KVOFF_STORE_THRESHOLD offload_prompt_only=$KVOFF_PROMPT_ONLY" >&2
 fi
 # ---------------------------------------------------------------------------
 # Cudagraph capture sizes; empty/none = vLLM's default list ([1,2,4] + multiples of 8).
@@ -890,9 +1537,6 @@ fi
 # stays for capture experiments; the default stays stock. SPEC=8 + dynamic width was measured in
 # the same session: single-stream 184.9 (even), conc-8 405-427 vs 444-461 (LOSES -- cold-start
 # batches run full width into the M=72>64 kernel cliff before the EMAs settle). 7 stays.
-# CUDA-graph capture set narrowed to the batch shapes this config actually runs. With MAXSEQS=2
-# and SPEC=7 the verify batch never exceeds 16 rows, so the stock capture set spends compile time
-# and memory on shapes that are never dispatched.
 CAPTURE_SIZES=${CAPTURE_SIZES:-[1,2,4,8,16]}
 # Compilation-config entries accumulate into ONE flag: two --compilation-config instances would
 # not merge (argparse keeps the last).
@@ -1187,33 +1831,21 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # disable_padded_drafter_batch is the single-stream lever (~+50% on the 27B hybrids) and the
   # image bakes the vLLM unpad patch it relies on; it applies to dflash as well as mtp.
   # DRAFT_SAMPLE=probabilistic drafts stochastically with vLLM's shared-Gumbel coupling
-  # instead of argmax. Greedy one-hot drafts accept a token with only p_target(argmax);
-  # matched sampling accepts with sum(min(p,q)), which is strictly >=.
+  # instead of argmax. Greedy one-hot drafts accept with only p_target(argmax); matched
+  # sampling accepts with sum(min(p,q)), which is strictly >=.
   #
-  # This is the single biggest free win in this file, and it is worth understanding before
-  # you copy it. It was supposed to have a cost -- probabilistic drafting needs the full
-  # draft-logits head, bypassing the int2 argmax fast path -- so it moves the two terms of
-  # decode = steps/s x tokens-per-update in opposite directions. Isolated 2026-09-05 over
-  # four ALTERNATING boots (prob/greedy/prob/greedy) at 4k/16k/50k depth:
+  # ISOLATED AND MEASURED 2026-09-05 (4 alternating boots, bench-live 4k/16k/50k, at the
+  # serve's temperature 1.0): acceptance +10% (mean_len 3.39/3.25/3.15 vs greedy's
+  # 3.01/2.90/3.03, winning 5 of 6 within-depth pairings), decode +12.8/+12.1/+3.9%, and
+  # steps/s FLAT to 0.1% -- so the full draft-logits head this was supposed to cost is free
+  # on this config. The old "measure acceptance vs that cost before defaulting" note is
+  # answered: there is no cost to weigh. This was the prime suspect for the radlight decode
+  # gap and it holds up.
   #
-  #   acceptance (mean_len)  3.39 / 3.25 / 3.15   vs greedy  3.01 / 2.90 / 3.03   (+10%)
-  #   decode t/s             +12.8% / +12.1% / +3.9%
-  #   steps/s                FLAT to 0.1% on all four boots
-  #
-  # The draft-logits head is free here, so the acceptance gain is pure profit. Probabilistic
-  # won 5 of the 6 within-depth pairings. Quote it as "about +10% acceptance, no step cost"
-  # -- acceptance is content- and sampler-sensitive, and n=2 per arm fixes the sign, not the
-  # magnitude (greedy returned 3.20 and 2.81 at the same depth on different boots).
-  #
-  # It interacts with temperature: a flatter target distribution makes p_target(argmax) fall
-  # faster than sum(min(p,q)), so the edge is LARGER at this file's temperature 1.0 than at a
-  # lower one. If you serve at 0.7 expect less, and re-measure rather than assuming.
-  #
-  # Two notes if you A/B this yourself. steps/s is the right metric for acceptance-NEUTRAL
-  # knobs (it repeats to ~0.1% across cold boots) but it would have scored THIS knob as a
-  # regression -- read mean_len too. And alternate boots: two samples from one boot are one
-  # sample, which is how a phantom +2.3% prefill win got past us earlier the same day.
-  DRAFT_SAMPLE=${DRAFT_SAMPLE:-probabilistic}
+  # The edge is temperature-dependent (a flatter target makes p_target(argmax) fall faster
+  # than sum(min(p,q))), so it is LARGER at our temperature 1.0 than at the 0.7 served until
+  # 2026-09-05.
+DRAFT_SAMPLE=${DRAFT_SAMPLE:-probabilistic}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
 elif [ "$SPEC_METHOD" = none ]; then
   SPEC_CFG=""                # no speculative decoding (serial decode), for numerical comparisons
@@ -1295,16 +1927,6 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # NB the flags themselves sit INSIDE the continued server-arg line below, with no comment
 # between them: a '#' after a trailing backslash ends the command there and would silently
 # drop --override-generation-config and --chat-template.
-# AITER JIT directory. aiter compiles its core module on import; without this
-# it lands in ephemeral site-packages and rebuilds (~15s) every boot. Point
-# it at /cache so the build persists. Keyed on STARTUP_CACHE_KEY (image ID +
-# arch): aiter does not validate sources, only GPU arch, so a stale .so from an
-# older image would load silently -- a new image, even re-pulled under the same
-# tag, starts fresh.
-# No automatic cleanup: each new image leaves its aiter-jit-<key>/ behind
-# (likewise old hipso/ keys; pycache/ revalidates on mtime). Prune by hand
-# (rm -rf the stale dir under /cache) when rotating images.
-AITER_JIT_TAG="${AITER_JIT_TAG:-$STARTUP_CACHE_KEY}"
 # STARTUP NOISE, defaults set 2026-09-05 at pat's request. Both are read by the image's
 # entrypoint, not by this script, so they only take effect if forwarded with -e below.
 #   RADIANCE_RUN_BWTEST=0    skips the GPU topology + bandwidth sweep at startup. Upstream
@@ -1313,6 +1935,13 @@ AITER_JIT_TAG="${AITER_JIT_TAG:-$STARTUP_CACHE_KEY}"
 #   RADIANCE_BANNER_PLAIN=1  disables ANSI colour in the banner. Everything we read comes back
 #                            through journalctl, where the escape codes are just noise.
 # Both remain overridable per-entry from config.yaml, since these are :- defaults.
+# --- boot overlay (startup-cache), deferred to here -----------------------------
+# The two knobs the patch prelude branches on are final by now; pass them exactly as the
+# container gets them (-e below), plus /house, where half of the prelude patches live.
+# Both go into the overlay key, and the builder applies the prelude with them.
+STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL RADIANCE_GDN_LAZY=$GDN_LAZY"
+STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
+startup_cache_overlay
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host --ulimit memlock=-1 \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
   --security-opt seccomp=unconfined --cap-add SYS_PTRACE \
@@ -1333,6 +1962,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_DFLASH_SELECTOR_TOPK="${RADIANCE_DFLASH_SELECTOR_TOPK:-}" \
   -e RADIANCE_VERIFY_HEAD="${RADIANCE_VERIFY_HEAD:-0}" \
   -e RADIANCE_VERIFY_HEAD_MAX_M="${RADIANCE_VERIFY_HEAD_MAX_M:-32}" \
+  -e RADIANCE_W4="${RADIANCE_W4:-0}" \
+  ${RADIANCE_VERIFY_HEAD_GLOBAL_TOPK:+-e RADIANCE_VERIFY_HEAD_GLOBAL_TOPK="$RADIANCE_VERIFY_HEAD_GLOBAL_TOPK"} \
+  -e EMBED_HOST="${EMBED_HOST:-1}" \
   -e RADIANCE_MXFP4_DEBUG="${RADIANCE_MXFP4_DEBUG:-0}" \
   -e RADIANCE_MXFP4_PUREQUANT="${RADIANCE_MXFP4_PUREQUANT:-0}" \
   -e RADIANCE_MXFP4_SYNC="${RADIANCE_MXFP4_SYNC:-0}" \
@@ -1348,8 +1980,10 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_GDN_STRIDED_GATES="$SGATES" \
   -e RADIANCE_GDN_EMPTY_OUT="$EOUT" \
   -e R4D_ATTN_FP8="${R4D_ATTN_FP8:-3}" \
+  ${R4D_PREFILL_DSPLIT:+-e R4D_PREFILL_DSPLIT="$R4D_PREFILL_DSPLIT"} \
   -e RADIANCE_AR_OVERLAP="$AR_OVERLAP" \
   -e RADIANCE_GDN_FUSED_UPDATE="${RADIANCE_GDN_FUSED_UPDATE:-1}" \
+  -e RADIANCE_GDN_FUSED_MAX_ITEMS="$GDN_FUSED_ITEMS" \
   -e RADIANCE_DYNAMIC_WIDTH="${RADIANCE_DYNAMIC_WIDTH:-1}" \
   -e RADIANCE_DYNW_ALPHA="${RADIANCE_DYNW_ALPHA:-0.35}" \
   -e RADIANCE_DYNW_MARGIN="${RADIANCE_DYNW_MARGIN:-2}" \
@@ -1358,6 +1992,12 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_AR_QNB="${RADIANCE_AR_QNB:-96}" \
   -e RADIANCE_AR_QNT="${RADIANCE_AR_QNT:-1024}" \
   ${PYTORCH_CUDA_ALLOC_CONF:+-e PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF"} \
+  ${PYTORCH_TUNABLEOP_ENABLED:+-e PYTORCH_TUNABLEOP_ENABLED="$PYTORCH_TUNABLEOP_ENABLED"} \
+  ${PYTORCH_TUNABLEOP_TUNING:+-e PYTORCH_TUNABLEOP_TUNING="$PYTORCH_TUNABLEOP_TUNING"} \
+  ${PYTORCH_TUNABLEOP_RECORD_UNTUNED:+-e PYTORCH_TUNABLEOP_RECORD_UNTUNED="$PYTORCH_TUNABLEOP_RECORD_UNTUNED"} \
+  ${PYTORCH_TUNABLEOP_FILENAME:+-e PYTORCH_TUNABLEOP_FILENAME="$PYTORCH_TUNABLEOP_FILENAME"} \
+  ${PYTORCH_TUNABLEOP_UNTUNED_FILENAME:+-e PYTORCH_TUNABLEOP_UNTUNED_FILENAME="$PYTORCH_TUNABLEOP_UNTUNED_FILENAME"} \
+  ${PYTORCH_TUNABLEOP_VERBOSE:+-e PYTORCH_TUNABLEOP_VERBOSE="$PYTORCH_TUNABLEOP_VERBOSE"} \
   -e RADIANCE_AR_OVERLAP_MIN_M="${RADIANCE_AR_OVERLAP_MIN_M:-2048}" \
   -e RADIANCE_AR_OVERLAP_SLICES="${RADIANCE_AR_OVERLAP_SLICES:-4}" \
   -e RADIANCE_MXFP4_EPIFAST="${RADIANCE_MXFP4_EPIFAST:-1}" \
@@ -1369,6 +2009,11 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_MXFP4_HOIST_QUANT="${RADIANCE_MXFP4_HOIST_QUANT:-$NQF}" \
   -e RADIANCE_MXFP4_TRACED_QUANT="${RADIANCE_MXFP4_TRACED_QUANT:-$NQF}" \
   -e RADIANCE_FP8_STREAM="$FP8S" \
+  -e RADIANCE_FP8_STREAM_TP1="$FP8S_TP1" \
+  -e RADIANCE_GDN_LAZY="$GDN_LAZY" \
+  -e RADIANCE_GDN_LAZY_INVALIDATE="${RADIANCE_GDN_LAZY_INVALIDATE:-1}" \
+  -e RADIANCE_GDN_LAZY_STALE_EVERY="${RADIANCE_GDN_LAZY_STALE_EVERY:-512}" \
+  -e RADIANCE_DYNAMIC_DRAFT="${RADIANCE_DYNAMIC_DRAFT:-0}" \
   -e RADIANCE_RMS_QUANT_FUSION="${RADIANCE_RMS_QUANT_FUSION:-$NQF}" \
   -e RADIANCE_MXFP4_SHADOW="${RADIANCE_MXFP4_SHADOW:-}" \
   -e RADIANCE_MXFP4_SANITIZE="${RADIANCE_MXFP4_SANITIZE:-0}" \
@@ -1385,16 +2030,38 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_MXFP4_REFLINEAR="${RADIANCE_MXFP4_REFLINEAR:-0}" \
   -e RADIANCE_RUN_BWTEST="${RADIANCE_RUN_BWTEST:-0}" \
   -e RADIANCE_BANNER_PLAIN="${RADIANCE_BANNER_PLAIN:-1}" \
+  -e RADIANCE_HEALTH_PORT="$PORT" \
   -e VLLM_CACHE_ROOT=/cache/vllm -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor -e TRITON_CACHE_DIR=/cache/triton \
   -e AITER_ROOT_DIR=/cache/aiter -e TRITON_CACHE_AUTOTUNING=1 \
-  -e AITER_JIT_DIR=/cache/aiter-jit-"$AITER_JIT_TAG" -e AITER_JIT_TAG="$AITER_JIT_TAG" \
-  "${STARTUP_CACHE_RUN_ARGS[@]}" \
-  -e PYTHONPYCACHEPREFIX=/cache/pycache -e PYTHONDONTWRITEBYTECODE= \
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
+  ${KVOFF_DISK:+-v "$KVOFF_DISK":"$KVOFF_DISK_MNT"} \
+  ${KVOFF_DISK:+-e PYTHONHASHSEED="$KVOFF_HASHSEED"} \
+  -e RADIANCE_OFFLOAD_MIXED_HIT="$KVOFF_MIXED_HIT" \
+  -e RADIANCE_RECONCILE_REASK="$KVOFF_RECONCILE_REASK" \
+  -e RADIANCE_REASK_MIN_DROP_BLOCKS="$KVOFF_REASK_MIN_DROP_BLOCKS" \
+  -e RADIANCE_REASK_MEMO="$KVOFF_REASK_MEMO" \
+  -e RADIANCE_REASK_MEMO_TTL_S="$KVOFF_REASK_MEMO_TTL_S" \
+  -e RADIANCE_REASK_MAX_DEFER_S="$KVOFF_REASK_MAX_DEFER_S" \
+  -e RADIANCE_SWA_STORE_MAMBA_ALIGN="$KVOFF_SWA_MAMBA_ALIGN" \
+  -e RADIANCE_TOUCH_ALL_GROUPS="$KVOFF_TOUCH_ALL_GROUPS" \
+  -e RADIANCE_TOUCH_POSITION_ORDER="$KVOFF_TOUCH_POSITION_ORDER" \
+  -e KVOFF_MINIMAL="$KVOFF_MINIMAL" \
+  -e RADIANCE_LOOKUP_INVALIDATE="$KVOFF_LOOKUP_INVALIDATE" \
+  -e RADIANCE_FS_FAILED_LOAD_FORGET="$KVOFF_FS_FAILED_LOAD_FORGET" \
+  -e RADIANCE_ALIGN_PROMPT_LAST_BLOCK="$KVOFF_ALIGN_LAST_BLOCK" \
+  -e RADIANCE_LOOKUP_STALE_WATCH="$KVOFF_STALE_WATCH" \
+  -e RADIANCE_OFFLOAD_EAGLE_GROUPS="$KVOFF_EAGLE_GROUPS" \
+  -e RADIANCE_MAMBA_STORE_STRIDE="$KVOFF_MAMBA_STRIDE" \
+  -e RADIANCE_SPLIT_POOL_SHARE="$KVOFF_SPLIT_POOL_SHARE" \
+  -e RADIANCE_FS_FANOUT_TARGET_MB="$KVOFF_FS_FANOUT_MB" \
+  -e RADIANCE_FS_FANOUT_MAX="$KVOFF_FS_FANOUT_MAX" \
   -v "$CACHE":/cache \
   -v "${PATCHES:-$REPO}":/patches:z \
   -v "$HOUSE":/house:z \
+  ${MFX_DIR:+-v "$MFX_DIR":/mfxsrc:ro,z} \
+  -e AITER_JIT_DIR=/cache/aiter-jit "${STARTUP_CACHE_RUN_ARGS[@]}" \
+  -e RADIANCE_SKIP_MM_WARMUP="${RADIANCE_SKIP_MM_WARMUP:-1}" \
   ${CT_MOUNT[@]+"${CT_MOUNT[@]}"} \
   ${R4D_SO:+-v "$R4D_SO":/r4d:z} \
   ${R4D_SO:+-e R4D_SO="$R4D_SO"} \
@@ -1418,6 +2085,149 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     python3 patch_rmsquant_fusion.py
     python3 patch_verify_head.py
     python3 patch_kv_group_size.py
+    # House patch: lives in /house, not /patches. PYTHONPATH lets it import the ggz14
+    # _patchlib the same way the in-repo patches do (script dir, not cwd, is sys.path[0]).
+    PYTHONPATH=/patches python3 /house/patch_offload_mixed_hit.py
+    # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
+    # NOTE: no apostrophes anywhere in this bash -c body.
+    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
+    # House patch: KV offload store-path instrumentation. Adds gauges only, no behaviour
+    # change. Without it an allocation failure is unattributable and the lookup-delay
+    # histogram tops out at 10 s. See kv-cache/cache-preemption-patch-plan.md R3.6.
+    PYTHONPATH=/patches python3 /house/patch_offload_instrumentation.py
+    # House patch: KV offload lookup-outcome counters. Instrumentation only. Answers why
+    # production gets ~0 external hits when the bench gets an exact 85,696-token one, by
+    # counting every terminal branch of the lookup path. See R3.14.2. Remove once Phase A
+    # has read its answer -- it is a diagnostic, not a permanent metric.
+    # Non-fatal by design: a diagnostic must never be able to keep the engine from
+    # serving. Hunks are ordered so a mid-way failure still leaves a consistent file
+    # (metric names first, then the call sites that use them).
+    PYTHONPATH=/patches python3 /house/patch_offload_lookup_metrics.py \
+      || echo "[radiance] WARNING: lookup-outcome counters did not apply; Phase A metrics will be absent"
+    fi
+    # House patch: annotate the EAGLE/MTP draft KV group positionally, so the offload
+    # scheduler stops treating all nine groups as draft groups. Prerequisite for the stride
+    # patch below: while every group is flagged eagle, storable_chunks() drops the trailing
+    # chunk of each group during decode and the store grid stops lining up with the hit
+    # window. Non-fatal: on failure the flag-them-all fallback is todays behaviour anyway.
+    PYTHONPATH=/patches python3 /house/patch_eagle_groups.py \
+      || echo "[radiance] WARNING: eagle-group annotation did NOT apply -- all nine KV groups will be treated as MTP draft groups, whatever RADIANCE_OFFLOAD_EAGLE_GROUPS says"
+    # House patch: R3.13 Mamba store cadence -- the capacity lever. Must run AFTER the
+    # eagle-group patch. The two halves (store grid, lookup rounding) are ordered so that a
+    # mid-way failure degrades safely: lookup-only means a coarser hit window with a full
+    # store, which costs prefix but stays correct.
+    PYTHONPATH=/patches python3 /house/patch_mamba_stride.py \
+      || echo "[radiance] WARNING: mamba store-cadence patch did NOT apply -- every chunk will store all six Mamba groups, whatever RADIANCE_MAMBA_STORE_STRIDE says"
+    # House patch: reconcile re-ask (2026-09-17). BEHAVIOURAL, so it sits outside the
+    # KVOFF_MINIMAL gate. After the stock hit_diverged fallback drops a GPU attention hit
+    # that has no Mamba state, ask the offload tier again from the lowered boundary instead
+    # of recomputing the prompt. RADIANCE_RECONCILE_REASK=0 is stock behaviour. After
+    # debug_instrument so its reconcile events land in that sink. Non-fatal: hunks apply
+    # helper, call site, logging, so a failure part-way leaves stock behaviour or the fix
+    # without per-group logging. See kv-cache/patches/patch_reconcile_reask.py.
+    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
+    PYTHONPATH=/patches python3 /house/patch_reconcile_reask.py \
+      || echo "[radiance] WARNING: reconcile re-ask did NOT apply -- a GPU attention hit with no Mamba state will still recompute the whole prompt"
+    # House patch: swa-align + touch-all (2026-09-17). BEHAVIOURAL, outside KVOFF_MINIMAL.
+    # Stores drafter chunks only where a Mamba-grid hit can read them, and refreshes every
+    # group like attention in the eviction policy (pattern B). Each hunk has a kill switch
+    # (RADIANCE_SWA_STORE_MAMBA_ALIGN, RADIANCE_TOUCH_ALL_GROUPS). Non-fatal: on failure the
+    # tier keeps storing every drafter chunk and stock _touch.
+    # See kv-cache/patches/patch_swa_align_touch.py.
+    PYTHONPATH=/patches python3 /house/patch_swa_align_touch.py \
+      || echo "[radiance] WARNING: swa-align/touch-all did NOT apply -- every drafter chunk stored, stock touch"
+    # House patch 2026-09-19: stop the prompt final chunk at its last full block boundary, so
+    # every cached block is computed in the same aligned chunk a cold prefill uses. BEHAVIOURAL,
+    # outside KVOFF_MINIMAL. Kill switch RADIANCE_ALIGN_PROMPT_LAST_BLOCK=0. Non-fatal: without
+    # it a cached multi-turn resume can differ from a cold prefill in the low bits.
+    PYTHONPATH=/patches python3 /house/patch_sched_align_last_block.py \
+      || echo "[radiance] WARNING: last-block align did NOT apply -- cached turns can differ from cold in the low bits"
+    # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
+    # NOTE: no apostrophes anywhere in this bash -c body.
+    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
+    # House patch: debug_instrument -- records KV-offload lookup / store / store-drop /
+    # store-ready events to a bounded JSON-line sink (/tmp/kvinstr/<pid>.jsonl) so a miss
+    # can be replayed by tools/debug_instrument_reader.py. INSTRUMENTATION ONLY: no
+    # behaviour change, no gate; every hook is try/except-guarded and the sink never
+    # raises, so a failure degrades to no events, never to a broken engine. Non-fatal.
+    PYTHONPATH=/patches python3 /house/patch_offload_debug_instrument.py \
+      || echo "[radiance] WARNING: debug_instrument did not apply -- miss playback events will be absent"
+    # House patch: R3.14 fs-tier job fanout, the port of upstream PR #49225. Order-independent
+    # of the three above -- it touches a different file (v1/kv_offload/tiering/fs/manager.py)
+    # and anchors nowhere near the cascade-backlog gauge the instrumentation patch adds there.
+    # Non-fatal: on failure every fs job keeps running on one thread, which is todays
+    # behaviour, so the promotion stays slow but nothing is wrong.
+    PYTHONPATH=/patches python3 /house/patch_offload_fs_fanout.py \
+      || echo "[radiance] WARNING: fs fanout patch did NOT apply -- every filesystem job will run on a single thread, whatever RADIANCE_FS_FANOUT_TARGET_MB says"
+    # House patch: per-tier KV offload instrumentation for the tier report. Instrumentation
+    # only, no behaviour change. Adds 19 series carrying a `tier` label -- hit blocks/tokens,
+    # load/store bytes+seconds+ops+latency, capacity/used/occupancy, and the sizing family
+    # (reads-before-evict, evictions, eviction-to-reuse, would-have-hit, stall seconds).
+    # This is what `tierreport.py` reads to answer "is my RAM the right size", "is my disk
+    # too slow" and "is the layered cache adding value" from one scrape of the operators own
+    # traffic. Everything it adds is a counter or a histogram, because the report is scraped
+    # ONCE from a long-lived server and a gauge sampled that way says nothing.
+    # Must run AFTER the instrumentation patch: the fs tier has no get_stats() in stock vLLM,
+    # and this extends the one that patch creates rather than competing with it. The patch
+    # checks that itself and says so, so a wrong order is a named error not a missing anchor.
+    # Non-fatal: on failure the tier report degrades to the unlabelled aggregates, which is
+    # exactly todays situation -- the disk stays invisible inside CPU-tier bandwidth.
+    PYTHONPATH=/patches python3 /house/patch_offload_tier_report.py \
+      || echo "[radiance] WARNING: tier-report metrics did NOT apply -- tierreport.py will have no per-tier rows"
+    # House bundle (kv-queue task 20, reduced by task 37): the KV-offload
+    # promotion-refusal instrumentation + task 15 wall-clock timing, folded into one
+    # order-independent patch (refusal hunk first, then the re-anchored wall-clock hunk):
+    #   Hunk 1 -- refusal counters that name the refusal.
+    #      Today every refusal is folded into lookup_chunk_miss_total and is
+    #      indistinguishable from a real miss, which is why this took reading the code
+    #      to find rather than reading /metrics. Instrumentation only. The counter
+    #      reading zero (0 refusals / 5,416 promotions, tier pinned at 100%) is the
+    #      EVIDENCE the fix was unnecessary: the fix patch (B2 reserved headroom +
+    #      B1 bounded retry) was removed in task 37.
+    #   Hunk 2 -- task 15 wall-clock whole-job timing (RE-ANCHORED): the original anchored
+    #      the same metrics.py tail as hunk 1 and failed with "anchor matched 0x" on the
+    #      instrumented tree, so the re-anchored hunk is what is applied. Do not swap in the
+    #      out/15 original.
+    # The merged file applies hunk 1 then hunk 2; it must run after the
+    # tier-report patch above because both patches reference TierReportMetrics /
+    # TieringOffloadingMetrics / _tr_tokens_per_hash, which that patch creates.
+    # Rehearsed before deployment via kv-queue out/37/rehearse.sh (throwaway --rm container,
+    # no GPU): all seven touched files byte-compile, idempotent.
+    # Non-fatal if it fails: the engine would serve upstream behaviour with no
+    # promotion_* counters, so the warning names that explicitly.
+    PYTHONPATH=/patches python3 /house/patch_offload_promotion_wallclock.py \
+      || echo "[radiance] WARNING: promotion-refusal/wallclock bundle did NOT apply -- no promotion_* counters"
+    # kv-queue task 58: invalidate the async-lookup cache when a fs store lands.
+    # LAST in the prelude. Its fs/manager.py anchors stand on the fs-fanout patch
+    # (_RADIANCE_FANOUT_MAX / _radiance_split), and it must not race the fs/manager.py
+    # hunk in the bundle, which re-points a region this patch does not anchor on.
+    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
+    # Non-fatal: without it the engine serves upstream behaviour, which is the stale
+    # `absent` -- so the warning names the user-visible consequence, not the patch.
+    PYTHONPATH=/patches python3 /house/patch_lookup_invalidate.py \
+      || echo "[radiance] WARNING: lookup-cache invalidation did NOT apply -- a just-stored block can still read as absent, so long-context hits may drop to zero mid-conversation"
+    # House patch 2026-09-19: forget the lookup verdict of keys whose fs load FAILED, so a
+    # reaped or unreadable block makes its request recompute instead of retrying forever.
+    # Anchors on the fs-fanout patch and on invalidate() above, so it runs right here.
+    # Non-fatal: without it a failed disk read can hang the request that needed the block.
+    PYTHONPATH=/patches python3 /house/patch_fs_failed_load.py \
+      || echo "[radiance] WARNING: failed-load forget did NOT apply -- a reaped or unreadable disk block can hang the request that needs it"
+    # kv-queue tasks 50 + 59v2, ordered by task 65. INSTRUMENTATION ONLY -- no behaviour
+    # change, no gate. They answer the question the counters could not: when a request
+    # recomputes a prefix we already hold, WHICH branch dropped it. Today the six lookup
+    # exits partition cleanly and still do not account for it, because a deferral that
+    # never resolves lands in no bucket and the transfer_jobs guard returns before
+    # LOOKUP_CALLS increments at all.
+    #   50  -- deferral lifecycle (total/served/gave_up/unresolved) + depth histogram,
+    #          plus transfer_jobs_deferred, the silent exit.
+    #   59v2 -- attributes the zero_hit and short_result misses to a reason.
+    # 50 and 59 as originally written COLLIDE in metrics.py in BOTH orders (proven by
+    # task 65 on a copy of the live tree); 59v2 is re-anchored so the pair is
+    # order-independent. Do NOT substitute the original out/59 patch.
+    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
+    PYTHONPATH=/patches python3 /house/patch_offload_miss_deferral_metrics.py \
+      || echo "[radiance] WARNING: deferral/miss-reason counters did NOT apply -- a deferral that never resolves will stay invisible"
+    fi
     python3 patch_topk_composite.py
     python3 patch_gdn_shared_build.py
     python3 patch_dflash_selector_topk.py
@@ -1425,27 +2235,93 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     python3 patch_dynwidth.py
     python3 patch_ar_geometry.py
     python3 patch_gdn_glue.py
+    # Lazy GDN snapshots: must come AFTER the gdn builder patches, which are what it anchors on.
+    # Fatal on purpose -- if it half-applies the spec-block count and the align kernels disagree.
+    # Inert unless RADIANCE_GDN_LAZY=1, and the knob is what selects rx10 on the host side.
+    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then python3 patch_gdn_lazy.py; fi
     # Non-fatal: fixes content=null on thinking-off requests; not required to serve.
     python3 patch_qwen3_thinkoff.py \
       || echo "[radiance] WARNING: thinkoff patch did not apply; thinking-off requests will return empty content"
-    # House patch 2026-10-06 (kv-cache/patches): uniform-decode guard for the V2 runner. A prefill
-    # chunk of exactly 1 + num_speculative_tokens tokens -- every prompt of k x block_size + that
-    # many tokens -- replayed the spec-decode FULL cudagraph and answered with a 1-2 token fragment.
-    # FATAL if it fails: the bug would return silently. Regression test: kv-cache/tools/lenprobe.py.
-    PYTHONPATH=/patches python3 /house/patch_uniform_decode_guard.py
     cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
     # radiance_drafthead.py is copied too so RADIANCE_DRAFT_RERANK can be swept without an
     # image rebuild. The repo copy was byte-identical to the 0.9.3 one before that knob existed.
     cp radiance_mxfp4.py radiance_gdn.py radiance_rmsquant.py radiance_drafthead.py \
        radiance_verifyhead.py radiance_gdnmerge.py radiance_aroverlap.py radiance_topk.py \
        radiance_arnq.py "$SP"/
+    # radiance_gdn_lazy.py only when the knob is on: patch_gdn_lazy.py imports it by bare name,
+    # so it has to land in site-packages itself, not under vllm/. Gated so that rolling REPO back
+    # to a tree that predates the module cannot break a boot.
+    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then cp radiance_gdn_lazy.py "$SP"/; fi
+    # House patch: skip the startup multi-modal warmup (RADIANCE_SKIP_MM_WARMUP, default
+    # 1 via the launcher). Boot speed only: if it fails to apply, the boot just pays the
+    # stock ~21.5 s warmup -- a cost, not a failure.
+    PYTHONPATH=/patches python3 /house/patch_skip_mm_warmup.py \
+      || echo "[radiance] WARNING: skip-mm-warmup patch did not apply; the startup mm warmup will run"
+    # House patch: an fp16 ssm state is read and written natively by the r4d_kernels chunk scan
+    # (R4D_RX13=1) instead of widened in Python. Dormant on an fp32 cache or an older libr4d.
+    PYTHONPATH=/patches python3 /house/patch_gdn_state_fp16.py \
+      || echo "[radiance] WARNING: gdn-state-fp16 patch did not apply; fp16 prefill widens in Python"
+    # House patch, lazy GDN only: a prefill zeroes its stash headers (r4d_kernels mode 2) and
+    # stale-stash events are counted. FATAL if it fails: lazy without the invalidation is known
+    # to corrupt multi-turn chat (ggz14 0cadf57), so refuse to serve rather than degrade.
+    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then
+      PYTHONPATH=/patches python3 /house/patch_gdn_lazy_invalidate.py
+    fi
+    # House patch 2026-10-06: uniform-decode guard (V2 runner). A prefill chunk of exactly
+    # 1 + num_speculative_tokens tokens -- every prompt of k x block_size + that many tokens --
+    # was dispatched to the spec-decode FULL cudagraph and answered with a 1-2 token fragment.
+    # FATAL if it fails: the bug would return silently. Regression test: kv-cache/tools/lenprobe.py.
+    PYTHONPATH=/patches python3 /house/patch_uniform_decode_guard.py
+    # House patch 2026-10-05: vLLM 0.29 backport, multimodal towers through the UVA offloader, so
+    # --cpu-offload-params visual actually moves the vision tower to pinned host memory. Inert
+    # without those flags. Non-fatal: if it fails the tower simply stays on the card.
+    PYTHONPATH=/patches python3 /house/patch_tower_offload.py \
+      || echo "[radiance] WARNING: tower-offload patch did not apply; the vision tower stays on the GPU"
+    # House patch 2026-10-06 (vllm-radiance PR #8 = vLLM #54282 backport): the DFlash2 selector
+    # proposal gets its own RNG stream; shared (seed, position) noise biased probabilistic rejection
+    # sampling by up to ~2% probability per position. FATAL if it fails.
+    PYTHONPATH=/patches python3 /house/patch_dflash_sampling_rng.py
+    # House patch 2026-10-06 (ggz14 1d76c8269): the int2 draft head always defers quantisation to
+    # first use instead of sniffing for an all-zero weight -- a dirty allocator silently built it
+    # from garbage (acceptance 7.63 -> 1.01, quality unchanged). FATAL if it fails.
+    PYTHONPATH=/patches python3 /house/patch_drafthead_defer.py
+    # House patch 2026-10-06 (vllm-radiance PR #9): target verify head selects 256 candidates
+    # globally instead of 8 per vocabulary tile (top-20 retained 82 -> 99.8 percent of rows).
+    # Non-fatal: if the vendored base changed it leaves the old head in place and says so.
+    PYTHONPATH=/patches python3 /house/patch_verifyhead_global.py \
+      || echo "[radiance] WARNING: verify-head global top-k not installed; block shortlist in use"
+    # House patch 2026-10-06 (kernel sweep E): input embedding table to pinned host memory behind
+    # a UVA view. Inert unless EMBED_HOST=1. Non-fatal: if it fails the table stays on the card.
+    PYTHONPATH=/patches python3 /house/patch_embed_host.py \
+      || echo "[radiance] WARNING: embed-host patch did not apply; the embedding stays in VRAM"
+    # House patch 2026-10-06: radiance_w4 gets its own switch. With libr4d v0.5.0+ (rx13/rx14 ship the
+    # w4a16 kernel) FAST_DRAFT=1 armed it, it freed the DFlash2 drafter weights and the context-KV
+    # precompute crashed at load (IndexError, boot loop). The launcher passes RADIANCE_W4=0. FATAL.
+    PYTHONPATH=/patches python3 /house/patch_w4_switch.py
+    # House patches 2026-10-06, from SlyBase (vLLM 0.29 originals, anchors identical in 0.27.1), non-fatal:
+    #  - load-time max_split_size_mb scope on ROCm: vLLM gates it on is_cuda(), so the freed 2.37 GiB
+    #    drafter embed placeholder segment was left to be carved into stranded long-lived blocks
+    #  - vllm#55450: align-mode Mamba retirement crosses null gaps (only leaks with async scheduling,
+    #    which is off here -- future-proofing)
+    PYTHONPATH=/patches python3 /house/patch_rocm_load_max_split.py \
+      || echo "[radiance] WARNING: rocm load max_split patch did not apply"
+    PYTHONPATH=/patches python3 /house/patch_mamba_align_retire.py \
+      || echo "[radiance] WARNING: mamba align retire patch did not apply"
+    # House patch 2026-10-06: the verify-head hook reports its first exception instead of passing
+    # silently (it hid a never-armed verify head). Non-fatal.
+    PYTHONPATH=/patches python3 /house/patch_verify_head_loud.py \
+      || echo "[radiance] WARNING: verify-head-loud patch did not apply"
     # END patch prelude
     fi
-    # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~14s per start): the .so is
-    # byte-identical for identical inputs, and /cache persists across boots. Keyed on source,
-    # flags, arch and image ID by startup-cache/hip-so-cache.sh -- the same source under a
-    # different hipcc/pybind11 must not reuse an old .so.
-    bash /startup-cache/hip-so-cache.sh radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
+    # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~30 s per start). Keyed on
+    # source, flags, arch and image ID by startup-cache/hip-so-cache.sh.
+    # With R4D_RX13=1 the source is the r4d_kernels-patched copy at /mfxsrc (see MFX_DIR).
+    MFX_HIP=radiance_mxfp4_fp8.hip
+    if [ -f /mfxsrc/radiance_mxfp4_fp8.hip ]; then
+      MFX_HIP=/mfxsrc/radiance_mxfp4_fp8.hip
+      echo "[radiance] MXFP4 kernel from /mfxsrc (r4d_kernels decode band)"
+    fi
+    bash /startup-cache/hip-so-cache.sh "$MFX_HIP" "$SP"/radiance_mxfp4_fp8.so \
       -O3 -w -std=c++17 -fPIC -shared $(python3 -m pybind11 --includes)
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
@@ -1460,11 +2336,31 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # hypothetical: an Aug-20 build sat there and silently served a kernel 17 hours older than
     # its own source, producing fluent-looking garbage with no error anywhere in the log.
     cd /
+    # Record a boot-SUCCESS stamp (container side; the primary mechanism). The container
+    # has the live cache tree bind-mounted at /cache, so it can record its own success:
+    # a background job waits for the server to become reachable, then writes
+    # /cache/.last-boot-ok (host: $CACHE/.last-boot-ok). The next boot pruner reads one
+    # small file per tree and knows, exactly and unpoisonably, when each config last
+    # served. It is backgrounded (never delays or blocks the entrypoint) and every command
+    # is guarded, so a missing tool or a failed write cannot stop the boot. A boot that
+    # never comes up writes no stamp -> the tree keeps its old or absent stamp -> retained
+    # (conservative; the atime fallback still prunes dead trees). The waiter is a child of
+    # the container, so a container stop kills it (the natural bound). NOTE: no single
+    # quote character anywhere in this block, because it lives inside the launcher
+    # -lc single-quoted body.
+    ( if command -v curl >/dev/null 2>&1; then
+        until curl -sf "http://localhost:${RADIANCE_HEALTH_PORT:-8080}/health" >/dev/null 2>&1; do sleep 2; done
+      else
+        until bash -c "exec 3<>/dev/tcp/localhost/${RADIANCE_HEALTH_PORT:-8080}" 2>/dev/null; do sleep 2; done
+      fi
+      { date -u +%Y-%m-%dT%H:%M:%SZ | sed "s/^/ts=/"; echo "host=$HOSTNAME"; } > /cache/.last-boot-ok 2>/dev/null || true
+    ) >/dev/null 2>&1 &
     exec /opt/radiance_entrypoint.sh "$@"' _ \
      "$CSNAP" --served-model-name "$SERVED" --host 0.0.0.0 --port "$PORT" \
     --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \
     --gpu-memory-utilization "$GPU_UTIL" \
     ${KV_MEM:+--kv-cache-memory "$KV_MEM"} \
+  ${KVOFF_TIER_ARG:+--kv-transfer-config "$KVOFF_TIER_ARG"} \
     --max-model-len "$MAXLEN" --max-num-seqs "${MAXSEQS:-8}" --max-num-batched-tokens "$CHUNK" \
     --attention-backend "$ATTN" \
     ${SPEC_CFG:+--speculative-config "$SPEC_CFG"} \

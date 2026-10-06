@@ -66,7 +66,7 @@ STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
 
 Those knobs may only be resolved after the cache keys are needed. In that case, set
 `STARTUP_CACHE_DEFER_OVERLAY=1` before sourcing, and call `startup_cache_overlay` yourself once
-they are final. `kv-cache/launcher/serve-mxfp4-kvcache-base.sh` does this.
+they are final. `startup-qwen3.8-27b-mxfp4.sh` does this.
 
 **3. Container, for a `.hip` compiled at boot** (optional):
 
@@ -79,7 +79,7 @@ bash /startup-cache/hip-so-cache.sh foo.hip "$SP"/foo.so -O3 -fPIC -shared $(pyt
 Measured 2026-10-05 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 with DFlash2 ×7, a
 16 GiB KV offload tier. Launch to first reply:
 
-| Boot | `startup-qwen3.8-27b-kvcache.sh` |
+| Boot | `startup-qwen3.8-27b-mxfp4.sh` |
 |---|---|
 | Cold: no caches, the overlay built on this boot, page cache dropped | 527 s |
 | Cached, page cache dropped (what a host reboot looks like) | 196 s |

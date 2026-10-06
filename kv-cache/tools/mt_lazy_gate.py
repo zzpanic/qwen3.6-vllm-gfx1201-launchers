@@ -146,8 +146,10 @@ def run(a):
             r.update({"conv": c + 1, "turn": t + 1, "question": q, "expected": want,
                       "empty": text == "",
                       # copy turns repeat the registry's phrasing by design, so the n-gram test would
-                      # flag every one: there a loop is a copied line that comes back twice
-                      "loop": (copy_loop(text) or looped(r["reasoning"])) if a.copy
+                      # flag every one -- in the content AND in a reasoning pass that rehearses the records
+                      # first (2026-10-06 soak: 2 false positives) -- so there a loop is a
+                      # copied line that comes back twice
+                      "loop": (copy_loop(text) or copy_loop(r["reasoning"])) if a.copy
                               else looped(r["content"] + " " + r["reasoning"]),
                       "correct": (all(x in re.sub(r"[`*|]", "", text) for x in want) if isinstance(want, list)
                                   else re.search(rf"\b{re.escape(want)}\b", text) is not None)})

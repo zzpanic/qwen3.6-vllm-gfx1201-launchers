@@ -1,0 +1,62 @@
+# radiance_mxfp4_fp8.patch -- the MXFP4 W4A8 decode-band re-tune applied with R4D_RX13=1 in
+# zzpanic/qwen3.6-vllm-gfx1201-launchers. Applies to ggz14's radiance_mxfp4_fp8.hip
+# (codeberg.org/ggz14/radiance-vllm-mxfp4 980f891 = github.com/GGZ14/vllm-mxfp4 main as of 2026-10-06;
+# the launcher patches a copy, never your clone). See KERNEL.md at the repository root.
+#
+# What it changes: only the decode launch choice for M in (8, 64] -- two or more concurrent DFlash2
+# sequences (each verifies 8 rows at SPEC=7). BK stays 128 (BK=64 lost every cell measured in that band),
+# and o_proj/out_proj-shaped calls (DKS == DEC_KS, nblk > 8, K < 8192) at M 16-24 split K two ways
+# instead of the fill rule's four. M <= 8 -- one sequence -- is untouched, so single-stream decode is
+# byte-for-byte the shipped kernel. Runtime off switch: RADIANCE_MXFP4_DECODE_TUNE16=0. An explicit
+# RADIANCE_MXFP4_DECODE_KS / _BK still wins (bench sweeps).
+#
+# SOURCES AND LICENCE STATUS
+#   * radiance_mxfp4_fp8.hip (context): ggz14, no licence published -- UNCERTAIN.
+#   * The (8, 64] table: measured by SlyBase, github.com/SlyBase/vllm-sly-radiance 0.2.1
+#     (sly/mxfp4/bench_decode_cells.py, 2026-09-16), no licence published -- UNCERTAIN. Re-expressed
+#     here as a branch in the shipped launch code rather than taken as SlyBase's file.
+#   If you are one of these authors and want this changed or removed, open an issue on this repository.
+#
+# VALIDATION (2026-10-06, one R9700): SlyBase's cells -5..-6% kernel time on o_proj/out_proj at M 16/24;
+# served under the final BetterBench (c2 aggregate 202.0 t/s) and the two-agent soak, 0 faults.
+#
+--- a/radiance_mxfp4_fp8.hip	2026-10-06 15:52:51.786213298 +1000
++++ b/radiance_mxfp4_fp8.hip	2026-10-06 15:52:51.789213364 +1000
+@@ -1189,6 +1189,17 @@
+     //     (down goes non-monotonic: at M >= 96 the wide split + BK=64's occupancy wins,
+     //      d4/b64 111.8 vs d2/b128 153.4 at M=128)
+     //   nblk ~40, K <  6144 (out: 24 k-slabs)  -> dks1/bk128 (few slabs, splits never pay)
++    // radiance house port 2026-10-06 (SlyBase/vllm-sly-radiance 0.2.1, decode band (8, 64]):
++    // M in (8, 64] -- 2..8 concurrent dflash sequences at SPEC=7 -- re-measured cell by cell on the
++    // production Qwen3.8-27B TP=1 shapes (SlyBase sly/mxfp4/bench_decode_cells.py, 2026-09-16):
++    //   * BK=64 at tm==4/ks==1 (decode_bk64) LOSES on gate_up nblk 272 (M=56/64: -26/-23%) and on
++    //     qkvz nblk 128 (-12/-11%): no BK=64 cell wins anywhere in (8, 64].
++    //   * o_proj/out_proj (nblk 40, K=6144) at M=16/24 want DKS=2, not the fill rule's 4 (-6.3/-5.5%).
++    // RADIANCE_MXFP4_DECODE_TUNE16=0 restores the previous band. M <= 8 (one sequence) is untouched.
++    static const bool dec_tune16 = [] {
++      const char *e = getenv("RADIANCE_MXFP4_DECODE_TUNE16");
++      return !e || atoi(e) != 0;
++    }();
+     int dks, bkx;
+     if (M > 64) {
+       if (dec_nblk >= 110)      { dks = 1; bkx = 64; }
+@@ -1197,6 +1208,19 @@
+       else if (K >= 6144)       { if (M <= 80) { dks = 2; bkx = 128; }
+                                   else         { dks = DEC_KS; bkx = 64; } }
+       else                      { dks = 1; bkx = 128; }
++    } else if (dec_tune16 && M > 8) {
++      // An explicit RADIANCE_MXFP4_DECODE_KS / _BK wins over the table (bench sweeps).
++      static const bool ks_forced = [] {
++        const char *e = getenv("RADIANCE_MXFP4_DECODE_KS");
++        return e && atoi(e) != 0;
++      }();
++      static const bool bk_pinned = [] {
++        const char *e = getenv("RADIANCE_MXFP4_DECODE_BK");
++        return e && (atoi(e) == 64 || atoi(e) == 128);
++      }();
++      dks = split_k_for(dec_nblk, M);
++      bkx = bk_pinned ? 0 : 128;
++      if (!ks_forced && dks == DEC_KS && dec_nblk > 8 && K < 8192 && M >= 16 && M <= 24) dks = 2;
+     } else {
+       dks = split_k_for(dec_nblk, M);
+       bkx = 0;   // resolved below from decode_bk64, exactly as shipped
