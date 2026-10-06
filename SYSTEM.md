@@ -9,10 +9,25 @@ matter can be copied.
 
 | Layer | What |
 |---|---|
-| Host | TrueNAS SCALE 25.10.7, kernel `6.12.105-production+truenas`, Intel Skylake-family CPU (the guest sees `Intel Core Processor (Skylake, IBRS)`) |
-| GPU | AMD Radeon AI PRO R9700 (`1002:7551`, gfx1201 / RDNA4, 32 GB, 300 W), passed through whole to one VM (VFIO, PCIe Gen5 x16 link) |
+| Host | ASUS P10S WS (Intel C236, LGA1151), Intel Skylake-family CPU (the guest sees `Intel Core Processor (Skylake, IBRS)`); TrueNAS SCALE 25.10.7, kernel `6.12.105-production+truenas` |
+| GPU | AMD Radeon AI PRO R9700 (`1002:7551`, gfx1201 / RDNA4, 32 GB, 300 W), passed through whole to one VM (VFIO). **Physical link: PCIe 3.0 x16** (the board's limit; the card is Gen5) |
 | Guest | Ubuntu 24.04.4 LTS, kernel `6.8.0-138-generic`, `amdgpu-dkms` 6.19.14 (out-of-tree driver from AMD's ROCm repository), 4 vCPUs, 40 GiB RAM |
 | Serving | Podman, `stilldeadcode/vllm-radiance:0.9.3`, launched by llama-swap through `startup-qwen3.8-27b-mxfp4.sh` |
+
+### PCIe 3.0 x16, and what it limits
+
+The R9700 is a PCIe 5.0 card on a PCIe 3.0 board: about 15.75 GB/s per direction instead of about 63.
+Decode and prefill run from VRAM and do not notice. Three things cross the bus and do:
+
+- **The RAM KV tier.** Restores measured 12.0 GB/s, which is the practical ceiling of a 3.0 x16 link,
+  so the tier's speed here is set by the slot, not the software. A 100k-token restore (about 7 GB)
+  takes about 0.6 s. On a Gen4 or Gen5 board expect roughly 2x or 4x that rate.
+- **Weight loading** at boot: 18 GB of checkpoint, a few seconds of the boot either way.
+- **`EMBED_HOST=1`**: the input embedding is read across the bus, but only a few rows (10 KB each)
+  per token, so it is not measurable.
+
+`lspci` *inside the VM* reports the virtual root port's link (32 GT/s here), not the physical one.
+Read the real link on the host: `sudo lspci -vv -d 1002:7551 | grep LnkSta`.
 
 ## Host kernel command line (TrueNAS)
 
@@ -144,7 +159,7 @@ cat /sys/class/drm/card*/device/power_dpm_force_performance_level
 grep '\*' /sys/class/drm/card*/device/pp_power_profile_mode
 cat /sys/class/drm/card*/device/hwmon/hwmon*/power1_cap
 findmnt /dev/shm /kvcache
-sudo lspci -vv -d 1002:7551 | grep -E 'LnkSta:|Region 0'
+sudo lspci -vv -d 1002:7551 | grep 'Region 0'      # BAR size; the link speed here is the VM's virtual port
 ```
 
 On a TrueNAS host:
@@ -152,4 +167,5 @@ On a TrueNAS host:
 ```bash
 cat /proc/cmdline
 sudo midclt call system.advanced.config | jq '{kernel_extra_options, isolated_gpu_pci_ids}'
+sudo lspci -vv -d 1002:7551 | grep -E 'LnkCap:|LnkSta:'   # the physical link
 ```

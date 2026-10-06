@@ -1,5 +1,13 @@
 # BetterBench report
 
+```
+BetterBench 0.4.0 · corpus v1.0 · 29 prompts in 8 categories
+phases: decode, prefill, concurrency
+3 warmup + 20 measured passes per category
+model max context: 204800 tokens
+```
+
+- **betterbench**: 0.4.0, [GGZ14/BetterBench](https://github.com/GGZ14/BetterBench) `main` at `1de941d` plus one local commit, `89bef80` ("corpus: salt nonces per run so prefill runs cannot hit each other in a persistent KV cache")
 - **endpoint**: `http://127.0.0.1:1234/v1`  ·  **model**: `qwen3.8-27b-vllm`  ·  **host**: llama
 - **corpus**: v1.0  ·  **sampling**: temp 1.0  ·  **passes/cat**: 20  ·  prefix-cache: cold (nonce)
 - **notes**: `image=vllm-radiance-0.9.3`  ·  `libr4d=rx16-dsplit-clamp`  ·  `ssm=fp32`  ·  `lazy_gdn=on`  ·  `fast_draft=on`  ·  `verifyhead=global-256`  ·  `embed_host=on`  ·  `kv_mem=11.8e9`  ·  `mxfp4=house-sly-decode-band`  ·  `dflash=dflash2x7-probabilistic`  ·  `max_num_seqs=2`  ·  `nonce=salted-per-run`  ·  `config=config-prod-20260823+prefill128k`

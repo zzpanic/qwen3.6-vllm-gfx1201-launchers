@@ -4,9 +4,9 @@ Every command here runs from the repository root. Each change says how to verify
 and how to undo it.
 
 There are two options (see the README), called builds in the launcher and the patch notes:
-**option 1, the default build** — GPU → RAM with six patches — and **option 2, the disk
-build** — `KVCACHE_DISK_TIER=1`, which adds a disk tier and the instrumentation. Everything not
-marked *disk build* applies to both.
+**option 1** — GPU → RAM with six patches (`KVCACHE_DISK_TIER=0`) — and **option 2, the disk
+build** — the default, which adds the disk tier and its three fixes. `KVOFF_MINIMAL=0` adds the
+instrumentation to either. Everything not marked *disk build* applies to both.
 
 ## Prerequisites
 
@@ -82,9 +82,10 @@ KVCACHE_DISK_TIER=0 ./startup-qwen3.8-27b-mxfp4.sh               # serve, RAM ti
 
 | setting | meaning |
 |---|---|
-| `KVCACHE_DISK_TIER` | `0` (default) GPU → RAM, six patches; `1` adds the disk tier and the instrumentation |
+| `KVCACHE_DISK_TIER` | `1` (default) GPU → RAM → disk; `0` GPU → RAM only |
+| `KVOFF_MINIMAL` | `1` (default); `0` adds the instrumentation patches (`kvvalidate.py`, `tierreport.py`) |
 | `KVCACHE_TIER_GIB` | RAM tier, GiB. `auto` (default) applies the sizing rule above |
-| `KVCACHE_DISK` | disk tier path. Defaults to `/kvcache` on the disk build, unset on the default |
+| `KVCACHE_DISK` | disk tier path, default `/kvcache`. If it does not exist the boot says so and runs RAM-only |
 
 Confirm it came up — the `[kvcache]` lines name the build and the tier size:
 ```bash

@@ -54,7 +54,7 @@ edited to run on a host with a different number of cards.
 
 Everything is an environment variable; these are the ones worth knowing.
 
-  MODELS=$HOME/models-mxfp4  directory holding the checkpoints (bind-mounted at /models)
+  MODELS=$HOME/models       directory holding the checkpoints (bind-mounted at /models)
   PORT=<--port value>       listen port; the --port argument (llama-swap) wins over this
   IMAGE=...:0.9.3           container image (CACHE is keyed to it -- move both together)
   RUNTIME=podman|docker     container runtime (auto-detected)
@@ -87,7 +87,8 @@ Everything is an environment variable; these are the ones worth knowing.
 
   KVCACHE_TIER_GIB=auto     RAM tier = one full MAXLEN prefill (19 GiB at 262144); off if it does not
                             fit /dev/shm and RAM; <GiB> sets it outright
-  KVCACHE_DISK_TIER=1       disk tier on (0 = RAM tier only, minimal patch set)
+  KVCACHE_DISK_TIER=1       disk tier on (0 = RAM tier only)
+  KVOFF_MINIMAL=1           0 adds the KV-offload instrumentation (kvvalidate.py, tierreport.py)
   KVCACHE_DISK=/kvcache     disk tier filesystem; 128 GiB or more recommended, reaper required
   MIN_M=0                   M above which the W4A8 kernel takes over from aiter (0 = always)
   AUTO_R4D=1                build the pinned libr4d on first run (cached); 0 uses the image's
@@ -566,7 +567,7 @@ GPU_IDS=${GPU_IDS:-$RAD_GPU_INDICES}
 # MODELS is bind-mounted at /models below, so SNAP and DRAFTER must live somewhere under it.
 # Resolved HERE rather than next to SNAP further down: DRAFTER's default dereferences it, and under
 # `set -u` that made an un-exported MODELS an "unbound variable" abort rather than a default.
-MODELS="$(realpath -m "${MODELS:-$HOME/ai/models-mxfp4}")"
+MODELS="$(realpath -m "${MODELS:-$HOME/models}")"   # where ggz14 setup-mxfp4.sh writes them
 # Drafter checkpoint for SPEC_METHOD=dflash. Must live under MODELS -- only MODELS is mounted.
 DRAFTER=${DRAFTER:-$MODELS/Qwen3.8-27B-DFlash2-FP8}
 # The drafter's own attention backend. It has to support FULL cuda graphs or vLLM logs "running the
@@ -1078,11 +1079,14 @@ KVOFF_ALIGN_LAST_BLOCK=${KVOFF_ALIGN_LAST_BLOCK:-1}
 # all touched files byte-compile, connector and both tier managers import. That proves
 # the set is COHERENT, not that it serves -- no engine was started.
 # 2026-09-13, pat: DEFAULT FLIPPED TO 1. The minimal set has run production since the
-# 2026-09-12 late reload and is working well, so it is the recommended configuration; the
-# full instrumented set is the DISK build (KVCACHE_DISK_TIER=1 on the kvcache
-# wrapper, which sets this back to 0 along with the disk tier).
-# Here: 0 (the full instrumented set) with the disk tier, as served; 1 with the RAM tier only.
-if [ -n "$KVOFF_DISK" ]; then KVOFF_MINIMAL=${KVOFF_MINIMAL:-0}; else KVOFF_MINIMAL=${KVOFF_MINIMAL:-1}; fi
+# 2026-09-12 late reload and is working well, so it is the recommended configuration.
+# Here the default is 1 with or without the disk tier: the instrumentation patches are for
+# diagnosing the tier, not for serving, and they make the log and /metrics far noisier.
+# KVOFF_MINIMAL=0 adds them (kvvalidate.py and tierreport.py need it). The disk tier's own
+# behavioural patches (fs fanout, lookup invalidation, failed-load forget) are NOT
+# instrumentation: they follow the disk tier through KVOFF_FS_TIER instead.
+KVOFF_MINIMAL=${KVOFF_MINIMAL:-1}
+if [ -n "$KVOFF_DISK" ]; then KVOFF_FS_TIER=1; else KVOFF_FS_TIER=0; fi
 # RADIANCE_LOOKUP_STALE_WATCH: diagnostic only -- counts lookups that returned a cached
 # `absent` for a key whose file exists. DEFAULT OFF and it should stay off: it costs one
 # unbatched os.path.exists per MISS, and on a cold cache every lookup misses, so the
@@ -1151,7 +1155,12 @@ KVOFF_BLOCKS_PER_CHUNK=${KVOFF_BLOCKS_PER_CHUNK:-}
 # KVOFF_DISK_SUBDIR: subdirectory of KVOFF_DISK holding the block tree. Change it to run an
 # experiment against an isolated tier -- the on-disk config.json is written once and NOT
 # rewritten when the geometry changes, so a differing blocks_per_chunk must not share a root.
-KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks}}
+# Default: one subdirectory PER CHECKPOINT under blocks/. Block filenames are hashes of the token
+# ids and PYTHONHASHSEED only -- nothing identifies the model -- so two checkpoints of the same
+# architecture sharing one directory would silently load each other's KV for a shared prefix.
+# blocks/ stays the reaper's root (kv-cache/ops), so every model's tree is reaped together.
+_kvc_snap="${SNAP:-$MODELS/Qwen3.8-27B-MXFP4-mtpfp8}"
+KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")}}
 
 # KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
 #   lru  = vLLM's default (cpu/manager.py:45, cpu/spec.py:133).
@@ -1939,7 +1948,7 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # The two knobs the patch prelude branches on are final by now; pass them exactly as the
 # container gets them (-e below), plus /house, where half of the prelude patches live.
 # Both go into the overlay key, and the builder applies the prelude with them.
-STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL RADIANCE_GDN_LAZY=$GDN_LAZY"
+STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL KVOFF_FS_TIER=$KVOFF_FS_TIER RADIANCE_GDN_LAZY=$GDN_LAZY"
 STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
 startup_cache_overlay
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --privileged --ipc=host --network=host --ulimit memlock=-1 \
@@ -2047,6 +2056,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_TOUCH_ALL_GROUPS="$KVOFF_TOUCH_ALL_GROUPS" \
   -e RADIANCE_TOUCH_POSITION_ORDER="$KVOFF_TOUCH_POSITION_ORDER" \
   -e KVOFF_MINIMAL="$KVOFF_MINIMAL" \
+  -e KVOFF_FS_TIER="$KVOFF_FS_TIER" \
   -e RADIANCE_LOOKUP_INVALIDATE="$KVOFF_LOOKUP_INVALIDATE" \
   -e RADIANCE_FS_FAILED_LOAD_FORGET="$KVOFF_FS_FAILED_LOAD_FORGET" \
   -e RADIANCE_ALIGN_PROMPT_LAST_BLOCK="$KVOFF_ALIGN_LAST_BLOCK" \
@@ -2077,24 +2087,29 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     . /startup-cache/overlay-apply.sh "$SP"
     if [ -z "$BOOT_OVERLAY_APPLIED" ]; then
     # BEGIN patch prelude
-    python3 patch_quark_mxfp4.py
-    python3 patch_ar_maxbytes.py
-    python3 patch_topk_triton_rows.py
-    python3 patch_dflash_calib.py
-    python3 patch_dflash_mxfp4_kv.py
-    python3 patch_rmsquant_fusion.py
-    python3 patch_verify_head.py
-    python3 patch_kv_group_size.py
+    # hp: run one patch script quietly. Its own report (one OK line per hunk) is printed only
+    # when it fails, and the exit status is passed on, so a FATAL patch still stops the boot
+    # (set -e) and a non-fatal one still reaches its WARNING. Written so that set -e cannot
+    # end the boot inside the capture before the failure output is shown.
+    hp() { local o r=0; o=$(PYTHONPATH=/patches python3 "$@" 2>&1) || r=$?; if [ "$r" != 0 ]; then printf "%s\n" "$o"; fi; return "$r"; }
+    hp patch_quark_mxfp4.py
+    hp patch_ar_maxbytes.py
+    hp patch_topk_triton_rows.py
+    hp patch_dflash_calib.py
+    hp patch_dflash_mxfp4_kv.py
+    hp patch_rmsquant_fusion.py
+    hp patch_verify_head.py
+    hp patch_kv_group_size.py
     # House patch: lives in /house, not /patches. PYTHONPATH lets it import the ggz14
     # _patchlib the same way the in-repo patches do (script dir, not cwd, is sys.path[0]).
-    PYTHONPATH=/patches python3 /house/patch_offload_mixed_hit.py
+    hp /house/patch_offload_mixed_hit.py
     # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
     # NOTE: no apostrophes anywhere in this bash -c body.
-    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
+    if [ "${KVOFF_MINIMAL:-1}" != "1" ]; then
     # House patch: KV offload store-path instrumentation. Adds gauges only, no behaviour
     # change. Without it an allocation failure is unattributable and the lookup-delay
     # histogram tops out at 10 s. See kv-cache/cache-preemption-patch-plan.md R3.6.
-    PYTHONPATH=/patches python3 /house/patch_offload_instrumentation.py
+    hp /house/patch_offload_instrumentation.py
     # House patch: KV offload lookup-outcome counters. Instrumentation only. Answers why
     # production gets ~0 external hits when the bench gets an exact 85,696-token one, by
     # counting every terminal branch of the lookup path. See R3.14.2. Remove once Phase A
@@ -2102,7 +2117,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # Non-fatal by design: a diagnostic must never be able to keep the engine from
     # serving. Hunks are ordered so a mid-way failure still leaves a consistent file
     # (metric names first, then the call sites that use them).
-    PYTHONPATH=/patches python3 /house/patch_offload_lookup_metrics.py \
+    hp /house/patch_offload_lookup_metrics.py \
       || echo "[radiance] WARNING: lookup-outcome counters did not apply; Phase A metrics will be absent"
     fi
     # House patch: annotate the EAGLE/MTP draft KV group positionally, so the offload
@@ -2110,13 +2125,13 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # patch below: while every group is flagged eagle, storable_chunks() drops the trailing
     # chunk of each group during decode and the store grid stops lining up with the hit
     # window. Non-fatal: on failure the flag-them-all fallback is todays behaviour anyway.
-    PYTHONPATH=/patches python3 /house/patch_eagle_groups.py \
+    hp /house/patch_eagle_groups.py \
       || echo "[radiance] WARNING: eagle-group annotation did NOT apply -- all nine KV groups will be treated as MTP draft groups, whatever RADIANCE_OFFLOAD_EAGLE_GROUPS says"
     # House patch: R3.13 Mamba store cadence -- the capacity lever. Must run AFTER the
     # eagle-group patch. The two halves (store grid, lookup rounding) are ordered so that a
     # mid-way failure degrades safely: lookup-only means a coarser hit window with a full
     # store, which costs prefix but stays correct.
-    PYTHONPATH=/patches python3 /house/patch_mamba_stride.py \
+    hp /house/patch_mamba_stride.py \
       || echo "[radiance] WARNING: mamba store-cadence patch did NOT apply -- every chunk will store all six Mamba groups, whatever RADIANCE_MAMBA_STORE_STRIDE says"
     # House patch: reconcile re-ask (2026-09-17). BEHAVIOURAL, so it sits outside the
     # KVOFF_MINIMAL gate. After the stock hit_diverged fallback drops a GPU attention hit
@@ -2126,7 +2141,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # helper, call site, logging, so a failure part-way leaves stock behaviour or the fix
     # without per-group logging. See kv-cache/patches/patch_reconcile_reask.py.
     # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
-    PYTHONPATH=/patches python3 /house/patch_reconcile_reask.py \
+    hp /house/patch_reconcile_reask.py \
       || echo "[radiance] WARNING: reconcile re-ask did NOT apply -- a GPU attention hit with no Mamba state will still recompute the whole prompt"
     # House patch: swa-align + touch-all (2026-09-17). BEHAVIOURAL, outside KVOFF_MINIMAL.
     # Stores drafter chunks only where a Mamba-grid hit can read them, and refreshes every
@@ -2134,113 +2149,64 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # (RADIANCE_SWA_STORE_MAMBA_ALIGN, RADIANCE_TOUCH_ALL_GROUPS). Non-fatal: on failure the
     # tier keeps storing every drafter chunk and stock _touch.
     # See kv-cache/patches/patch_swa_align_touch.py.
-    PYTHONPATH=/patches python3 /house/patch_swa_align_touch.py \
+    hp /house/patch_swa_align_touch.py \
       || echo "[radiance] WARNING: swa-align/touch-all did NOT apply -- every drafter chunk stored, stock touch"
     # House patch 2026-09-19: stop the prompt final chunk at its last full block boundary, so
     # every cached block is computed in the same aligned chunk a cold prefill uses. BEHAVIOURAL,
     # outside KVOFF_MINIMAL. Kill switch RADIANCE_ALIGN_PROMPT_LAST_BLOCK=0. Non-fatal: without
     # it a cached multi-turn resume can differ from a cold prefill in the low bits.
-    PYTHONPATH=/patches python3 /house/patch_sched_align_last_block.py \
+    hp /house/patch_sched_align_last_block.py \
       || echo "[radiance] WARNING: last-block align did NOT apply -- cached turns can differ from cold in the low bits"
-    # KVOFF_MINIMAL=1 skips this block: instrumentation only, nothing behavioural.
+    # Two gates, interleaved because the anchors stack (kv-cache/patches/APPLY-ORDER.txt):
+    # KVOFF_MINIMAL=0 adds the instrumentation (debug sink, tier report, promotion and miss
+    # counters); KVOFF_FS_TIER=1, set whenever the disk tier is on, adds the disk tier
+    # behavioural fixes. Tier report needs the instrumentation above; lookup invalidation
+    # stands on fs fanout; failed-load forget stands on both.
     # NOTE: no apostrophes anywhere in this bash -c body.
-    if [ "${KVOFF_MINIMAL:-0}" != "1" ]; then
-    # House patch: debug_instrument -- records KV-offload lookup / store / store-drop /
-    # store-ready events to a bounded JSON-line sink (/tmp/kvinstr/<pid>.jsonl) so a miss
-    # can be replayed by tools/debug_instrument_reader.py. INSTRUMENTATION ONLY: no
-    # behaviour change, no gate; every hook is try/except-guarded and the sink never
-    # raises, so a failure degrades to no events, never to a broken engine. Non-fatal.
-    PYTHONPATH=/patches python3 /house/patch_offload_debug_instrument.py \
+    if [ "${KVOFF_MINIMAL:-1}" != "1" ]; then
+    # Instrumentation: lookup/store events to a JSON-line sink for miss replay.
+    hp /house/patch_offload_debug_instrument.py \
       || echo "[radiance] WARNING: debug_instrument did not apply -- miss playback events will be absent"
-    # House patch: R3.14 fs-tier job fanout, the port of upstream PR #49225. Order-independent
-    # of the three above -- it touches a different file (v1/kv_offload/tiering/fs/manager.py)
-    # and anchors nowhere near the cascade-backlog gauge the instrumentation patch adds there.
-    # Non-fatal: on failure every fs job keeps running on one thread, which is todays
-    # behaviour, so the promotion stays slow but nothing is wrong.
-    PYTHONPATH=/patches python3 /house/patch_offload_fs_fanout.py \
+    fi
+    if [ "${KVOFF_FS_TIER:-0}" = "1" ]; then
+    # Disk tier: fan large filesystem jobs out over the read/write threads (upstream PR 49225).
+    hp /house/patch_offload_fs_fanout.py \
       || echo "[radiance] WARNING: fs fanout patch did NOT apply -- every filesystem job will run on a single thread, whatever RADIANCE_FS_FANOUT_TARGET_MB says"
-    # House patch: per-tier KV offload instrumentation for the tier report. Instrumentation
-    # only, no behaviour change. Adds 19 series carrying a `tier` label -- hit blocks/tokens,
-    # load/store bytes+seconds+ops+latency, capacity/used/occupancy, and the sizing family
-    # (reads-before-evict, evictions, eviction-to-reuse, would-have-hit, stall seconds).
-    # This is what `tierreport.py` reads to answer "is my RAM the right size", "is my disk
-    # too slow" and "is the layered cache adding value" from one scrape of the operators own
-    # traffic. Everything it adds is a counter or a histogram, because the report is scraped
-    # ONCE from a long-lived server and a gauge sampled that way says nothing.
-    # Must run AFTER the instrumentation patch: the fs tier has no get_stats() in stock vLLM,
-    # and this extends the one that patch creates rather than competing with it. The patch
-    # checks that itself and says so, so a wrong order is a named error not a missing anchor.
-    # Non-fatal: on failure the tier report degrades to the unlabelled aggregates, which is
-    # exactly todays situation -- the disk stays invisible inside CPU-tier bandwidth.
-    PYTHONPATH=/patches python3 /house/patch_offload_tier_report.py \
+    fi
+    if [ "${KVOFF_MINIMAL:-1}" != "1" ]; then
+    # Instrumentation: per-tier report series (tierreport.py) and promotion-refusal timing.
+    hp /house/patch_offload_tier_report.py \
       || echo "[radiance] WARNING: tier-report metrics did NOT apply -- tierreport.py will have no per-tier rows"
-    # House bundle (kv-queue task 20, reduced by task 37): the KV-offload
-    # promotion-refusal instrumentation + task 15 wall-clock timing, folded into one
-    # order-independent patch (refusal hunk first, then the re-anchored wall-clock hunk):
-    #   Hunk 1 -- refusal counters that name the refusal.
-    #      Today every refusal is folded into lookup_chunk_miss_total and is
-    #      indistinguishable from a real miss, which is why this took reading the code
-    #      to find rather than reading /metrics. Instrumentation only. The counter
-    #      reading zero (0 refusals / 5,416 promotions, tier pinned at 100%) is the
-    #      EVIDENCE the fix was unnecessary: the fix patch (B2 reserved headroom +
-    #      B1 bounded retry) was removed in task 37.
-    #   Hunk 2 -- task 15 wall-clock whole-job timing (RE-ANCHORED): the original anchored
-    #      the same metrics.py tail as hunk 1 and failed with "anchor matched 0x" on the
-    #      instrumented tree, so the re-anchored hunk is what is applied. Do not swap in the
-    #      out/15 original.
-    # The merged file applies hunk 1 then hunk 2; it must run after the
-    # tier-report patch above because both patches reference TierReportMetrics /
-    # TieringOffloadingMetrics / _tr_tokens_per_hash, which that patch creates.
-    # Rehearsed before deployment via kv-queue out/37/rehearse.sh (throwaway --rm container,
-    # no GPU): all seven touched files byte-compile, idempotent.
-    # Non-fatal if it fails: the engine would serve upstream behaviour with no
-    # promotion_* counters, so the warning names that explicitly.
-    PYTHONPATH=/patches python3 /house/patch_offload_promotion_wallclock.py \
+    hp /house/patch_offload_promotion_wallclock.py \
       || echo "[radiance] WARNING: promotion-refusal/wallclock bundle did NOT apply -- no promotion_* counters"
-    # kv-queue task 58: invalidate the async-lookup cache when a fs store lands.
-    # LAST in the prelude. Its fs/manager.py anchors stand on the fs-fanout patch
-    # (_RADIANCE_FANOUT_MAX / _radiance_split), and it must not race the fs/manager.py
-    # hunk in the bundle, which re-points a region this patch does not anchor on.
-    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
-    # Non-fatal: without it the engine serves upstream behaviour, which is the stale
-    # `absent` -- so the warning names the user-visible consequence, not the patch.
-    PYTHONPATH=/patches python3 /house/patch_lookup_invalidate.py \
+    fi
+    if [ "${KVOFF_FS_TIER:-0}" = "1" ]; then
+    # Disk tier: drop a stale absent verdict when a store lands (gated off by default), and
+    # forget the verdict of a block whose load FAILED, so a reaped or unreadable block is
+    # recomputed instead of retried until the client gives up.
+    hp /house/patch_lookup_invalidate.py \
       || echo "[radiance] WARNING: lookup-cache invalidation did NOT apply -- a just-stored block can still read as absent, so long-context hits may drop to zero mid-conversation"
-    # House patch 2026-09-19: forget the lookup verdict of keys whose fs load FAILED, so a
-    # reaped or unreadable block makes its request recompute instead of retrying forever.
-    # Anchors on the fs-fanout patch and on invalidate() above, so it runs right here.
-    # Non-fatal: without it a failed disk read can hang the request that needed the block.
-    PYTHONPATH=/patches python3 /house/patch_fs_failed_load.py \
+    hp /house/patch_fs_failed_load.py \
       || echo "[radiance] WARNING: failed-load forget did NOT apply -- a reaped or unreadable disk block can hang the request that needs it"
-    # kv-queue tasks 50 + 59v2, ordered by task 65. INSTRUMENTATION ONLY -- no behaviour
-    # change, no gate. They answer the question the counters could not: when a request
-    # recomputes a prefix we already hold, WHICH branch dropped it. Today the six lookup
-    # exits partition cleanly and still do not account for it, because a deferral that
-    # never resolves lands in no bucket and the transfer_jobs guard returns before
-    # LOOKUP_CALLS increments at all.
-    #   50  -- deferral lifecycle (total/served/gave_up/unresolved) + depth histogram,
-    #          plus transfer_jobs_deferred, the silent exit.
-    #   59v2 -- attributes the zero_hit and short_result misses to a reason.
-    # 50 and 59 as originally written COLLIDE in metrics.py in BOTH orders (proven by
-    # task 65 on a copy of the live tree); 59v2 is re-anchored so the pair is
-    # order-independent. Do NOT substitute the original out/59 patch.
-    # NOTE: no apostrophes in this block -- it sits inside a single-quoted bash -c body.
-    PYTHONPATH=/patches python3 /house/patch_offload_miss_deferral_metrics.py \
+    fi
+    if [ "${KVOFF_MINIMAL:-1}" != "1" ]; then
+    # Instrumentation: deferral lifecycle and miss-reason counters.
+    hp /house/patch_offload_miss_deferral_metrics.py \
       || echo "[radiance] WARNING: deferral/miss-reason counters did NOT apply -- a deferral that never resolves will stay invisible"
     fi
-    python3 patch_topk_composite.py
-    python3 patch_gdn_shared_build.py
-    python3 patch_dflash_selector_topk.py
-    python3 patch_gdn_merge_inproj.py
-    python3 patch_dynwidth.py
-    python3 patch_ar_geometry.py
-    python3 patch_gdn_glue.py
+    hp patch_topk_composite.py
+    hp patch_gdn_shared_build.py
+    hp patch_dflash_selector_topk.py
+    hp patch_gdn_merge_inproj.py
+    hp patch_dynwidth.py
+    hp patch_ar_geometry.py
+    hp patch_gdn_glue.py
     # Lazy GDN snapshots: must come AFTER the gdn builder patches, which are what it anchors on.
     # Fatal on purpose -- if it half-applies the spec-block count and the align kernels disagree.
     # Inert unless RADIANCE_GDN_LAZY=1, and the knob is what selects rx10 on the host side.
-    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then python3 patch_gdn_lazy.py; fi
+    if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then hp patch_gdn_lazy.py; fi
     # Non-fatal: fixes content=null on thinking-off requests; not required to serve.
-    python3 patch_qwen3_thinkoff.py \
+    hp patch_qwen3_thinkoff.py \
       || echo "[radiance] WARNING: thinkoff patch did not apply; thinking-off requests will return empty content"
     cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
     # radiance_drafthead.py is copied too so RADIANCE_DRAFT_RERANK can be swept without an
@@ -2255,62 +2221,63 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # House patch: skip the startup multi-modal warmup (RADIANCE_SKIP_MM_WARMUP, default
     # 1 via the launcher). Boot speed only: if it fails to apply, the boot just pays the
     # stock ~21.5 s warmup -- a cost, not a failure.
-    PYTHONPATH=/patches python3 /house/patch_skip_mm_warmup.py \
+    hp /house/patch_skip_mm_warmup.py \
       || echo "[radiance] WARNING: skip-mm-warmup patch did not apply; the startup mm warmup will run"
     # House patch: an fp16 ssm state is read and written natively by the r4d_kernels chunk scan
     # (R4D_RX13=1) instead of widened in Python. Dormant on an fp32 cache or an older libr4d.
-    PYTHONPATH=/patches python3 /house/patch_gdn_state_fp16.py \
+    hp /house/patch_gdn_state_fp16.py \
       || echo "[radiance] WARNING: gdn-state-fp16 patch did not apply; fp16 prefill widens in Python"
     # House patch, lazy GDN only: a prefill zeroes its stash headers (r4d_kernels mode 2) and
     # stale-stash events are counted. FATAL if it fails: lazy without the invalidation is known
     # to corrupt multi-turn chat (ggz14 0cadf57), so refuse to serve rather than degrade.
     if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then
-      PYTHONPATH=/patches python3 /house/patch_gdn_lazy_invalidate.py
+      hp /house/patch_gdn_lazy_invalidate.py
     fi
     # House patch 2026-10-06: uniform-decode guard (V2 runner). A prefill chunk of exactly
     # 1 + num_speculative_tokens tokens -- every prompt of k x block_size + that many tokens --
     # was dispatched to the spec-decode FULL cudagraph and answered with a 1-2 token fragment.
     # FATAL if it fails: the bug would return silently. Regression test: kv-cache/tools/lenprobe.py.
-    PYTHONPATH=/patches python3 /house/patch_uniform_decode_guard.py
+    hp /house/patch_uniform_decode_guard.py
     # House patch 2026-10-05: vLLM 0.29 backport, multimodal towers through the UVA offloader, so
     # --cpu-offload-params visual actually moves the vision tower to pinned host memory. Inert
     # without those flags. Non-fatal: if it fails the tower simply stays on the card.
-    PYTHONPATH=/patches python3 /house/patch_tower_offload.py \
+    hp /house/patch_tower_offload.py \
       || echo "[radiance] WARNING: tower-offload patch did not apply; the vision tower stays on the GPU"
     # House patch 2026-10-06 (vllm-radiance PR #8 = vLLM #54282 backport): the DFlash2 selector
     # proposal gets its own RNG stream; shared (seed, position) noise biased probabilistic rejection
     # sampling by up to ~2% probability per position. FATAL if it fails.
-    PYTHONPATH=/patches python3 /house/patch_dflash_sampling_rng.py
+    hp /house/patch_dflash_sampling_rng.py
     # House patch 2026-10-06 (ggz14 1d76c8269): the int2 draft head always defers quantisation to
     # first use instead of sniffing for an all-zero weight -- a dirty allocator silently built it
     # from garbage (acceptance 7.63 -> 1.01, quality unchanged). FATAL if it fails.
-    PYTHONPATH=/patches python3 /house/patch_drafthead_defer.py
+    hp /house/patch_drafthead_defer.py
     # House patch 2026-10-06 (vllm-radiance PR #9): target verify head selects 256 candidates
     # globally instead of 8 per vocabulary tile (top-20 retained 82 -> 99.8 percent of rows).
     # Non-fatal: if the vendored base changed it leaves the old head in place and says so.
-    PYTHONPATH=/patches python3 /house/patch_verifyhead_global.py \
+    hp /house/patch_verifyhead_global.py \
       || echo "[radiance] WARNING: verify-head global top-k not installed; block shortlist in use"
     # House patch 2026-10-06 (kernel sweep E): input embedding table to pinned host memory behind
     # a UVA view. Inert unless EMBED_HOST=1. Non-fatal: if it fails the table stays on the card.
-    PYTHONPATH=/patches python3 /house/patch_embed_host.py \
+    hp /house/patch_embed_host.py \
       || echo "[radiance] WARNING: embed-host patch did not apply; the embedding stays in VRAM"
     # House patch 2026-10-06: radiance_w4 gets its own switch. With libr4d v0.5.0+ (rx13/rx14 ship the
     # w4a16 kernel) FAST_DRAFT=1 armed it, it freed the DFlash2 drafter weights and the context-KV
     # precompute crashed at load (IndexError, boot loop). The launcher passes RADIANCE_W4=0. FATAL.
-    PYTHONPATH=/patches python3 /house/patch_w4_switch.py
+    hp /house/patch_w4_switch.py
     # House patches 2026-10-06, from SlyBase (vLLM 0.29 originals, anchors identical in 0.27.1), non-fatal:
     #  - load-time max_split_size_mb scope on ROCm: vLLM gates it on is_cuda(), so the freed 2.37 GiB
     #    drafter embed placeholder segment was left to be carved into stranded long-lived blocks
     #  - vllm#55450: align-mode Mamba retirement crosses null gaps (only leaks with async scheduling,
     #    which is off here -- future-proofing)
-    PYTHONPATH=/patches python3 /house/patch_rocm_load_max_split.py \
+    hp /house/patch_rocm_load_max_split.py \
       || echo "[radiance] WARNING: rocm load max_split patch did not apply"
-    PYTHONPATH=/patches python3 /house/patch_mamba_align_retire.py \
+    hp /house/patch_mamba_align_retire.py \
       || echo "[radiance] WARNING: mamba align retire patch did not apply"
     # House patch 2026-10-06: the verify-head hook reports its first exception instead of passing
     # silently (it hid a never-armed verify head). Non-fatal.
-    PYTHONPATH=/patches python3 /house/patch_verify_head_loud.py \
+    hp /house/patch_verify_head_loud.py \
       || echo "[radiance] WARNING: verify-head-loud patch did not apply"
+    echo "[radiance] vLLM patches applied (each patch prints only on failure)"
     # END patch prelude
     fi
     # Compile radiance_mxfp4_fp8.hip once and reuse the .so (~30 s per start). Keyed on

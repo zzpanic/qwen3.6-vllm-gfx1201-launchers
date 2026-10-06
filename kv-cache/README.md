@@ -29,13 +29,15 @@ DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh             # print the command, run no
 | | Option 1 — GPU → RAM | Option 2 — GPU → RAM → disk (default) |
 |---|---|---|
 | select with | `KVCACHE_DISK_TIER=0` | nothing (`KVCACHE_DISK_TIER=1`) |
-| house patches | the 6 "always" behavioural | all 15 (the 6 + 9 instrumentation / disk-tier) |
+| house patches | the 6 "always" behavioural | the 6 + the 3 disk-tier fixes |
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
-| tools | `kvwatch.py`, `kvtable.py` | those, plus `kvvalidate.py` and `tierreport.py` |
+| tools | `kvwatch.py`, `kvtable.py` | the same |
 
-Option 2 is the served configuration (`KVOFF_MINIMAL=0`, disk tier at `/kvcache`, 128 GiB or more
-recommended). Option 1 drops the disk tier and runs the minimal patch set; `kvvalidate.py` is option 2 only — its counters are not exported
-on option 1, and it reports false FAILs there.
+Option 2 is the served configuration (disk tier at `/kvcache`, 128 GiB or more recommended).
+Option 1 drops the disk tier and its three fixes. Either option takes `KVOFF_MINIMAL=0`, which adds
+the 6 instrumentation patches; `kvvalidate.py` and `tierreport.py` need it (without it their
+counters are not exported and they report false FAILs). It is for diagnosis, not serving: it makes
+the log and `/metrics` much noisier.
 
 **Sizing.** The RAM tier holds **one full max-model-len prefill** (73,728 B/token offloaded;
 KV-CACHE.md). The GPU pool is the `GPU KV cache size` line in the boot log;
@@ -115,25 +117,26 @@ recomputed, and the block is re-stored intact.
 
 Anchored against vLLM 0.27.1 + radiance 0.9.3, applied at container start in a real dependency
 order. Every behaviour change sits behind an env gate whose **unset state is stock vLLM**; nothing
-hard-codes a model name, group index or block size. **Default = the 6 "always"; disk build = all 15.**
+hard-codes a model name, group index or block size. **Always: the 6 marked default. With the disk
+tier: + the 3 marked disk. `KVOFF_MINIMAL=0`: + the 6 marked instrumentation.**
 
 | # | patch | does | scope |
 |---|---|---|---|
 | 1 | `patch_offload_mixed_hit` | mixed GPU / tier hit accounting | default |
-| 2 | `patch_offload_instrumentation` | per-tier load/store metrics | exp |
-| 3 | `patch_offload_lookup_metrics` | lookup-outcome counters | exp |
+| 2 | `patch_offload_instrumentation` | per-tier load/store metrics | instrumentation |
+| 3 | `patch_offload_lookup_metrics` | lookup-outcome counters | instrumentation |
 | 4 | `patch_eagle_groups` | annotate the eagle / draft KV groups | default |
 | 5 | `patch_mamba_stride` | recurrent-state store stride (4) | default |
 | 6 | `patch_reconcile_reask` | reconcile a re-asked turn (memo off) | default |
 | 7 | `patch_swa_align_touch` | sliding-window align / touch | default |
 | 8 | `patch_sched_align_last_block` | align the prompt's last block — **upstream candidate** | default |
-| 9 | `patch_offload_debug_instrument` | debug hooks | exp |
-| 10 | `patch_offload_fs_fanout` | fs read fan-out | exp |
-| 11 | `patch_offload_tier_report` | tier-report metrics | exp |
-| 12 | `patch_offload_promotion_wallclock` | promotion + wall-clock timing | exp |
-| 13 | `patch_lookup_invalidate` | lookup invalidation (off by default) | exp |
-| 14 | `patch_fs_failed_load` | forget a failed disk load — **upstream candidate** | exp |
-| 15 | `patch_offload_miss_deferral_metrics` | miss / deferral counters | exp |
+| 9 | `patch_offload_debug_instrument` | debug hooks | instrumentation |
+| 10 | `patch_offload_fs_fanout` | fs read fan-out | disk |
+| 11 | `patch_offload_tier_report` | tier-report metrics | instrumentation |
+| 12 | `patch_offload_promotion_wallclock` | promotion + wall-clock timing | instrumentation |
+| 13 | `patch_lookup_invalidate` | lookup invalidation (off by default) | disk |
+| 14 | `patch_fs_failed_load` | forget a failed disk load — **upstream candidate** | disk |
+| 15 | `patch_offload_miss_deferral_metrics` | miss / deferral counters | instrumentation |
 
 The two marked rows are generic vLLM fixes, not model-specific. The intended destination is
 **upstream vLLM**: check each patch against current HEAD and drop it wherever upstream has since

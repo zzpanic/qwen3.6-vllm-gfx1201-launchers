@@ -15,7 +15,8 @@ At this card's 2,200-3,000 tokens/s, that is 30-50 s at 100k tokens before the f
 
 With offload, the evicted blocks have already been copied to RAM, and from there to disk. The next
 turn loads them back:
-- from RAM at about 12 GB/s, roughly 170x faster than recomputing;
+- from RAM at about 12 GB/s, roughly 170x faster than recomputing (that is the PCIe 3.0 x16 ceiling
+  of the reference board; SYSTEM.md);
 - from disk at about 1 GB/s, roughly 15x faster.
 
 Only the genuinely new tokens are prefilled.
@@ -84,7 +85,8 @@ Two things are not exact, and the launcher keeps both off:
 | Knob | Default | What it does |
 |---|---|---|
 | `KVCACHE_TIER_GIB` | `auto` | RAM tier size: one full max-context prefill (below). `<GiB>` sets it; `0` turns offload off. |
-| `KVCACHE_DISK_TIER` | `1` | Disk tier on, with the full instrumented patch set. `0` = RAM tier only, minimal patch set. |
+| `KVCACHE_DISK_TIER` | `1` | Disk tier on, with its three behavioural fixes (failed-load forget, fs fan-out, lookup invalidation). `0` = RAM tier only. |
+| `KVOFF_MINIMAL` | `1` | `0` adds the six instrumentation patches (counters, a debug event sink, the per-tier report) for `kvvalidate.py` and `tierreport.py`. Diagnosis only: it makes the log and `/metrics` much noisier. |
 | `KVCACHE_DISK` | `/kvcache` | Disk tier filesystem. If it does not exist, the boot says so and serves RAM-only. |
 | `KVOFF_POLICY` | `arc` | RAM tier eviction: a prefix hit twice (a system prompt, a document head) survives a sweep of one-off blocks. |
 | `KVOFF_MAMBA_STRIDE` | `4` | Store the GDN state every 4th chunk instead of every chunk. A GDN layer holds one recurrent state, not a per-token history, so storing it every chunk was 4x write amplification. |
@@ -163,8 +165,8 @@ python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # per-
 python3 kv-cache/tools/kvwatch.py                                          # live
 ```
 
-With the disk tier (the full patch set), `kvvalidate.py` and `tierreport.py` also explain why a lookup
-did *not* hit.
+With `KVOFF_MINIMAL=0` (the instrumentation), `kvvalidate.py` and `tierreport.py` also explain why a
+lookup did *not* hit.
 
 ## Evidence scope
 

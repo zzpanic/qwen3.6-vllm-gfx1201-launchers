@@ -66,8 +66,11 @@ def _stale_poll(tb, force=False):
     if not force and _poll["calls"] % STALE_EVERY:
         return
     c = tuple(tb.stale(False))
-    if c != _poll["last"]:
-        _poll["last"] = c
+    prev = _poll["last"] or (0, 0, 0, 0)
+    _poll["last"] = c
+    # Prefill invalidations count up on every prefill (that is the fix working); only a change
+    # in the three stale-stash counters is an event worth a log line.
+    if c[:3] != prev[:3]:
         _log(f"stale-stash counters: update={c[0]} migrate={c[1]} checkpoint={c[2]} "
              f"| prefill invalidations={c[3]}")
 
