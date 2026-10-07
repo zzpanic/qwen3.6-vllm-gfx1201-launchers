@@ -19,17 +19,23 @@ Qwen3.8-27B MXFP4, with:
 | Exact-wide prefill attention (DSPLIT) | `r4d_kernels.patch` | 1.26-1.42x on final prefill chunks of 64 tokens or fewer over a deep cache | Bit-identical to the unsplit kernel |
 | Prefill block-table prefetch clamp | `r4d_kernels.patch` | Stops a prefetch one block past the sequence end | No arithmetic change |
 | Lazy GDN, prefill invalidation (mode 2) + stale-stash counters | `r4d_kernels.patch` | Makes lazy GDN safe to serve: +13.2% KV, +7% decode | Resume through the offload tier is token-identical to a cold run |
-| `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively. Dormant at fp32 (the default). | Same arithmetic |
+| `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively (fp16 is the default since 2026-10-08). | Same arithmetic |
+| Lazy-GDN materialize: no stash needed when nothing is replayed (rx17) | `r4d_kernels.patch` | Fixes garbage after an offload-tier resume whenever a prefill step spans more than one block -- what broke fp16 state and any CHUNK above one block. Enables fp16 + CHUNK=3532. | Resume through the tier bit-identical to cold at fp32 4956 and fp16 3532; decode path unchanged |
 | MXFP4 W4A8 decode band, M 9-64 | `radiance_mxfp4_fp8.patch` | o_proj/out_proj -5..-6% kernel time with two concurrent sequences | Single-stream (M <= 8) untouched, byte for byte |
 
-**Released configuration**, BetterBench, 20 passes, temperature 1.0:
+**Released configuration** (2026-10-08: fp16 GDN state, CHUNK=3532, libr4d rx17), BetterBench 0.6.0,
+20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
 
 | Metric | Result |
 |---|---|
-| Decode | 129.7 t/s |
-| Concurrency 1 / 2 | 114.7 / 202.0 t/s aggregate |
-| Prefill 2k / 8k / 16k / 32k / 64k / 128k | 3025 / 3065 / 2900 / 2802 / 2569 / 2185 t/s |
+| Decode | 132.5 t/s (update p99 38.5 ms) |
+| Concurrency 1 / 2 | 116.9 / 209.4 t/s aggregate |
+| Prefill 2k / 8k / 16k / 32k / 64k / 128k | 2896 / 3119 / 3190 / 3084 / 2870 / 2470 t/s |
 | Stalls | none |
+
+Prefill against the previous release's shape (fp32, CHUNK=2048) measured the same night with the same
+BetterBench 0.6.0: +7.4% at 16k, +8.8% 32k, +10.6% 64k, +11.9% 128k. The 2026-10-06 release figures
+(BETTERBENCH-20261006.md) were taken with BetterBench 0.4.0 and are not directly comparable.
 
 These numbers include the non-kernel work listed further down; the gains are not separable per kernel.
 

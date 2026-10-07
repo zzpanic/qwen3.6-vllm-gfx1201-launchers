@@ -74,6 +74,19 @@ sudo cp kv-cache/ops/kvcache-reap.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
 ```
 
+> **Upgrading from a release before 2026-10-08: the fp16 SSM default invalidates your disk tier.**
+> fp16 GDN state (now the default, `MAMBA_SSM_FP16=1`) changes the KV block geometry (1,648 -> 880
+> tokens), and the tier's on-disk layout is fixed when it is first written. The launcher therefore keeps
+> fp16 blocks in a separate tree (`blocks/<model>-f16ssm`), and the old fp32 tree (`blocks/<model>`) is
+> never read again. You may wish to wipe it to get the space back:
+>
+> ```bash
+> rm -rf /kvcache/blocks/Qwen3.8-27B-MXFP4-mtpfp8      # the old fp32 tree; cache only, nothing is lost
+> ```
+>
+> If you pin `KVOFF_DISK_SUBDIR` / `KVCACHE_DISK_SUBDIR` yourself, the launcher cannot separate them: wipe
+> that directory whenever you switch `MAMBA_SSM_FP16`, or the tier will be read with the wrong geometry.
+
 **5. Check the configuration.** This prints the container command and runs nothing. The log lines
 tagged `[kvcache]` show the RAM tier and disk tier the launcher chose.
 

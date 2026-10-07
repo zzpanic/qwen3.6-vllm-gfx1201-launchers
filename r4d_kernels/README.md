@@ -6,7 +6,7 @@ the reference for the files.
 
 | file | what |
 |---|---|
-| `r4d_kernels.patch` | libr4d v0.5.0 + radiance extras + the exact-decay GDN scan (libr4d #4), exact-wide DSPLIT prefill, the prefill block-table clamp, lazy-GDN invalidation. Built once per image and GPU arch by the launcher (cached under `~/.cache/radiance-libr4d/v0.5.0-p<patch sha>-<image key>`). |
+| `r4d_kernels.patch` | libr4d v0.5.0 + radiance extras + the exact-decay GDN scan (libr4d #4), exact-wide DSPLIT prefill, the prefill block-table clamp, lazy-GDN invalidation, and the rx17 lazy-GDN materialize fix (multi-block prefill steps after an offload-tier resume). Built once per image and GPU arch by the launcher (cached under `~/.cache/radiance-libr4d/v0.5.0-p<patch sha>-<image key>`). |
 | `radiance_mxfp4_fp8.patch` | ggz14's MXFP4 W4A8 kernel with the decode band M 9-64 re-tuned (two or more concurrent sequences). Applied to a copy of your clone's `radiance_mxfp4_fp8.hip`. |
 | `LICENSE.r4dx` | the MIT notice that must travel with the DSPLIT code from Crssz/r4dx |
 | `tests/dsplit_bench.py`, `tests/dsplit_cmp.py` | DSPLIT bit-identity and speed against DS=1 |

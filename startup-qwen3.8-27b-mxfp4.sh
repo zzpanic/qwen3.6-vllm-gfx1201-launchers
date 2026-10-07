@@ -14,10 +14,10 @@
 #   ./startup-qwen3.8-27b-mxfp4.sh -h           every knob, its default and what it does
 #   DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh    print the container command, run nothing
 #
-# DEFAULTS = THE SERVED CONFIGURATION (2026-10-06), on one R9700 with 40 GiB host RAM:
-#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=2048, KV pinned at 11.8e9 bytes
-#   (329,035 tokens of fp8 KV with the input embedding in host RAM, EMBED_HOST=1), fp32 GDN state +
-#   lazy GDN, DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
+# DEFAULTS = THE SERVED CONFIGURATION (2026-10-08), on one R9700 with 40 GiB host RAM:
+#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=3532 (four 880-token fp16 blocks per
+#   prefill step), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
+#   host RAM, EMBED_HOST=1), fp16 GDN state + lazy GDN (libr4d rx17, r4d_kernels.patch), DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
 #   head, R4D attention with 8-bit prefill legs, RAM tier sized to hold at least one full 262,144-token
 #   context (19 GiB; KVCACHE_TIER_GIB), disk tier at /kvcache (KVCACHE_DISK_TIER=1; 128 GiB or more
 #   recommended, and the reaper in kv-cache/ops is REQUIRED with it).
@@ -66,14 +66,14 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC=7 dflash / 4 mtp     speculative depth
   MAXSEQS=2                 max concurrent sequences
   MAXLEN=262144             max context length (Qwen3.8's maximum)
-  CHUNK=2048                prefill chunk (--max-num-batched-tokens)
+  CHUNK=3532                prefill chunk (--max-num-batched-tokens); keep it n x block + 12
   GPU_UTIL=0.97             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
                             detected cards can fill (head counts rule out 3, 6 and 12)
   GPUS=0,1                  HIP indices to serve on; defaults to every card with enough VRAM
   MIN_GPU_MIB=8192          VRAM floor for "usable"; excludes iGPUs from the count
-  KV_MEM=11800000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1; auto uses a pin
+  KV_MEM=11500000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1; auto uses a pin
                             measured for your hardware if
                             kv-profiles.tsv has one and lets vLLM profile if not; <bytes> pins
                             explicitly; 0 forces profiling. ./calibrate-kv.sh measures a pin
@@ -256,7 +256,17 @@ PORT=${PORT:-8080}
 HSA_ENABLE_MWAITX=${HSA_ENABLE_MWAITX:-1}
 GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
 MAXSEQS=${MAXSEQS:-2}
-CHUNK=${CHUNK:-2048}
+# CHUNK (2026-10-08: 2048 -> 3532). Under --mamba-cache-mode align every non-final prefill chunk is
+# floored to whole attention blocks (vLLM _mamba_block_aligned_split), after 2*(SPEC-1) = 12 tokens
+# are reserved for the draft slots. So the useful values are n x block + 12; anything between floors.
+# fp16 GDN state (the default) makes the block 880 tokens: 3532 = 4 x 880 + 12 = 3520 tokens per step,
+# which clears the MXFP4 GEMM's wide-tile threshold (M >= 2048). Measured vs fp32/2048 (one 1648-token
+# block per step): prefill +7.4% at 16k, +8.8% 32k, +10.6% 64k, +11.9% 128k (BETTERBENCH-20261008.md).
+# fp32 GDN state (MAMBA_SSM_FP16=0) has 1648-token blocks: 3308 = 2 blocks, 4956 = 3 blocks.
+# More than one block per step REQUIRES libr4d rx17 (R4D_RX13=1 with this repo's r4d_kernels.patch):
+# older lazy-GDN kernels skip the state migration on a multi-block step after an offload-tier resume
+# and serve garbage. KV_MEM must be re-measured for any other CHUNK (the prefill transient moves).
+CHUNK=${CHUNK:-3532}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -412,7 +422,7 @@ R4D_RX9=${R4D_RX9:-0}
 R4D_RX13=${R4D_RX13:-1}
 if [ "$R4D_RX13" = 1 ]; then R4D_RX9=1; CACHE_SUF="$CACHE_SUF-rx13"
 elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
-# MAMBA_SSM_FP16 (default 0): pass --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16,
+# MAMBA_SSM_FP16 (default 1): pass --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16,
 # i.e. upstream's single-GPU-profile "lever" (serve-mxfp4.sh:686). ONLY the ssm (temporal) state
 # goes 16-bit; the CONV state must stay BFLOAT16, not float16 -- upstream measured fp16 there
 # making radiance_gdn decline every layer ("step not handled by the fused path: conv state dtype
@@ -437,15 +447,19 @@ elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
 # which also finally answers R3.12.5. READ THE BOOT LOG before assuming it halved: upstream's 880
 # is their shape, not a measurement of ours.
 #
-# *** MEASURED 2026-10-05: BROKEN THROUGH THE OFFLOAD TIER -- KEEP IT 0. *** With an fp16 ssm cache, a
-# resume whose GDN state is restored from the CPU/disk tier answers garbage (every reply
-# "</think><|im_end|>", KL 4.8 nats vs a cold run), with or without lazy GDN and with the disk
-# nowhere near full. fp32 restores bit-exactly through the same path, and a GPU-resident fp16
-# resume is exact, so the fault is in how the connector saves/restores an fp16 state page. The
-# block did halve here (1648 -> 880). Drift against fp32 also grows with context (KL ~2.3x the
-# spec on/off noise floor at 25k). Gate any retry on kv-cache/tools/val_resume.py --evict 9
-# being bit-exact at fp16. The capacity at stake is small: +4.1% KV over fp32 + lazy GDN.
-MAMBA_SSM_FP16=${MAMBA_SSM_FP16:-0}
+# *** 2026-10-05 "BROKEN THROUGH THE OFFLOAD TIER" -- RESOLVED 2026-10-08, NOW THE DEFAULT. *** The garbage
+# after an offload-tier resume was not an fp16 problem: it was lazy GDN's materialize kernel skipping the
+# state migration on a prefill step spanning more than one block (fp16's 880-token block made CHUNK=2048
+# two blocks per step). libr4d rx17 (r4d_kernels.patch) fixes it; fp32 at CHUNK=4956 failed the same way.
+# With rx17: val_resume --evict bit-exact at fp16 CHUNK=3532; concurrent deep multi-turn gate 48/48.
+# Drift vs fp32 (cold, greedy, same prompts): top-1 agreement 99.75% at ~25k, 100% at ~70k, 99.91% at
+# ~141k (spec on/off noise floor 99.13%); it does not grow with depth. +0.6-1.7% decode steps/s.
+# MAMBA_SSM_FP16=0 restores fp32 state: then use CHUNK=2048/3308/4956 and KV_MEM=11.8e9 (re-measure).
+# SWITCHING IT INVALIDATES THE DISK TIER: the block geometry changes (1648 <-> 880 tokens) and the tier's
+# on-disk config.json is written once. By default each width gets its own tree (blocks/<model>-f16ssm vs
+# blocks/<model>, see KVOFF_DISK_SUBDIR), so the other width's tree is simply never read again -- wipe it
+# to reclaim the space (cache only). With KVOFF_DISK_SUBDIR pinned by hand, you MUST wipe it on a switch.
+MAMBA_SSM_FP16=${MAMBA_SSM_FP16:-1}
 if [ "$MAMBA_SSM_FP16" = 1 ]; then CACHE_SUF="$CACHE_SUF-f16ssm"; fi
 # RADIANCE_GDN_FUSED_MAX_ITEMS (default 32 = the module default, i.e. no behaviour change):
 # radiance_gdn.py:645 takes the fused GDN decode kernel only when nseq*H <= this, and our
@@ -535,10 +549,12 @@ if [ -n "${HSA_ENABLE_INTERRUPT:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_INTERRUPT=
 # survives a full 260k-prefill sweep with no OOM.
 GPU_UTIL=${GPU_UTIL:-0.97}
 # KV cache size. Resolved further down, once the batch shape it depends on is known.
-# 11.8e9 = 329,035 tokens, measured on one R9700 WITH EMBED_HOST=1 (the 2.37 GiB input embedding
-# lives in host RAM). Stress peak with two 158k sequences and a 2048x2048 image: 31.23 of 31.86 GiB.
+# 11.5e9 at fp16 + CHUNK=3532 (2026-10-08) = 331,759 tokens at MAXLEN 204800, on one R9700 WITH
+# EMBED_HOST=1 (the 2.37 GiB input embedding lives in host RAM). Stress peak with two 158k sequences and
+# a 2048x2048 image: 31.28 of 31.86 GiB (0.58 spare). The bigger prefill step costs ~0.3 GB of
+# activations, hence 11.5e9 rather than fp32/2048's 11.8e9 (329,035 tokens, 31.23 GiB peak).
 # With EMBED_HOST=0 the embedding is back on the card: lower this by ~2.5e9 or the boot OOMs.
-KV_MEM=${KV_MEM:-11800000000}
+KV_MEM=${KV_MEM:-11500000000}
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
 #             speculative position, so RADIANCE_DYNAMIC_DRAFT can stop the loop early.
@@ -1160,7 +1176,10 @@ KVOFF_BLOCKS_PER_CHUNK=${KVOFF_BLOCKS_PER_CHUNK:-}
 # architecture sharing one directory would silently load each other's KV for a shared prefix.
 # blocks/ stays the reaper's root (kv-cache/ops), so every model's tree is reaped together.
 _kvc_snap="${SNAP:-$MODELS/Qwen3.8-27B-MXFP4-mtpfp8}"
-KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")}}
+# The tier's on-disk config.json is written once and is NOT rewritten when the block geometry changes,
+# and fp16 GDN state halves the block (1648 -> 880), so each state width gets its own tree.
+_kvc_geom=""; [ "$MAMBA_SSM_FP16" = 1 ] && _kvc_geom="-f16ssm"
+KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")$_kvc_geom}}
 
 # KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
 #   lru  = vLLM's default (cpu/manager.py:45, cpu/spec.py:133).
