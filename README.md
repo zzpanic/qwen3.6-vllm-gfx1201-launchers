@@ -105,7 +105,7 @@ DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh
 ## Serving both models with llama-swap
 
 ```yaml
-healthCheckTimeout: 900   # the first boot builds kernels and caches, about 8 minutes; later boots about 3
+healthCheckTimeout: 900   # the first boot builds kernels and caches, about 7.5 minutes; later boots about 2.5
 
 models:
   "qwen3.8-27b":

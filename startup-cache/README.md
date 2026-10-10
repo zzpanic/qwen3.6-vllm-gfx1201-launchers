@@ -81,9 +81,14 @@ Measured 2026-10-05 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 wi
 
 | Boot | `startup-qwen3.8-27b-mxfp4.sh` |
 |---|---|
-| Cold: no caches, the overlay built on this boot, page cache dropped | 527 s |
-| Cached, page cache dropped (what a host reboot looks like) | 196 s |
-| Cached, page cache warm (a restart) | 161 s |
+| Cold: no caches, the overlay built on this boot, page cache dropped | 447 s |
+| Cached, page cache dropped (what a host reboot looks like) | 142 s |
+| Cached, page cache warm (a restart) | 133 s |
+
+(Re-measured 2026-10-11 on the release configuration: every cache under `~/.radiance-cache-w4a8-*`,
+`~/.cache/radiance-libr4d` and `~/.cache/startup-cache` deleted first, page cache dropped with
+`echo 3 > /proc/sys/vm/drop_caches`; `/health` and the first reply landed within a second of each other.
+The previous figures, 527 / 196 / 161 s, were taken on 2026-10-06 with an older patch set.)
 
 The gap between the last two rows is reading 20 GiB of weights from disk, which no cache here helps
 with.

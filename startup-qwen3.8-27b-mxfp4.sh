@@ -2226,6 +2226,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_CANON_MIXED="$KVOFF_CANON_MIXED" \
   -e VLLM_LOG_STATS_INTERVAL="$LOG_STATS_INTERVAL" \
   -e RADIANCE_BANNER="$RADIANCE_BANNER" \
+  -e RADIANCE_LAUNCH_IMAGE="$IMAGE" \
   ${QUIET_ENV[@]+"${QUIET_ENV[@]}"} \
   -e RADIANCE_VRAM_RETENTION="$KVOFF_VRAM_RETENTION" \
   -e RADIANCE_VRAM_KEEP_PREFIX="$KVOFF_KEEP_PREFIX" \
@@ -2535,7 +2536,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     if [ "${RADIANCE_BANNER:-1}" = 1 ] || [ -n "${RADIANCE_NUMA_BIND:-}" ] || [ "${RADIANCE_RUN_BWTEST:-0}" = 1 ]; then
       exec /opt/radiance_entrypoint.sh "$@"
     fi
-    echo "[radiance] radiance ${RADIANCE_VERSION:-?}, vllm serve starting (banner off: QUIET=1; RADIANCE_BANNER=1 shows it)"
+    echo "[radiance] ${RADIANCE_LAUNCH_IMAGE:-image}: vllm serve starting (banner off: QUIET=1; RADIANCE_BANNER=1 shows it)"
     exec vllm serve "$@"' _ \
      "$CSNAP" --served-model-name "$SERVED" --host 0.0.0.0 --port "$PORT" \
     --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \
