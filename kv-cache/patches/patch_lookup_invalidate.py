@@ -239,7 +239,7 @@ apply(
                 "lookup verdict is dropped when a store for it lands"
             )
         else:
-            logger.warning(
+            logger.info(  # off is the default: an INFO line, not a boot warning (2026-10-11)
                 "radiance: RADIANCE_LOOKUP_INVALIDATE unset -- the fs "
                 "async-lookup cache keeps a stale `absent` after a store lands "
                 "(upstream behaviour); a later lookup of a just-stored block can "

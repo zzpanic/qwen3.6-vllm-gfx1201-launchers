@@ -97,6 +97,9 @@ Everything is an environment variable; these are the ones worth knowing.
   R4D_SO=<dir>              use your own libr4d checkout instead of building one
   EXTRA="--enforce-eager"   extra `vllm serve` flags (same as passing them as arguments)
   DRY_RUN=1                 print the container command instead of running it
+  QUIET=1                   quieter log, nothing else changes: no per-request access lines, engine
+                            stats every 60 s (LOG_STATS_INTERVAL), no radiance banner (RADIANCE_BANNER=1
+                            shows it), transformers warnings off. QUIET=0 = the stock output
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
 
 Full knob reference: README.md. KV-cache offload: KV-CACHE.md. Kernels: KERNEL.md.
@@ -919,6 +922,26 @@ fi
 # mxfp4 quantization squashes NaN to a finite code. RADIANCE_MXFP4_SANITIZE (default 1) fixes it.
 # Extra vllm serve args, for bisecting (e.g. EXTRA="--enforce-eager").
 EXTRA=${EXTRA:-}
+# QUIET (2026-10-11, default 1): log volume only -- no knob here changes what is served or measured.
+#   --disable-uvicorn-access-log  one "POST /v1/chat/completions 200" line per request (and per /metrics scrape)
+#   VLLM_LOG_STATS_INTERVAL       the throughput / spec-decoding / KV-transfer summary lines, every 10 s stock;
+#                                 /metrics is unaffected (it is not the log)
+#   TRANSFORMERS_VERBOSITY=error  the image processor's use_fast deprecation notice, printed twice per boot
+#   RADIANCE_BANNER=0             skip the image's banner + environment preamble (~60 lines, mostly toggles this
+#                                 model does not use); the container then execs vllm serve directly. The preamble
+#                                 only prints, so nothing is lost; NUMA binding or RADIANCE_RUN_BWTEST still use it.
+QUIET=${QUIET:-1}
+if [ "$QUIET" = 1 ]; then
+  LOG_STATS_INTERVAL=${LOG_STATS_INTERVAL:-60}
+  RADIANCE_BANNER=${RADIANCE_BANNER:-0}
+  QUIET_ARGS="--disable-uvicorn-access-log"
+  QUIET_ENV=(-e TRANSFORMERS_VERBOSITY=error)
+else
+  LOG_STATS_INTERVAL=${LOG_STATS_INTERVAL:-10}
+  RADIANCE_BANNER=${RADIANCE_BANNER:-1}
+  QUIET_ARGS=""
+  QUIET_ENV=()
+fi
 # Prefetch the checkpoint into page cache in parallel before loading (served configuration).
 case " $EXTRA " in *--safetensors-load-strategy*) ;; *) EXTRA="$EXTRA --safetensors-load-strategy prefetch" ;; esac
 # MAMBA_SSM_FP16 -- see the knob's block above for the risk and the geometry consequence.
@@ -2201,6 +2224,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_CANONICAL_CHUNKS="$KVOFF_CANONICAL_CHUNKS" \
   -e RADIANCE_CANON_RECEIPTS="$KVOFF_CANON_RECEIPTS" \
   -e RADIANCE_CANON_MIXED="$KVOFF_CANON_MIXED" \
+  -e VLLM_LOG_STATS_INTERVAL="$LOG_STATS_INTERVAL" \
+  -e RADIANCE_BANNER="$RADIANCE_BANNER" \
+  ${QUIET_ENV[@]+"${QUIET_ENV[@]}"} \
   -e RADIANCE_VRAM_RETENTION="$KVOFF_VRAM_RETENTION" \
   -e RADIANCE_VRAM_KEEP_PREFIX="$KVOFF_KEEP_PREFIX" \
   -e RADIANCE_TIER_RETENTION="$KVOFF_TIER_RETENTION" \
@@ -2506,7 +2532,11 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
       fi
       { date -u +%Y-%m-%dT%H:%M:%SZ | sed "s/^/ts=/"; echo "host=$HOSTNAME"; } > /cache/.last-boot-ok 2>/dev/null || true
     ) >/dev/null 2>&1 &
-    exec /opt/radiance_entrypoint.sh "$@"' _ \
+    if [ "${RADIANCE_BANNER:-1}" = 1 ] || [ -n "${RADIANCE_NUMA_BIND:-}" ] || [ "${RADIANCE_RUN_BWTEST:-0}" = 1 ]; then
+      exec /opt/radiance_entrypoint.sh "$@"
+    fi
+    echo "[radiance] radiance ${RADIANCE_VERSION:-?}, vllm serve starting (banner off: QUIET=1; RADIANCE_BANNER=1 shows it)"
+    exec vllm serve "$@"' _ \
      "$CSNAP" --served-model-name "$SERVED" --host 0.0.0.0 --port "$PORT" \
     --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \
     --gpu-memory-utilization "$GPU_UTIL" \
@@ -2515,7 +2545,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     --max-model-len "$MAXLEN" --max-num-seqs "${MAXSEQS:-8}" --max-num-batched-tokens "$CHUNK" \
     --attention-backend "$ATTN" \
     ${SPEC_CFG:+--speculative-config "$SPEC_CFG"} \
-    $ASYNC_FLAG $EXTRA $MMIMG_ARG $SKIPMM_ARG \
+    $ASYNC_FLAG $EXTRA $MMIMG_ARG $SKIPMM_ARG $QUIET_ARGS \
     --enable-prefix-caching --mamba-cache-mode align --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
     --enable-per-request-metrics --enable-force-include-usage --enable-prompt-tokens-details \
     --override-generation-config "$GENCFG_ARG" \
