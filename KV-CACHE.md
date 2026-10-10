@@ -92,7 +92,7 @@ so they are not used (KERNEL.md).
 | `KVCACHE_TIER_GIB` | `16` | RAM tier size in GiB (below). `auto` = one full max-context prefill at dense bytes; `0` turns offload off. |
 | `KVCACHE_DISK_TIER` | `1` | Disk tier on, with its three behavioural fixes (failed-load forget, fs fan-out, lookup invalidation). `0` = RAM tier only. |
 | `KVOFF_MINIMAL` | `1` | `0` adds the six instrumentation patches (counters, a debug event sink, the per-tier report) for `kvvalidate.py` and `tierreport.py`. Diagnosis only: it makes the log and `/metrics` much noisier. |
-| `KVCACHE_DISK` | `/kvcache` | Disk tier filesystem. If it does not exist, the boot says so and serves RAM-only. |
+| `KVCACHE_DISK` | `/kvcache` | Disk tier filesystem. If it does not exist the launcher refuses to start and says how to fix it (create it, point `KVCACHE_DISK` elsewhere, or `KVCACHE_DISK_TIER=0`). |
 | `KVOFF_POLICY` | `arc` | RAM tier eviction: a prefix hit twice (a system prompt, a document head) survives a sweep of one-off blocks. |
 | `KVOFF_MAMBA_STRIDE` | `4` | Store the GDN state every 4th chunk instead of every chunk. A GDN layer holds one recurrent state, not a per-token history, so storing it every chunk was 4x write amplification. |
 | `KVOFF_PROMPT_ONLY` | `true` | Offload prompt tokens only, not generated ones. |

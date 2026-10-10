@@ -15,8 +15,8 @@
 #   DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh    print the container command, run nothing
 #
 # DEFAULTS = THE SERVED CONFIGURATION (2026-10-08), on one R9700 with 40 GiB host RAM:
-#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=auto (3540: four 880-token fp16 blocks per
-#   prefill step plus room for the other sequence's drafts), canonical prefill chunks (cached == uncached), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
+#   262,144-token context (Qwen3.8's maximum), MAXSEQS=4, CHUNK=auto (3568: four 880-token fp16 blocks per
+#   prefill step plus room for the other sequences' drafts), canonical prefill chunks (cached == uncached), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
 #   host RAM, EMBED_HOST=1), fp16 GDN state + lazy GDN (libr4d rx17, r4d_kernels.patch), DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
 #   head, R4D attention with 8-bit prefill legs, checkpoint retention, a 16 GiB RAM tier (KVCACHE_TIER_GIB),
 #   disk tier at /kvcache (KVCACHE_DISK_TIER=1; a 128 GiB volume with the reaper keeping it at 75% is
@@ -64,7 +64,7 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC_METHOD=dflash        speculative drafter: dflash (fastest, needs the DFlash2 checkpoint)
                             or mtp (uses the head inside the target, no extra download)
   SPEC=7 dflash / 4 mtp     speculative depth
-  MAXSEQS=2                 max concurrent sequences
+  MAXSEQS=4                 max concurrent sequences
   MAXLEN=262144             max context length (Qwen3.8's maximum)
   CHUNK=auto                prefill chunk (--max-num-batched-tokens); auto = the canonical grid
                             (4 fp16 / 2 fp32 blocks) + MAXSEQS x (SPEC-1) + (MAXSEQS-1) x (SPEC+1)
@@ -257,7 +257,7 @@ SERVED=${SERVED:-qwen3.8-27b-mxfp4}
 PORT=${PORT:-8080}
 HSA_ENABLE_MWAITX=${HSA_ENABLE_MWAITX:-1}
 GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
-MAXSEQS=${MAXSEQS:-2}
+MAXSEQS=${MAXSEQS:-4}
 # CHUNK (2026-10-08: 2048 -> 3532). Under --mamba-cache-mode align every non-final prefill chunk is
 # floored to whole attention blocks (vLLM _mamba_block_aligned_split), after 2*(SPEC-1) = 12 tokens
 # are reserved for the draft slots. So the useful values are n x block + 12; anything between floors.
@@ -831,7 +831,9 @@ fi
 # as-is, so a hand-picked existing build is still used exactly.
 if [ -n "${R4D_KEY_EXPLICIT:-}" ]; then R4D_DIR_KEY="$R4D_KEY"; else R4D_DIR_KEY="$R4D_KEY-$STARTUP_CACHE_KEY"; fi
 if [ -z "$R4D_SO" ] && [ "${AUTO_R4D:-1}" = 1 ]; then
-  if [ ! -f "$R4D_CACHE/$R4D_DIR_KEY/r4d.so" ]; then
+  if [ ! -f "$R4D_CACHE/$R4D_DIR_KEY/r4d.so" ] && [ -n "${DRY_RUN:-}" ]; then
+    echo "[radiance] DRY_RUN: would build libr4d $R4D_DIR_KEY in $IMAGE (one time, a few minutes)"
+  elif [ ! -f "$R4D_CACHE/$R4D_DIR_KEY/r4d.so" ]; then
     echo "[radiance] building libr4d $R4D_DIR_KEY in $IMAGE -- one time, a few minutes"
     rm -rf "$R4D_CACHE/.build"
     mkdir -p "$R4D_CACHE/.build"
@@ -859,7 +861,13 @@ if [ "$R4D_RX13" = 1 ]; then
     [ -f "$MFX_PATCH" ] || die "R4D_RX13=1 but $MFX_PATCH is missing"
     MFX_KEY=$(cat "$REPO/radiance_mxfp4_fp8.hip" "$MFX_PATCH" | sha256sum | cut -c1-16)
     MFX_DIR="$CACHE/mfx-src/$MFX_KEY"
-    if [ ! -f "$MFX_DIR/radiance_mxfp4_fp8.hip" ]; then
+    if [ ! -f "$MFX_DIR/radiance_mxfp4_fp8.hip" ] && [ -n "${DRY_RUN:-}" ]; then
+      # DRY_RUN writes nothing under the cache: check the patch applies in a scratch dir instead
+      _mfx_t=$(mktemp -d); cp "$REPO/radiance_mxfp4_fp8.hip" "$_mfx_t/"
+      patch -s -d "$_mfx_t" radiance_mxfp4_fp8.hip < "$MFX_PATCH" \
+        || die "$MFX_PATCH does not apply to $REPO/radiance_mxfp4_fp8.hip"
+      rm -rf "$_mfx_t"
+    elif [ ! -f "$MFX_DIR/radiance_mxfp4_fp8.hip" ]; then
       rm -rf "$MFX_DIR.tmp"
       mkdir -p "$MFX_DIR.tmp"
       cp "$REPO/radiance_mxfp4_fp8.hip" "$MFX_DIR.tmp/"
@@ -988,17 +996,19 @@ KVOFF_BACKEND=${KVOFF_BACKEND:-native}
 #      this tier -- the only productive home for spare RAM is the primary tier.
 # KVCACHE_DISK_TIER=1 (default, the served configuration) turns the tier on at KVCACHE_DISK
 # (default /kvcache, a dedicated filesystem; 128 GiB or more recommended). 0 = RAM tier only.
-# An explicit KVOFF_DISK still wins. If the directory does not exist the boot says so loudly and
-# serves with the RAM tier only, rather than refusing to start.
+# An explicit KVOFF_DISK still wins. If the directory does not exist the launcher REFUSES TO START and
+# says how to fix it (2026-10-11): silently serving RAM-only hid a missing mount for whole sessions.
 KVCACHE_DISK_TIER="${KVCACHE_DISK_TIER:-1}"
 case "$KVCACHE_DISK_TIER" in 0|1) ;; *) die "KVCACHE_DISK_TIER must be 0 or 1, got '$KVCACHE_DISK_TIER'" ;; esac
 if [ -z "${KVOFF_DISK:-}" ] && [ "$KVCACHE_DISK_TIER" = 1 ]; then KVOFF_DISK="${KVCACHE_DISK:-/kvcache}"; fi
 KVOFF_DISK=${KVOFF_DISK:-}
 if [ -n "$KVOFF_DISK" ] && [ ! -d "$KVOFF_DISK" ]; then
-  echo "[kvcache] *** DISK TIER OFF: $KVOFF_DISK does not exist. Serving with the RAM tier only." >&2
-  echo "[kvcache]     Create a dedicated filesystem there (128 GiB or more; kv-cache/docs/SETUP.md)," >&2
-  echo "[kvcache]     install the reaper (kv-cache/ops), or set KVCACHE_DISK_TIER=0 to silence this." >&2
-  KVOFF_DISK=""
+  die "the KV-offload disk tier folder $KVOFF_DISK does not exist." \
+      "The disk tier is ON by default (KVCACHE_DISK_TIER=1). Do ONE of:" \
+      "  * create it: a dedicated filesystem of 128 GiB mounted at $KVOFF_DISK" \
+      "    (kv-cache/docs/SETUP.md has the fstab line), then install the reaper (kv-cache/ops)," \
+      "  * point the launcher at another folder:  KVCACHE_DISK=/path/to/folder" \
+      "  * or run RAM-only:                       KVCACHE_DISK_TIER=0"
 fi
 if [ -n "$KVOFF_DISK" ]; then
   # 128 GiB recommended: the reaper keeps KVCACHE_MIN_FREE_GB (24) free and works on a 5-minute
@@ -1616,7 +1626,7 @@ if [[ -n "$KVOFF_DISK" ]]; then
       KVOFF_POLICY_JSON="$KVOFF_POLICY_JSON,\"offload_prompt_only\":false"
     fi
     KVOFF_TIER_ARG="{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_extra_config\":{\"spec_name\":\"$KVOFF_SPEC_NAME\"$KVOFF_BPC_JSON$KVOFF_POLICY_JSON,\"secondary_tiers\":[{\"type\":\"fs\",\"root_dir\":\"$KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR\",\"n_read_threads\":$KVOFF_DISK_RTHREADS,\"n_write_threads\":$KVOFF_DISK_WTHREADS}]}}"
-    mkdir -p "$KVOFF_DISK/$KVOFF_DISK_SUBDIR"
+    [ -n "${DRY_RUN:-}" ] || mkdir -p "$KVOFF_DISK/$KVOFF_DISK_SUBDIR"
     echo "[kv-offload] L3 disk tier: $KVOFF_DISK -> $KVOFF_DISK_MNT/$KVOFF_DISK_SUBDIR (PYTHONHASHSEED=$KVOFF_HASHSEED," >&2
     if [[ -n "$KVOFF_BLOCKS_PER_CHUNK" ]]; then
       echo "[kv-offload]   NON-DEFAULT blocks_per_chunk=$KVOFF_BLOCKS_PER_CHUNK" >&2
@@ -1693,7 +1703,7 @@ fi
 # PROFILE_DIR=1 arms the torch profiler (vLLM 0.27 moved it from VLLM_TORCH_PROFILER_DIR to CLI
 # flags); traces land in $CACHE/prof, driven by POST /start_profile and /stop_profile.
 if [ -n "${PROFILE_DIR:-}" ]; then
-  mkdir -p "$CACHE/prof"
+  [ -n "${DRY_RUN:-}" ] || mkdir -p "$CACHE/prof"
   # PROFILE_STACK=1 adds python stacks to the trace (bigger, slower flush; use for ATTRIBUTION
   # runs, not timing runs -- with_stack inflates the very gaps being measured).
   if [ "${PROFILE_STACK:-0}" = 1 ]; then WITH_STACK=true; else WITH_STACK=false; fi
@@ -2013,7 +2023,7 @@ fi
 if [ "$KV_MEM" = "0" ]; then KV_MEM=""; KV_SRC=profiled; fi
 
 
-mkdir -p "$CACHE"/{vllm,inductor,triton,aiter}
+[ -n "${DRY_RUN:-}" ] || mkdir -p "$CACHE"/{vllm,inductor,triton,aiter}   # DRY_RUN creates nothing
 
 echo "[run] $RUNTIME $IMAGE | port $PORT | $SPEC_METHOD spec=$SPEC | model $CSNAP"
 echo "[run] gpus=$RAD_GPU_COUNT x $RAD_GPU_NAME ($RAD_GPU_MIB MiB) tp=$TP hip=$GPU_IDS sig=$RAD_GPU_SIG"

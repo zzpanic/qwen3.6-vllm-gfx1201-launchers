@@ -118,7 +118,7 @@ STARTUP_CACHE_RUN_ARGS=(-v "$STARTUP_CACHE_DIR":/startup-cache:ro,z
 startup_cache_jit_mounts() {
   local dir home="${STARTUP_CACHE_CONTAINER_HOME:-/root}"
   dir="$(realpath -m "$1")"              # container runtimes want an absolute host path
-  mkdir -p "$dir"/{comgr,tvm-ffi,tilelang}
+  [ -n "${DRY_RUN:-}" ] || mkdir -p "$dir"/{comgr,tvm-ffi,tilelang}   # DRY_RUN creates nothing
   STARTUP_CACHE_RUN_ARGS+=(-v "$dir/comgr":"$home/.cache/comgr":z
                            -v "$dir/tvm-ffi":"$home/.cache/tvm-ffi":z
                            -v "$dir/tilelang":"$home/.tilelang":z)

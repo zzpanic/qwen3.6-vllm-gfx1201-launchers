@@ -76,7 +76,7 @@ KVCACHE_DISK_TIER=0 ./startup-qwen3.8-27b-mxfp4.sh               # serve, RAM ti
 | `KVCACHE_DISK_TIER` | `1` (default) GPU → RAM → disk; `0` GPU → RAM only |
 | `KVOFF_MINIMAL` | `1` (default); `0` adds the instrumentation patches (`kvvalidate.py`, `tierreport.py`) |
 | `KVCACHE_TIER_GIB` | RAM tier, GiB. `auto` (default) applies the sizing rule above |
-| `KVCACHE_DISK` | disk tier path, default `/kvcache`. If it does not exist the boot says so and runs RAM-only |
+| `KVCACHE_DISK` | disk tier path, default `/kvcache`. If it does not exist the launcher refuses to start and says how to fix it |
 
 Confirm it came up — the `[kvcache]` lines name the build and the tier size:
 ```bash

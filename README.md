@@ -34,7 +34,7 @@ The rest of the documentation:
 | Container runtime | Podman or Docker |
 | Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
-| Disk tier | A dedicated filesystem of **128 GiB**, kept at 75% by the reaper. Optional: without it the launcher serves RAM-only. |
+| Disk tier | A dedicated filesystem of **128 GiB**, kept at 75% by the reaper. On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
 | Downloads | About 40 GiB for the checkpoints |
 
 ## Setup

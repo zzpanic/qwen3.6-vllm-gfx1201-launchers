@@ -7,7 +7,7 @@ it by default (`R4D_RX13=1` in `startup-qwen3.8-27b-mxfp4.sh`).
 All measurements were taken on one AMD Radeon AI PRO R9700 (gfx1201 / RDNA4, 32 GB) serving
 Qwen3.8-27B MXFP4, with:
 - a DFlash2 x7 drafter and fp8 KV cache;
-- `MAXSEQS=2`;
+- `MAXSEQS=4`;
 - `stilldeadcode/vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model runner);
 - October 2026.
 

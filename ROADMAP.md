@@ -2,7 +2,7 @@
 
 Where this stack stands and what is still worth doing, as of 2026-10-08. Everything below was
 measured on one AMD Radeon AI PRO R9700 (gfx1201, 32 GB) serving Qwen3.8-27B MXFP4 with a DFlash2 x7
-drafter, fp8 KV cache, `MAXSEQS=2`, `vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model runner). The launcher is
+drafter, fp8 KV cache, `MAXSEQS=4`, `vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model runner). The launcher is
 `startup-qwen3.8-27b-mxfp4.sh`; KERNEL.md, KV-CACHE.md, SYSTEM.md and BETTERBENCH-20261008.md cover the detail.
 
 ## Where we are
@@ -10,7 +10,7 @@ drafter, fp8 KV cache, `MAXSEQS=2`, `vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model
 The current shape:
 - **Kernels and GDN:** libr4d v0.5.0 + `r4d_kernels` (exact-decay GDN chunk scan, exact-wide prefill, block-table clamp),
   fp16 GDN state, lazy GDN (with the rx17 materialize fix), four 880-token blocks per prefill step
-  (CHUNK=auto, 3540 at two sequences), the MXFP4 split-K fence fix.
+  (CHUNK=auto, 3568 at four sequences), the MXFP4 split-K fence fix.
 - **Speculative decoding:** the int2 draft head plus the global top-256 target verify head.
 - **Memory:** the input embedding in pinned host RAM; the 4-bit DFlash2 drafter (-0.78 GiB, KV pool +6.5%).
 - **Correctness:** the uniform-decode guard, the DFlash2 sampling-RNG fix, canonical prefill chunks
