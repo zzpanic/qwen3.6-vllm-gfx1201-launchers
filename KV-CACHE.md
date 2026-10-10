@@ -152,6 +152,7 @@ conversations, on the reference box:
   (225 MB/s) x 80 s x 1.25, so the disk cannot fill between reaps whatever the percentage says.
 - **Hash seed.** Block filenames are content hashes, and the launcher pins `PYTHONHASHSEED` so a
   restart finds the same files. Changing it orphans the whole disk cache.
+- **Clearing it.** `./clear-cache.sh` wipes it per model, or everything except the models you keep.
 
 `kv-cache/docs/SETUP.md` has the installation steps, the fstab lines and the derivation of the
 sizing numbers.

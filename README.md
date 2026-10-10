@@ -151,6 +151,13 @@ python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # hits
 `logs/bootlog-first.txt` and `logs/bootlog-second.txt` show what a first (cold) boot and a second
 (warm) boot print.
 
+## Clearing the caches
+
+`./clear-cache.sh` lists the KV-offload disk tier (one entry per model and numerics) and the startup
+caches (compile trees, libr4d builds, boot overlays) with their sizes, and wipes all of them, the ones
+you pick, or everything except the ones you pick. It is all cache: the cost is recompute time, never
+data. It skips anything a running container has mounted; `--dry-run` deletes nothing.
+
 ## Licence
 
 Apache-2.0 for this repository's own work ([LICENSE](LICENSE)). Some third-party parts publish no
