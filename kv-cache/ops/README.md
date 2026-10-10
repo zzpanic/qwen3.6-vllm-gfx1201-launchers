@@ -12,7 +12,7 @@ external reaper the filesystem fills until it is full.
     sudo systemctl daemon-reload
     sudo systemctl enable --now kvcache-reap.timer
 
-It keeps the filesystem at or below 70% (`KVCACHE_TARGET_PCT`), oldest blocks first, and
+It keeps the filesystem at or below 75% (`KVCACHE_TARGET_PCT`), oldest blocks first, and
 leaves blocks younger than 15 minutes (`KVCACHE_MIN_AGE_MIN`) alone unless the volume passes
 90%, because a full volume fails every store. A deleted block costs a recompute of that block
 (with `patch_fs_failed_load.py` applied), not a crash. It works from `df` on the filesystem that

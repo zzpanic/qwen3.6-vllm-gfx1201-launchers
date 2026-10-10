@@ -31,7 +31,7 @@ ROOT=${KVCACHE_ROOT:-${KVCACHE_DISK:+$KVCACHE_DISK/blocks}}
 ROOT=${ROOT:-/kvcache/blocks}
 MIN_AGE_MIN=${KVCACHE_MIN_AGE_MIN:-15}      # HARD FLOOR: nothing younger is ever deleted
 MAX_AGE_HOURS=${KVCACHE_MAX_AGE_HOURS:-0}   # 0 = age rule OFF, capacity alone governs; >0 = also delete anything older
-TARGET_PCT=${KVCACHE_TARGET_PCT:-70}        # and keep %use at or below this
+TARGET_PCT=${KVCACHE_TARGET_PCT:-75}        # and keep %use at or below this
 MAX_DELETE=${KVCACHE_MAX_DELETE:-4000}      # per-run cap so no cycle runs long; next cycle continues
 EMERGENCY_PCT=${KVCACHE_EMERGENCY_PCT:-90}  # above this after Stage B, Stage C crosses MIN_AGE_MIN (0 = never)
 EMERGENCY_MIN_AGE_MIN=${KVCACHE_EMERGENCY_MIN_AGE_MIN:-1}  # Stage C still spares blocks written in the last minute

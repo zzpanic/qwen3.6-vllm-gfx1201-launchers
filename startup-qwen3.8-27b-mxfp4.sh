@@ -18,8 +18,8 @@
 #   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=auto (3540: four 880-token fp16 blocks per
 #   prefill step plus room for the other sequence's drafts), canonical prefill chunks (cached == uncached), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
 #   host RAM, EMBED_HOST=1), fp16 GDN state + lazy GDN (libr4d rx17, r4d_kernels.patch), DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
-#   head, R4D attention with 8-bit prefill legs, RAM tier sized to hold at least one full 262,144-token
-#   context (19 GiB; KVCACHE_TIER_GIB), disk tier at /kvcache (KVCACHE_DISK_TIER=1; 128 GiB or more
+#   head, R4D attention with 8-bit prefill legs, checkpoint retention, a 16 GiB RAM tier (KVCACHE_TIER_GIB),
+#   disk tier at /kvcache (KVCACHE_DISK_TIER=1; a 128 GiB volume with the reaper keeping it at 75% is
 #   recommended, and the reaper in kv-cache/ops is REQUIRED with it).
 #
 # Lineage: ggz14's serve-mxfp4.sh (codeberg.org/ggz14/radiance-vllm-mxfp4, image
@@ -87,8 +87,8 @@ Everything is an environment variable; these are the ones worth knowing.
   RADIANCE_GDN_LAZY=1       lazy GDN state snapshots (+13% KV, +7% decode)
   R4D_RX13=1                r4d_kernels: libr4d v0.5.0 + r4d_kernels.patch, MXFP4 decode band
 
-  KVCACHE_TIER_GIB=auto     RAM tier = one full MAXLEN prefill (19 GiB at 262144); off if it does not
-                            fit /dev/shm and RAM; <GiB> sets it outright
+  KVCACHE_TIER_GIB=16       RAM tier in GiB (pinned, in /dev/shm); auto = one full MAXLEN prefill at
+                            dense checkpoint bytes, off if it does not fit /dev/shm and RAM; 0 = off
   KVCACHE_DISK_TIER=1       disk tier on (0 = RAM tier only)
   KVOFF_MINIMAL=1           0 adds the KV-offload instrumentation (kvvalidate.py, tierreport.py)
   KVCACHE_DISK=/kvcache     disk tier filesystem; 128 GiB or more recommended, reaper required
@@ -1140,6 +1140,31 @@ KVOFF_CANON_RECEIPTS=${KVOFF_CANON_RECEIPTS:-1}
 # grid. Gate: prompts 14.7k/39.4k/70.6k prefilled beside a decode, re-sent: cached and exact vs a cold solo
 # prefill. Patch: kv-cache/patches/patch_canon_mixed.py. 1 = on (default).
 KVOFF_CANON_MIXED=${KVOFF_CANON_MIXED:-1}
+# Checkpoint retention (2026-10-10): keep the GDN (Mamba) and drafter checkpoints only where a turn can resume.
+# Replayed on real agent traffic, resumes land at the previous prompt's tip, the system-prompt junction, or a
+# few chunks below the tip -- nobody resumes deep in mid-history -- so dense checkpoints at every grid chunk
+# were mostly dead weight. Attention stays dense. Exactness is unchanged: retention decides what stays cached,
+# never what is computed. Effect (replay of real agent sessions, same storage): 4 agents 56% -> 77% of
+# follow-up turns served from cache, 3 agents 69% -> 85%, one agent unchanged; the same hits as dense with
+# about half the RAM and disk. Needs KVOFF_CANONICAL_CHUNKS=1.
+#   KVOFF_VRAM_RETENTION=1: the GPU prefix cache keeps states at the resumable tip, the grid points up to
+#     KVOFF_KEEP_PREFIX tokens (a long system prompt shared by every conversation) and the shared-prefix
+#     junction. Sets upstream VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0 and moves its boundaries onto the
+#     canonical grid. Patch: kv-cache/patches/patch_vram_retention.py.
+#   KVOFF_TIER_RETENTION=1: the RAM + disk tiers store checkpoint rows at the tip + a geometric backoff of
+#     KVOFF_TIER_GEO_K points below it + the system prompt + the junction. Patch: patch_tier_retention.py.
+#   KVOFF_CANON_WAIT=1: a canonical prefill chunk cut short by another request's prefill waits one step
+#     (at most KVOFF_CANON_WAIT_MAX in a row) instead of running off-grid and freezing its cache for the
+#     rest of the request. Patch: patch_canon_wait.py.
+# 1 = on (default); 0 = dense (every grid chunk), the behaviour before 2026-10-11.
+KVOFF_VRAM_RETENTION=${KVOFF_VRAM_RETENTION:-1}
+KVOFF_TIER_RETENTION=${KVOFF_TIER_RETENTION:-1}
+KVOFF_CANON_WAIT=${KVOFF_CANON_WAIT:-1}
+KVOFF_KEEP_PREFIX=${KVOFF_KEEP_PREFIX:-14080}
+KVOFF_TIER_GEO_K=${KVOFF_TIER_GEO_K:-8}
+KVOFF_CANON_WAIT_MAX=${KVOFF_CANON_WAIT_MAX:-8}
+KVOFF_VR_ENV=()
+[[ "$KVOFF_VRAM_RETENTION" == 1 ]] && KVOFF_VR_ENV=(-e VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0)
 # KVOFF_MINIMAL: 1 = apply ONLY the three behavioural KV-offload patches and skip every
 # instrumentation patch. The three are mixed-hit (crash guard + the cross-nonce
 # correctness fix), eagle-groups (stop labelling all nine KV groups as MTP draft) and
@@ -1426,29 +1451,37 @@ EOF
 # It must fit both /dev/shm and MemTotal - KVOFF_RAM_RESERVE_GIB; if it does not, offload is turned
 # off for the boot and the log says why. KVCACHE_TIER_GIB=<GiB> sets it outright (e.g. 2x MAXLEN for
 # two full-length sessions alternating); 0 disables the tier.
-KVCACHE_TIER_GIB=${KVCACHE_TIER_GIB:-auto}
+# 2026-10-11: the default is 16 GiB. With checkpoint retention a full 262,144-token resume stages ~10 GiB
+# (attention for every chunk + one checkpoint), which is the practical minimum because disk hits are
+# promoted disk -> RAM -> GPU; 16 GiB adds warm history on top (the boot line "[radiance] warm history"
+# prints what it holds). auto keeps the older dense rule below.
+KVCACHE_TIER_GIB=${KVCACHE_TIER_GIB:-16}
 KVCACHE_OFFLOAD_BPT=${KVCACHE_OFFLOAD_BPT:-$((16384 * 3 + 16384 * 6 / ${KVOFF_MAMBA_STRIDE:-1}))}
 KVOFF_RAM_RESERVE_GIB=${KVOFF_RAM_RESERVE_GIB:-15}  # engine, drafter, pinned embedding, OS
 if [[ "$EXTRA" != *--kv-offloading-size* ]]; then
-  if [ "$KVCACHE_TIER_GIB" = auto ]; then
-    KVCACHE_TIER_GIB="$(python3 - "$MAXLEN" "$KVCACHE_OFFLOAD_BPT" "$KVOFF_RAM_RESERVE_GIB" <<'PYSIZE'
+  if [ "$KVCACHE_TIER_GIB" != 0 ]; then
+    KVCACHE_TIER_GIB="$(python3 - "$MAXLEN" "$KVCACHE_OFFLOAD_BPT" "$KVOFF_RAM_RESERVE_GIB" "$KVCACHE_TIER_GIB" <<'PYSIZE'
 import math, os, re, sys
-maxlen, obpt, reserve = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+maxlen, obpt, reserve, asked = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
 G = 2**30
 def log(msg): print("[kvcache] " + msg, file=sys.stderr)
-want = math.ceil(maxlen * obpt * 1.02 / G)
 s = os.statvfs("/dev/shm"); shm = s.f_blocks * s.f_frsize / G
 mem = int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read()).group(1)) / 1048576
 cap = min(shm - 0.25, mem - reserve)
-log("tier auto: one full %s-token prefill x %d B/token = %d GiB; fits %.1f GiB (/dev/shm %.1f, MemTotal %.1f - reserve %.0f)"
-    % (format(maxlen, ","), obpt, want, cap, shm, mem, reserve))
+if asked == "auto":
+    want = math.ceil(maxlen * obpt * 1.02 / G)
+    log("tier auto: one full %s-token prefill x %d B/token = %d GiB; fits %.1f GiB (/dev/shm %.1f, MemTotal %.1f - reserve %.0f)"
+        % (format(maxlen, ","), obpt, want, cap, shm, mem, reserve))
+else:
+    want = float(asked)
+    log("tier %g GiB; fits %.1f GiB (/dev/shm %.1f, MemTotal %.1f - reserve %.0f)" % (want, cap, shm, mem, reserve))
 if want <= cap:
-    print(want)
+    print("%g" % want)
 else:
     why = ("/dev/shm is %.1f GiB -- remount it larger (kv-cache/docs/SETUP.md)" % shm) if shm - 0.25 < mem - reserve \
           else ("MemTotal %.1f GiB - reserve %.0f GiB is too little -- this box needs more RAM" % (mem, reserve))
-    log("*** KV-CACHE OFFLOAD DISABLED: a full-context tier (%d GiB) does not fit; %s." % (want, why))
-    log("    Serving WITHOUT offload. Lower MAXLEN, or set KVCACHE_TIER_GIB=<GiB> to run a smaller tier anyway.")
+    log("*** KV-CACHE OFFLOAD DISABLED: a %g GiB tier does not fit; %s." % (want, why))
+    log("    Serving WITHOUT offload. Set KVCACHE_TIER_GIB=<GiB> to a size that fits to run a smaller tier anyway.")
     print(0)
 PYSIZE
 )"
@@ -2033,6 +2066,16 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # The two knobs the patch prelude branches on are final by now; pass them exactly as the
 # container gets them (-e below), plus /house, where half of the prelude patches live.
 # Both go into the overlay key, and the builder applies the prelude with them.
+# Warm-history line inputs (patch_warm_history.py): RAM = the tier size in EXTRA; disk = the volume size x
+# the reaper's KVCACHE_TARGET_PCT (from its unit or a drop-in; 75 if none is found; KVOFF_DISK_USABLE_PCT wins).
+WARM_RAM_GIB="$(grep -oE -- "--kv-offloading-size[= ]*[0-9.]+" <<<"$EXTRA" | grep -oE "[0-9.]+$" || true)"
+WARM_DISK_BYTES=0
+if [[ -n "$KVOFF_DISK" ]]; then
+  _wd_pct=${KVOFF_DISK_USABLE_PCT:-$(grep -hoE "KVCACHE_TARGET_PCT=[0-9]+" /etc/systemd/system/kvcache-reap.service \
+    /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)}
+  _wd_size=$(df -B1 --output=size "$KVOFF_DISK" 2>/dev/null | tail -1 | tr -d " ")
+  WARM_DISK_BYTES=$(( ${_wd_size:-0} * ${_wd_pct:-75} / 100 ))
+fi
 STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL KVOFF_FS_TIER=$KVOFF_FS_TIER RADIANCE_GDN_LAZY=$GDN_LAZY"
 STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
 startup_cache_overlay
@@ -2148,6 +2191,15 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_CANONICAL_CHUNKS="$KVOFF_CANONICAL_CHUNKS" \
   -e RADIANCE_CANON_RECEIPTS="$KVOFF_CANON_RECEIPTS" \
   -e RADIANCE_CANON_MIXED="$KVOFF_CANON_MIXED" \
+  -e RADIANCE_VRAM_RETENTION="$KVOFF_VRAM_RETENTION" \
+  -e RADIANCE_VRAM_KEEP_PREFIX="$KVOFF_KEEP_PREFIX" \
+  -e RADIANCE_TIER_RETENTION="$KVOFF_TIER_RETENTION" \
+  -e RADIANCE_TIER_GEO_K="$KVOFF_TIER_GEO_K" \
+  -e RADIANCE_CANON_WAIT="$KVOFF_CANON_WAIT" \
+  -e RADIANCE_CANON_WAIT_MAX="$KVOFF_CANON_WAIT_MAX" \
+  -e RADIANCE_WARM_RAM_GIB="${WARM_RAM_GIB:-0}" \
+  -e RADIANCE_WARM_DISK_BYTES="$WARM_DISK_BYTES" \
+  ${KVOFF_VR_ENV[@]+"${KVOFF_VR_ENV[@]}"} \
   -e RADIANCE_LOOKUP_STALE_WATCH="$KVOFF_STALE_WATCH" \
   -e RADIANCE_OFFLOAD_EAGLE_GROUPS="$KVOFF_EAGLE_GROUPS" \
   -e RADIANCE_MAMBA_STORE_STRIDE="$KVOFF_MAMBA_STRIDE" \
@@ -2251,6 +2303,14 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     hp /house/patch_sched_canonical_chunks.py
     hp /house/patch_canon_receipts.py
     hp /house/patch_canon_mixed.py
+    # House patches 2026-10-10: checkpoint retention + canon wait (see KVOFF_VRAM_RETENTION). FATAL: each is
+    # inert with its env gate at 0, and a partial apply could leave a store rule without its handoff.
+    hp /house/patch_vram_retention.py
+    hp /house/patch_tier_retention.py
+    hp /house/patch_canon_wait.py
+    # House patch 2026-10-11: the warm-history boot line (instrumentation only). Non-fatal.
+    hp /house/patch_warm_history.py \
+      || echo "[radiance] WARNING: warm-history line patch did not apply"
     # Two gates, interleaved because the anchors stack (kv-cache/patches/APPLY-ORDER.txt):
     # KVOFF_MINIMAL=0 adds the instrumentation (debug sink, tier report, promotion and miss
     # counters); KVOFF_FS_TIER=1, set whenever the disk tier is on, adds the disk tier
