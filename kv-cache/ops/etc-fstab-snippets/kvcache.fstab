@@ -1,18 +1,13 @@
 # /etc/fstab lines for the KV offload tiers. Preconditions, not tuning.
 
 # 1. /dev/shm holds the RAM tier (--kv-offloading-size). NEEDED BY BOTH BUILDS.
-#    Size the tier first (docs/SETUP.md -> Sizing: at least 2x the smaller of the GPU
-#    KV pool and max-model-len, in tokens, at the offloaded bytes/token), then make
-#    /dev/shm a few GiB larger. The kernel default is 50% of RAM, which is often below
-#    the tier.
-#
-#    On the author's box: MAXLEN 204,800 -> 2 x 204,800 x 61,440 B = 23.4 GiB -> a
-#    24 GiB tier, on a 40 GB guest, with /dev/shm at 28G. The region is pre-faulted, so
+#    The RAM tier is 16 GiB by default (docs/SETUP.md -> Sizing), so make /dev/shm 20G.
+#    The kernel default is 50% of RAM, which is often below the tier. The region is pre-faulted, so
 #    a tier that does not fit fails the START with no log line -- the launcher's
-#    KVCACHE_TIER_GIB=auto checks this and disables offload rather than try.
+#    tier-size check (KVCACHE_TIER_GIB) catches this and disables offload rather than try.
 #    Verify with statvfs, never df (df rounds a tmpfs UP):
 #      python3 -c "import os;s=os.statvfs('/dev/shm');print(s.f_blocks*s.f_frsize/2**30)"
-tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=28G 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=20G 0 0
 
 # 2. EXPERIMENTAL BUILD ONLY: a dedicated filesystem for the disk tier.
 #    BY LABEL, NOT BY DEVICE: attaching a second virtual disk can rename the root disk

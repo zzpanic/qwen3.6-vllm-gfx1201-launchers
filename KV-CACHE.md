@@ -89,7 +89,7 @@ so they are not used (KERNEL.md).
 
 | Knob | Default | What it does |
 |---|---|---|
-| `KVCACHE_TIER_GIB` | `auto` | RAM tier size: one full max-context prefill (below). `<GiB>` sets it; `0` turns offload off. |
+| `KVCACHE_TIER_GIB` | `16` | RAM tier size in GiB (below). `auto` = one full max-context prefill at dense bytes; `0` turns offload off. |
 | `KVCACHE_DISK_TIER` | `1` | Disk tier on, with its three behavioural fixes (failed-load forget, fs fan-out, lookup invalidation). `0` = RAM tier only. |
 | `KVOFF_MINIMAL` | `1` | `0` adds the six instrumentation patches (counters, a debug event sink, the per-tier report) for `kvvalidate.py` and `tierreport.py`. Diagnosis only: it makes the log and `/metrics` much noisier. |
 | `KVCACHE_DISK` | `/kvcache` | Disk tier filesystem. If it does not exist, the boot says so and serves RAM-only. |
@@ -97,50 +97,59 @@ so they are not used (KERNEL.md).
 | `KVOFF_MAMBA_STRIDE` | `4` | Store the GDN state every 4th chunk instead of every chunk. A GDN layer holds one recurrent state, not a per-token history, so storing it every chunk was 4x write amplification. |
 | `KVOFF_PROMPT_ONLY` | `true` | Offload prompt tokens only, not generated ones. |
 
-### Sizing the RAM tier
+### Sizing: 16 GiB of RAM and a 128 GiB disk at 75%
 
-The tier lives in `/dev/shm` and is pinned memory, so it can never swap and every byte of it is
-permanently taken from the host. The launcher sizes it from the model's geometry:
+**Recommended: a 16 GiB RAM tier, and a 128 GiB disk-tier volume that the reaper keeps at 75% full**
+(96 GiB of cache; the other 25% is headroom the reaper keeps free). Those are the defaults
+(`KVCACHE_TIER_GIB=16`, `KVCACHE_TARGET_PCT=75`).
 
-**Bytes per offloaded token.** Every 1,648-token chunk stores 2 attention groups plus the drafter
-group, and the 6 GDN groups every 4th chunk. Each group is 16,384 B per token, so:
+**Why they are smaller than before: checkpoint retention** (2026-10-11, `KVOFF_VRAM_RETENTION`,
+`KVOFF_TIER_RETENTION`, on by default). A cached conversation is attention KV for every token plus
+GDN and drafter checkpoints. Real agent traffic only ever resumes at the end of the previous prompt,
+at the shared system prompt, or a few chunks below the end -- never deep in mid-history -- so the tiers
+now keep checkpoints only there, plus a sparse backoff, instead of at every chunk. Attention stays
+complete, and exactness is unchanged: retention decides what stays cached, never what is computed.
+On a replay of real agent sessions this kept the same hits as dense storage with about half the RAM
+and disk, and with 3-4 agents in parallel it served far more follow-up turns from cache (4 agents
+56% -> 77%, 3 agents 69% -> 85%).
 
-16,384 x (3 + 6/4) = **73,728 B/token**
+**What the sizes hold.** vLLM reports the GPU KV pool and the context per request; neither says how
+much *finished* conversation stays ready to resume. The launcher prints that on the first request
+(`[radiance] warm history ...`, with the recommended minimums for your box). At 100k-token
+conversations, on the reference box:
 
-(For checking: the engine reports 636 slots for 16 GiB, which is about 233k tokens.)
+| | with retention | dense (before) |
+|---|--:|--:|
+| GPU pool | ~314k tokens | ~166k |
+| RAM tier, 16 GiB | ~355k | ~233k |
+| disk tier, 96 GiB usable | ~2.2M | ~1.4M |
 
-**The rule: the RAM tier holds one full max-context prefill.** A conversation at the configured
-context length (`MAXLEN`) survives eviction from the GPU in full and resumes from RAM. `auto` sizes it
-as `MAXLEN` x 73,728 B, plus 2% for chunk rounding, rounded up to a whole GiB. It must fit both
-`/dev/shm` and `MemTotal - 15 GiB`; if it does not, offload is turned off for that boot and the log
-says why.
+(Measured from that line at a 12 GiB RAM tier and 66 GiB of disk, scaled to these sizes: about
+46 KB per cached token in the tiers with retention, 74 KB dense. Context per request is unchanged.)
 
-| Context (`MAXLEN`) | RAM tier |
-|---|---|
-| 100k | 8 GiB |
-| 204,800 | 15 GiB |
-| 262,144 (the default, Qwen3.8's maximum) | **19 GiB** |
+**The minimums.**
+- **RAM tier: ~10 GiB at 262,144 context** (8 GiB at 204,800). A disk hit is restored disk -> RAM ->
+  GPU, so the RAM tier must be able to stage one full-length resume (attention for every chunk plus
+  one checkpoint). Below that, the longest conversations cannot come back from disk.
+- **Disk tier: ~16 GB per concurrent agent, 32 GB at the least.** That is ~350k tokens of warm
+  history per agent, the point past which more storage stopped adding hits on real agent traffic.
+- The tier is pinned memory in `/dev/shm`, so it never swaps and is permanently taken from the host:
+  `/dev/shm` must be larger than the tier (20G for 16 GiB), and the box needs the tier plus ~15 GiB
+  for the engine, drafter and OS. If either does not fit, offload is turned off for that boot and the
+  log says why.
 
-For two full-length sessions alternating, set `KVCACHE_TIER_GIB` to twice that (37 GiB at 262,144),
-RAM permitting.
+### The disk tier and the reaper
 
-**Correction:** an earlier version of this repository used 61,440 B/token. That figure assumed a
-1-in-8 GDN store stride, but the launcher runs 1-in-4. At 61,440, a 16 GiB tier was thought to hold
-about 280k tokens; it holds about 233k.
-
-### The disk tier: 128 GiB or more, and the reaper
-
-- **Size.** A full 262,144-token conversation takes about 18 GiB on disk, and the reaper keeps
-  24 GiB free (below). **128 GiB or more is recommended**: that keeps about five full-length
-  conversations. A smaller volume works, but holds fewer, and the launcher warns below 128 GiB.
-  Use a dedicated filesystem: the tier writes with O_DIRECT, so page cache does not help it, and it
-  should not share space with anything that matters.
+- **Size.** 128 GiB with the reaper at 75% gives 96 GiB of cache, ~2.2M tokens of finished
+  conversations. A smaller volume works and holds proportionally less; the launcher warns below
+  128 GiB. Use a dedicated filesystem: the tier writes with O_DIRECT, so page cache does not help it,
+  and it should not share space with anything that matters.
 - **The reaper is mandatory.** vLLM's filesystem tier has no capacity limit and never deletes.
   Without the reaper (`kv-cache/ops/kvcache-reap.{sh,service,timer}`), the volume fills until writes
-  fail. The launcher warns at boot if `kvcache-reap.timer` is not enabled.
-- **Why 24 GiB free.** The reaper runs every 5 minutes and keeps
-  `KVCACHE_MIN_FREE_GB=24` free. That is the peak measured write rate (225 MB/s) x 80 s x 1.25, so
-  the disk cannot fill between reaps.
+  fail. It keeps the volume at or below `KVCACHE_TARGET_PCT` (75), oldest blocks first, and the
+  launcher warns at boot if `kvcache-reap.timer` is not enabled.
+- **Why it also keeps 24 GB free.** `KVCACHE_MIN_FREE_GB=24` is the peak measured write rate
+  (225 MB/s) x 80 s x 1.25, so the disk cannot fill between reaps whatever the percentage says.
 - **Hash seed.** Block filenames are content hashes, and the launcher pins `PYTHONHASHSEED` so a
   restart finds the same files. Changing it orphans the whole disk cache.
 

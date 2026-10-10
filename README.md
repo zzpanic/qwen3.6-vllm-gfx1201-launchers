@@ -32,9 +32,9 @@ The rest of the documentation:
 | GPU | One AMD Radeon AI PRO R9700 |
 | Linux | `amdgpu` loaded, `/dev/kfd` and `/dev/dri` present |
 | Container runtime | Podman or Docker |
-| Host RAM | 40 GiB recommended, 32 GiB minimum: the RAM tier is 19 GiB, pinned |
+| Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
-| Disk tier | A dedicated filesystem of **128 GiB or more**. Optional: without it the launcher serves RAM-only. |
+| Disk tier | A dedicated filesystem of **128 GiB**, kept at 75% by the reaper. Optional: without it the launcher serves RAM-only. |
 | Downloads | About 40 GiB for the checkpoints |
 
 ## Setup
@@ -60,18 +60,19 @@ hf download just1moremodel/Qwen3.8-27B-Uncensored-MXFP4-awq \
   --local-dir ~/models/Qwen3.8-27B-Uncensored-MXFP4-awq
 ```
 
-**3. Size `/dev/shm` for the RAM tier.**
+**3. Size `/dev/shm` for the RAM tier.** The tier is 16 GiB (KV-CACHE.md explains the sizing: with
+checkpoint retention, 16 GiB of RAM and a 128 GiB disk at 75% hold what dense storage needed twice that for).
 
 ```bash
-echo 'tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=28G 0 0' | sudo tee -a /etc/fstab
-sudo mount -o remount,size=28G /dev/shm
+echo 'tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=20G 0 0' | sudo tee -a /etc/fstab
+sudo mount -o remount,size=20G /dev/shm
 ```
 
 **4. Set up the disk tier and its reaper.** The reaper is required: the tier never deletes on its own.
 Skip this step and set `KVCACHE_DISK_TIER=0` to run RAM-only.
 
 ```bash
-# a dedicated filesystem of 128 GiB or more, mounted at /kvcache (kv-cache/docs/SETUP.md has fstab lines)
+# a dedicated 128 GiB filesystem, mounted at /kvcache (kv-cache/docs/SETUP.md has fstab lines)
 sudo cp kv-cache/ops/kvcache-reap.sh /usr/local/bin/
 sudo cp kv-cache/ops/kvcache-reap.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
@@ -131,7 +132,7 @@ models:
 
 How the two entries fit together:
 - **`cmdStop`** stops the container by name, so the name must match `NAME`. Otherwise a killed launcher
-  can leave the container holding the GPU and the 19 GiB `/dev/shm` region.
+  can leave the container holding the GPU and the 16 GiB `/dev/shm` region.
 - **One model at a time.** The models swap; only one fits on the card.
 - **Separate disk caches.** Each model gets its own disk-tier directory (`/kvcache/blocks/<model>`), so
   the two can never load each other's cached KV.

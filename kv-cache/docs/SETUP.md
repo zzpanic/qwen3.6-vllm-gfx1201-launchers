@@ -19,40 +19,31 @@ instrumentation to either. Everything not marked *disk build* applies to both.
 
 ```bash
 python3 -c "import os;s=os.statvfs('/dev/shm');print('/dev/shm: %.2f GiB'%(s.f_blocks*s.f_frsize/2**30))"
-sudo mount -o remount,size=32G /dev/shm          # live, no restart
+sudo mount -o remount,size=20G /dev/shm          # live, no restart
 ```
 Persist it by editing the `tmpfs /dev/shm` line in `/etc/fstab` (back the file up first).
 
 ## Sizing
 
-**The RAM tier holds one full max-model-len prefill**, at 73,728 B/token offloaded.
+**Defaults: a 16 GiB RAM tier (`KVCACHE_TIER_GIB=16`) and a 128 GiB disk-tier volume that the reaper
+keeps at 75% (`KVCACHE_TARGET_PCT=75`, 96 GiB of cache).** With checkpoint retention (on by default)
+that holds roughly what dense storage needed twice the space for. KV-CACHE.md -> "Sizing" has the
+reasoning and the numbers; the launcher prints what your tiers hold, and the recommended minimums for
+your box, on the first request (`[radiance] warm history ...`).
 
-| max-model-len | RAM tier |
-|---|---|
-| 100k | 8 GiB |
-| 204,800 | 15 GiB |
-| 262,144 (Qwen3.8's max) | 19 GiB |
+Minimums: the RAM tier must stage one full-length resume (~10 GiB at 262,144 context, 8 GiB at
+204,800), and the disk tier wants ~16 GB per concurrent agent, 32 GB at the least.
 
-**The launcher applies it for you.** `KVCACHE_TIER_GIB` defaults to `auto`: it takes the GPU pool
-from `KV_MEM` (or, if the pool is not pinned, uses `MAXLEN` alone, which can only over-size),
-computes `MAXLEN` × bytes/token (+2% for chunk rounding), rounds up to a whole GiB, and checks it
-fits both `/dev/shm` and `MemTotal − KVOFF_RAM_RESERVE_GIB` (15 GiB by default, kept for the engine,
-drafter and OS). **If it does not fit, offload is disabled for that boot** and the log says what did
-not fit. On a 40 GiB box with a 28 GiB `/dev/shm`:
+**The launcher checks the fit.** The tier must fit both `/dev/shm` and `MemTotal - KVOFF_RAM_RESERVE_GIB`
+(15 GiB by default, kept for the engine, drafter and OS). **If it does not, offload is disabled for
+that boot** and the log says what did not fit:
 
 ```
-[kvcache] tier auto: one full 262,144-token prefill x 73728 B/token = 19 GiB; fits 24.2 GiB (/dev/shm 28.0, MemTotal 39.2 - reserve 15)
+[kvcache] tier 16 GiB; fits 16.3 GiB (/dev/shm 20.0, MemTotal 31.3 - reserve 15)
 ```
 
-To run a different size anyway, set `KVCACHE_TIER_GIB=<GiB>`. An explicit size is taken as given,
-still refused if `/dev/shm` cannot hold it, and still clamped to `MemTotal − KVOFF_RAM_RESERVE_GIB`.
-
-The bytes-per-token figure is model-specific (`KVCACHE_OFFLOAD_BPT`). To derive yours: it is
-per-group bytes per token × the number of groups actually stored per chunk. Here every stored block is 27,000,832 B for 1,648 tokens = 16,384 B/token per
-group, and a chunk stores 2 attention groups + 1 draft group + 6 Mamba groups at the launcher's
-1-in-4 stride (`KVOFF_MAMBA_STRIDE=4`): 16,384 × (2 + 1 + 6/4) = 73,728 B/token. Check: the engine
-reports 636 slots for a 16 GiB tier = 141 chunks = ~233k tokens. (Earlier versions of this page used
-61,440, the 1-in-8 figure, which over-stated what a tier holds by ~20%.)
+`KVCACHE_TIER_GIB=<GiB>` sets another size; `auto` keeps the older rule (one full max-model-len prefill
+at dense bytes, 19 GiB at 262,144); `0` turns offload off.
 
 ## The reaper — *disk build*, and then required
 

@@ -1518,7 +1518,7 @@ else
       die "--kv-offloading-size $_kvoff_req GiB does not fit /dev/shm ($_kvoff_shm GiB usable).
      The region is pre-faulted, so this would fail the START with no log line.
      Fix ONE of:
-       * mount -o remount,size=28G /dev/shm   (and add it to /etc/fstab --
+       * mount -o remount,size=20G /dev/shm   (and add it to /etc/fstab --
          see kv-cache/ops/etc-fstab-snippets/kvcache.fstab; the kernel default is
          50% of RAM, which is why more RAM alone does not lift this)
        * lower --kv-offloading-size in the config.yaml entry

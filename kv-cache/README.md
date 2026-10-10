@@ -33,26 +33,17 @@ DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh             # print the command, run no
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
 | tools | `kvwatch.py`, `kvtable.py` | the same |
 
-Option 2 is the served configuration (disk tier at `/kvcache`, 128 GiB or more recommended).
+Option 2 is the served configuration (disk tier at `/kvcache`, a 128 GiB volume kept at 75%).
 Option 1 drops the disk tier and its three fixes. Either option takes `KVOFF_MINIMAL=0`, which adds
 the 6 instrumentation patches; `kvvalidate.py` and `tierreport.py` need it (without it their
 counters are not exported and they report false FAILs). It is for diagnosis, not serving: it makes
 the log and `/metrics` much noisier.
 
-**Sizing.** The RAM tier holds **one full max-model-len prefill** (73,728 B/token offloaded;
-KV-CACHE.md). The GPU pool is the `GPU KV cache size` line in the boot log;
-Qwen3.8's max-model-len tops out at 262,144.
-
-| smaller of GPU pool and max-model-len | RAM tier, at least |
-|---|---|
-| 100k | 8 GiB |
-| 204,800 | 15 GiB |
-| 262,144 (the default) | 19 GiB |
-
-`KVCACHE_TIER_GIB=auto` applies this and checks it against `/dev/shm` and system RAM (keeping
-15 GiB back). **If it does not fit, offload is disabled for that boot and the log says why.**
-Set `KVCACHE_TIER_GIB=<GiB>` to override. (Convert at the *offloaded* bytes/token — not the
-on-chip figure — per [`docs/SETUP.md`](docs/SETUP.md).)
+**Sizing.** A 16 GiB RAM tier and a 128 GiB disk kept at 75% by the reaper (the defaults). With
+checkpoint retention that holds what dense storage needed about twice the space for; see
+[KV-CACHE.md](../KV-CACHE.md) -> "Sizing" and [`docs/SETUP.md`](docs/SETUP.md). The launcher checks the
+RAM tier against `/dev/shm` and system RAM (keeping 15 GiB back); **if it does not fit, offload is
+disabled for that boot and the log says why.**
 
 ## The tier table
 
