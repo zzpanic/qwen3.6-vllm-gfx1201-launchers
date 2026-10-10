@@ -74,7 +74,8 @@ Everything is an environment variable; these are the ones worth knowing.
                             detected cards can fill (head counts rule out 3, 6 and 12)
   GPUS=0,1                  HIP indices to serve on; defaults to every card with enough VRAM
   MIN_GPU_MIB=8192          VRAM floor for "usable"; excludes iGPUs from the count
-  KV_MEM=11500000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1; auto uses a pin
+  KV_MEM=12250000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1 (11.5e9 with the
+                            FP8 drafter or mtp); auto uses a pin
                             measured for your hardware if
                             kv-profiles.tsv has one and lets vLLM profile if not; <bytes> pins
                             explicitly; 0 forces profiling. ./calibrate-kv.sh measures a pin
@@ -494,8 +495,7 @@ STARTUP_CACHE_DEFER_OVERLAY=1
 # shellcheck source=startup-cache/startup-cache.sh
 . "$STARTUP_CACHE/startup-cache.sh"
 CACHE=${CACHE:-$HOME/.radiance-cache-w4a8-$STARTUP_CACHE_KEY$CACHE_SUF}
-startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
-startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
+# (startup_cache_jit_mounts / startup_cache_reap run once CACHE is final: after the -tp1s and drafter terms)
 
 # --- multimodal budget knobs (ported from llama-swap-qwen36-27b.sh, 2026-09-05) ---------
 # This launcher had NONE of these, and the checkpoint was never capped. The MXFP4
@@ -546,6 +546,14 @@ ROCM_ENV=()
 if [ -n "${GPU_MAX_HW_QUEUES:-}" ]; then ROCM_ENV+=(-e "GPU_MAX_HW_QUEUES=$GPU_MAX_HW_QUEUES"); fi
 if [ -n "${HSA_ENABLE_MWAITX:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_MWAITX=$HSA_ENABLE_MWAITX"); fi
 if [ -n "${HSA_ENABLE_INTERRUPT:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_INTERRUPT=$HSA_ENABLE_INTERRUPT"); fi
+# DFlash2 W4A16 drafter knobs (each defaults to on inside its module; set to 0 for an A/B) and the
+# prompt-lookup draft knobs (RADIANCE_LOOKUP_DRAFT=0 turns it off). Passed only when set.
+for _v in RADIANCE_W4A16_TILES RADIANCE_W4A16_SPLITK RADIANCE_W4A16_TILED RADIANCE_W4A16_SILU \
+          RADIANCE_DFLASH_KV_W4 RADIANCE_DFLASH_CONV_W4 RADIANCE_ATTN_DRAFTER_TUNE \
+          RADIANCE_LOOKUP_DRAFT RADIANCE_LOOKUP_ENTER RADIANCE_LOOKUP_STAY RADIANCE_LOOKUP_HOT \
+          RADIANCE_LOOKUP_MIN_DIST RADIANCE_LOOKUP_STATS; do
+  if [ -n "${!_v:-}" ]; then ROCM_ENV+=(-e "$_v=${!_v}"); fi
+done
 # prompt_logprobs allocates a ~1-1.7 GiB prompt x vocab logits transient that vLLM does not reserve
 # for, and KV is sized to eat everything else -- 0.97 and even 0.92 OOM the engine on ppl.py. Use
 # GPU_UTIL=0.75 for perplexity work, 0.98 for throughput.
@@ -560,7 +568,10 @@ GPU_UTIL=${GPU_UTIL:-0.97}
 # a 2048x2048 image: 31.28 of 31.86 GiB (0.58 spare). The bigger prefill step costs ~0.3 GB of
 # activations, hence 11.5e9 rather than fp32/2048's 11.8e9 (329,035 tokens, 31.23 GiB peak).
 # With EMBED_HOST=0 the embedding is back on the card: lower this by ~2.5e9 or the boot OOMs.
-KV_MEM=${KV_MEM:-11500000000}
+# 2026-10-11: the default depends on the drafter and is resolved once DRAFTER is known (below): the
+# DFlash2-W4A16 drafter frees 0.78 GiB of VRAM against the FP8 one, so it gets 12.25e9 (~353,000 tokens,
+# +6.5%); the FP8 drafter keeps 11.5e9. An explicit KV_MEM wins.
+KV_MEM=${KV_MEM:-}
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
 #             speculative position, so RADIANCE_DYNAMIC_DRAFT can stop the loop early.
@@ -591,7 +602,24 @@ GPU_IDS=${GPU_IDS:-$RAD_GPU_INDICES}
 # `set -u` that made an un-exported MODELS an "unbound variable" abort rather than a default.
 MODELS="$(realpath -m "${MODELS:-$HOME/models}")"   # where ggz14 setup-mxfp4.sh writes them
 # Drafter checkpoint for SPEC_METHOD=dflash. Must live under MODELS -- only MODELS is mounted.
-DRAFTER=${DRAFTER:-$MODELS/Qwen3.8-27B-DFlash2-FP8}
+# 2026-10-11: default is the 4-bit DFlash2 drafter (syvai/Qwen3.8-27B-DFlash2-W4A16, 1.2 GB on disk vs 2.0):
+# 0.78 GiB less VRAM, which goes to the KV pool, at the same acceptance (tokens per update 4.529 vs the FP8
+# drafter's 4.516, inside the 4.39-4.57 run-to-run band). It needs the five W4A16 drafter patches in the
+# prelude (deferred-quant load, Triton tiles, split-KV drafter attention, fusions) -- see KERNEL.md.
+# DRAFTER=$MODELS/Qwen3.8-27B-DFlash2-FP8 restores the FP8 drafter (and its 11.5e9 KV pin).
+DRAFTER=${DRAFTER:-$MODELS/Qwen3.8-27B-DFlash2-W4A16}
+case "$SPEC_METHOD:$DRAFTER" in
+  dflash:*W4A16*) KV_MEM=${KV_MEM:-12250000000}
+           # torch.compile does not key on the drafter quantisation, and the W4A16 patches change the
+           # drafter params (tiled layout) and the traced graph (fusions): its own compile cache.
+           CACHE_SUF="$CACHE_SUF-dw4-sk-fu"
+           [ -n "${CACHE_EXPLICIT:-}" ] || CACHE="$CACHE-dw4-sk-fu" ;;
+  *)       KV_MEM=${KV_MEM:-11500000000} ;;   # FP8 drafter, or mtp (not re-measured: same as before)
+esac
+# CACHE is final only here (the -tp1s and drafter terms above), so the startup-cache helpers run here: the
+# reaper must be told the tree this boot really uses, or it can prune it as a stale sibling.
+startup_cache_jit_mounts "$CACHE"   # comgr / tvm-ffi / tilelang (startup-cache/README.md)
+startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"   # stale trees (startup-cache/README.md)
 # The drafter's own attention backend. It has to support FULL cuda graphs or vLLM logs "running the
 # draft eagerly" and the single-pass draft loses its graph -- which is the entire point of dflash.
 # TRITON_ATTN does; R4D is the target's backend and is what mtp uses for the drafter too.
@@ -1880,7 +1908,10 @@ if [ "$SPEC_METHOD" = dflash ]; then
     echo "no dflash drafter at $DRAFTER" >&2
     echo >&2
     echo "Fetch it (2 GiB), or let ./setup-mxfp4.sh do it:" >&2
-    echo "  hf download tcclaviger/Qwen3.8-27B-DFlash2-FP8 --local-dir $DRAFTER" >&2
+    case "$DRAFTER" in
+      *W4A16*) echo "  hf download syvai/Qwen3.8-27B-DFlash2-W4A16 --local-dir $DRAFTER" >&2 ;;
+      *)       echo "  hf download tcclaviger/Qwen3.8-27B-DFlash2-FP8 --local-dir $DRAFTER" >&2 ;;
+    esac
     echo >&2
     echo "Or serve without it, using the MTP head inside the target checkpoint instead:" >&2
     echo "  SPEC_METHOD=mtp ./serve-mxfp4.sh" >&2
@@ -2327,6 +2358,22 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # w4a16 kernel) FAST_DRAFT=1 armed it, it freed the DFlash2 drafter weights and the context-KV
     # precompute crashed at load (IndexError, boot loop). The launcher passes RADIANCE_W4=0. FATAL.
     hp /house/patch_w4_switch.py
+    # House patches 2026-10-09 for the DFlash2-W4A16 drafter (the default DRAFTER). Each is inert for the
+    # FP8 drafter: they touch only W4A16 layers or the drafter call shape.
+    #  - deferred-quant: the fused context-KV build reads a drafter qkv weight a compressed-tensors W4A16
+    #    checkpoint does not have; defer it and recover the dense rows through the layer. Non-fatal.
+    #  - SlyBase W4A16 Triton tile table + split-K + tiled weight layout. FATAL (half-patched kernel file).
+    #  - SlyBase split-KV launch for the drafter attention; any other call goes to vLLM. Non-fatal.
+    #  - SlyBase fusions: gate_up+silu, context-KV and conv projection on the int4 rows. FATAL.
+    #  - SlyBase prompt-lookup override of the draft for verbatim copies (lossless). Non-fatal.
+    hp /house/patch_dflash_deferred_quant.py \
+      || echo "[radiance] WARNING: dflash deferred-quant patch did not apply"
+    hp /house/patch_w4a16_tiles.py
+    hp /house/patch_attn_drafter.py \
+      || echo "[radiance] WARNING: drafter attention patch did not apply"
+    hp /house/patch_w4a16_fuse.py
+    hp /house/patch_lookup_draft.py \
+      || echo "[radiance] WARNING: lookup draft patch did not apply"
     # House patches 2026-10-06, from SlyBase (vLLM 0.29 originals, anchors identical in 0.27.1), non-fatal:
     #  - load-time max_split_size_mb scope on ROCm: vLLM gates it on is_cuda(), so the freed 2.37 GiB
     #    drafter embed placeholder segment was left to be carved into stranded long-lived blocks

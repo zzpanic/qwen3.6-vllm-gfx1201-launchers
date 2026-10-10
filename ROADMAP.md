@@ -12,7 +12,7 @@ The current shape:
   fp16 GDN state, lazy GDN (with the rx17 materialize fix), four 880-token blocks per prefill step
   (CHUNK=auto, 3540 at two sequences), the MXFP4 split-K fence fix.
 - **Speculative decoding:** the int2 draft head plus the global top-256 target verify head.
-- **Memory:** the input embedding in pinned host RAM.
+- **Memory:** the input embedding in pinned host RAM; the 4-bit DFlash2 drafter (-0.78 GiB, KV pool +6.5%).
 - **Correctness:** the uniform-decode guard, the DFlash2 sampling-RNG fix, canonical prefill chunks
   (cached == uncached at fp16 and fp32, KV-CACHE.md) and the 1-token prefill fix.
 - **ROCm allocator:** the load-time allocator split.

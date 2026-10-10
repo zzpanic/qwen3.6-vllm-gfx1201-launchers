@@ -48,11 +48,14 @@ git clone https://github.com/GGZ14/vllm-mxfp4 radiance-vllm-mxfp4
 ```
 
 **2. Download the models into `~/models`.** ggz14's `setup-mxfp4.sh` fetches AMD's MXFP4 checkpoint,
-rewrites its MTP head to fp8, and fetches the DFlash2 drafter. The second model is optional: it is an
-uncensored sibling of the same architecture that ships its MTP head already in fp8.
+rewrites its MTP head to fp8, and fetches the FP8 DFlash2 drafter. The launcher's default drafter is the
+4-bit one (`syvai/Qwen3.8-27B-DFlash2-W4A16`, 0.78 GiB less VRAM at the same acceptance; KERNEL.md), so
+fetch that too, or set `DRAFTER=~/models/Qwen3.8-27B-DFlash2-FP8`. The uncensored model is optional: a
+sibling of the same architecture that ships its MTP head already in fp8.
 
 ```bash
 (cd radiance-vllm-mxfp4 && ./setup-mxfp4.sh)
+hf download syvai/Qwen3.8-27B-DFlash2-W4A16 --local-dir ~/models/Qwen3.8-27B-DFlash2-W4A16
 hf download just1moremodel/Qwen3.8-27B-Uncensored-MXFP4-awq \
   --local-dir ~/models/Qwen3.8-27B-Uncensored-MXFP4-awq
 ```
@@ -86,6 +89,10 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
 >
 > If you pin `KVOFF_DISK_SUBDIR` / `KVCACHE_DISK_SUBDIR` yourself, the launcher cannot separate them: wipe
 > that directory whenever you switch `MAMBA_SSM_FP16`, or the tier will be read with the wrong geometry.
+>
+> **Upgrading from a release before 2026-10-11:** canonical prefill chunks (cached == uncached) write a
+> new tree, `blocks/<model>-f16ssm-canon`. Rows in the old `blocks/<model>-f16ssm` were computed on a
+> different chunk grid and are never read again; wipe it to get the space back.
 
 **5. Check the configuration.** This prints the container command and runs nothing. The log lines
 tagged `[kvcache]` show the RAM tier and disk tier the launcher chose.

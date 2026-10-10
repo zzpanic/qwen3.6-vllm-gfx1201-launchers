@@ -22,6 +22,7 @@ Qwen3.8-27B MXFP4, with:
 | `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively (fp16 is the default since 2026-10-08). | Same arithmetic |
 | Lazy-GDN materialize: no stash needed when nothing is replayed (rx17) | `r4d_kernels.patch` | Fixes garbage after an offload-tier resume whenever a prefill step spans more than one block -- what broke fp16 state and any CHUNK above one block. Enables fp16 + CHUNK=3532. | Resume through the tier bit-identical to cold at fp32 4956 and fp16 3532; decode path unchanged |
 | MXFP4 W4A8 decode band, M 9-64 | `radiance_mxfp4_fp8.patch` | o_proj/out_proj -5..-6% kernel time with two concurrent sequences | Single-stream (M <= 8) untouched, byte for byte |
+| DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (five patches + two modules) | Drafter VRAM -0.78 GiB (KV pool +6.5%); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
 | MXFP4 split-K reduction fence (2026-10-11) | `radiance_mxfp4_fp8.patch` | Correctness: the split-K decode reduction could read partial sums before other threads had stored them (rare, load-dependent wrong output). Same fix as SlyBase 1.1.1. | Fixes a race; the arithmetic is unchanged |
 
 **Released configuration** (2026-10-08: fp16 GDN state, CHUNK=3532, libr4d rx17), BetterBench 0.6.0,
@@ -163,6 +164,34 @@ The launcher patches a **copy** of `radiance_mxfp4_fp8.hip` from your ggz14 clon
 of both files. Your clone is never edited, and if ggz14 changes the file and the patch stops applying,
 the boot stops and says so instead of compiling something stale.
 
+## The 4-bit DFlash2 drafter (default since 2026-10-11)
+
+`syvai/Qwen3.8-27B-DFlash2-W4A16` is the DFlash2 drafter quantised to 4-bit weights (compressed-tensors
+W4A16). It is 1.2 GB on disk against the FP8 drafter's 2.0, frees 0.78 GiB of VRAM, and the launcher
+gives that to the KV pool (`KV_MEM` 11.5e9 -> 12.25e9, ~331,800 -> ~353,400 tokens). Five patches make it
+load and run fast; each is inert for the FP8 drafter:
+
+| Patch | What it does | Source |
+|---|---|---|
+| `patch_dflash_deferred_quant.py` | DFlash2's fused context-KV build reads a raw `qkv_proj.weight`, which a W4A16 checkpoint does not have (boot crash). Defers the build until the weights are processed and recovers the dense rows through the layer itself. | this repository |
+| `patch_w4a16_tiles.py` | Per-shape Triton tile table, split-K and a tiled weight layout for the drafter GEMMs: 3.29 -> 1.74 ms per decode step. | SlyBase |
+| `patch_attn_drafter.py` + `radiance_attn_drafter.py` | Split-KV launch for the drafter's sliding-window attention: 1.37 -> 0.21 ms per step at ~119k context. | SlyBase |
+| `patch_w4a16_fuse.py` | gate_up + SiLU fused, context-KV and conv projection on the int4 rows (no bf16 copies). | SlyBase, re-anchored here |
+| `patch_lookup_draft.py` + `radiance_lookup_draft.py` | When the text being written is a verbatim copy of the prompt, propose the copy instead of the drafter's guess (entry rule 16/6/5, picked by a replay of real agent sessions). Verification is unchanged, so it is lossless. `RADIANCE_LOOKUP_DRAFT=0` turns it off. | SlyBase |
+
+Measured on one R9700, BetterBench 0.6.0 decode, 20 passes, same session:
+
+| | FP8 drafter | W4A16 drafter + all five |
+|---|--:|--:|
+| tokens per update (acceptance) | 4.565 | 4.562 |
+| decode step | 35.9 ms | 33.9 ms |
+| weighted decode | 130.5 t/s | 136.0 t/s |
+| VRAM after boot | 33.59 GB | 32.74 GB (W4A16 alone) |
+
+Tokens per update across FP8 runs spans 4.39-4.57 from compile to compile, so "same acceptance" means
+inside that band. On verbatim-copy tasks the lookup draft raises it from ~4.2 to ~7.6 tokens per update.
+`DRAFTER=<models>/Qwen3.8-27B-DFlash2-FP8` restores the FP8 drafter and its 11.5e9 KV pin.
+
 ## Turned down after measurement
 
 | Candidate | Source | Result | Why it stays out |
@@ -170,7 +199,6 @@ the boot stops and says so instead of compiling something stale.
 | libr4d `gemm_mxfp4a8_nt_m64` for the decode band | libr4d main | **-7.4% decode** | radiance's own decode kernel is already at the memory-bandwidth roof |
 | PyTorch TunableOp on the bf16 GEMMs | PyTorch | No gain; the drafter's small GEMMs got slower | lm_head is bandwidth-bound; nothing to tune |
 | `RADIANCE_SKINNY_GEMM=all` | ggz14 (paro branch) | Drafter acceptance fell by more than the kernel gained (ggz14's measurement) | Net loss |
-| fp16 GDN state (`MAMBA_SSM_FP16=1`) | ggz14 profile | +4.1% KV, but a resume restored from the offload tier answers garbage | Off until the offload path is bit-exact (ROADMAP.md section 1) |
 | ParoQuant / MXFP6 kernels | ggz14 Codeberg main | Need different checkpoints | Not applicable to this model file |
 
 **The 2026-10-06 sweep.** Every kernel file in 25 repositories in the libr4d / radiance ecosystem was
@@ -222,6 +250,8 @@ The patch headers carry the full provenance; `r4d_kernels/README.md` has the tab
 - deadcode's engine kernels are Apache-2.0.
 - Crssz/r4dx's DSPLIT is MIT; its notice ships as `r4d_kernels/LICENSE.r4dx`.
 - This repository's own changes are Apache-2.0.
+- SlyBase's README states its licence is "same as upstream vllm-radiance" (Apache-2.0) but ships no
+  LICENSE file; the five SlyBase-derived patches keep their provenance headers.
 - libr4d v0.5.0 (StillDeadcode), ggz14's radiance extras and MXFP4 kernel, J-Nova's rx12 rebase, and
   SlyBase's decode table publish **no licence**. They are redistributed here with attribution and
   without a grant. If you are one of those authors and want something changed or removed, open an
