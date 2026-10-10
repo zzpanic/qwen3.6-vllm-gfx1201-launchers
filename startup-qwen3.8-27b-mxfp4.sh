@@ -15,8 +15,8 @@
 #   DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh    print the container command, run nothing
 #
 # DEFAULTS = THE SERVED CONFIGURATION (2026-10-08), on one R9700 with 40 GiB host RAM:
-#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=3532 (four 880-token fp16 blocks per
-#   prefill step), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
+#   262,144-token context (Qwen3.8's maximum), MAXSEQS=2, CHUNK=auto (3540: four 880-token fp16 blocks per
+#   prefill step plus room for the other sequence's drafts), canonical prefill chunks (cached == uncached), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
 #   host RAM, EMBED_HOST=1), fp16 GDN state + lazy GDN (libr4d rx17, r4d_kernels.patch), DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
 #   head, R4D attention with 8-bit prefill legs, RAM tier sized to hold at least one full 262,144-token
 #   context (19 GiB; KVCACHE_TIER_GIB), disk tier at /kvcache (KVCACHE_DISK_TIER=1; 128 GiB or more
@@ -66,7 +66,8 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC=7 dflash / 4 mtp     speculative depth
   MAXSEQS=2                 max concurrent sequences
   MAXLEN=262144             max context length (Qwen3.8's maximum)
-  CHUNK=3532                prefill chunk (--max-num-batched-tokens); keep it n x block + 12
+  CHUNK=auto                prefill chunk (--max-num-batched-tokens); auto = the canonical grid
+                            (4 fp16 / 2 fp32 blocks) + MAXSEQS x (SPEC-1) + (MAXSEQS-1) x (SPEC+1)
   GPU_UTIL=0.97             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
@@ -266,7 +267,12 @@ MAXSEQS=${MAXSEQS:-2}
 # More than one block per step REQUIRES libr4d rx17 (R4D_RX13=1 with this repo's r4d_kernels.patch):
 # older lazy-GDN kernels skip the state migration on a multi-block step after an offload-tier resume
 # and serve garbage. KV_MEM must be re-measured for any other CHUNK (the prefill transient moves).
-CHUNK=${CHUNK:-3532}
+# 2026-10-11: CHUNK=auto (the default) sizes the budget for canonical prefill chunks (KVOFF_CANONICAL_CHUNKS):
+# the grid (4 x 880 fp16 / 2 x 1648 fp32 = 3520 / 3296 tokens) + the 2*(SPEC-1)-style draft reserve for every
+# sequence (MAXSEQS x (SPEC-1)) + one verify batch (SPEC+1 rows) for each OTHER sequence, so a grid chunk can run
+# whole beside the other sequences' decodes and still be cached (KVOFF_CANON_MIXED). MAXSEQS 2 / SPEC 7 -> 3540,
+# MAXSEQS 4 -> 3568 (the gated production value). Resolved below, once SPEC is known.
+CHUNK=${CHUNK:-auto}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -613,6 +619,10 @@ DRAFT_ATTN=${DRAFT_ATTN:-TRITON_ATTN}
 #   efficiency (steps 52-57 -> 46-47 ms, aggregate 391-413 -> 444-461 t/s). Lossless by
 #   construction -- verification preserves the distribution at any proposal length.
 if [ "$SPEC_METHOD" = dflash ]; then SPEC=${SPEC:-7}; else SPEC=${SPEC:-4}; fi
+if [ "$CHUNK" = auto ]; then
+  if [ "$MAMBA_SSM_FP16" = 1 ]; then _grid=3520; else _grid=3296; fi
+  CHUNK=$(( _grid + ${MAXSEQS:-8} * (SPEC - 1) + (${MAXSEQS:-8} - 1) * (SPEC + 1) ))
+fi
 # The tuned drafter stack. The right default is NOT the same for both methods:
 #   mtp    -- 1. The 2-bit draft head with an exact rerank is a straight win here (+6.5% decode).
 #   dflash -- 1 as of 2026-08-27, WITH RERANK=64 (below). It used to be 0: FAST_DRAFT=1 crashed
@@ -1080,6 +1090,28 @@ KVOFF_FS_FAILED_LOAD_FORGET=${KVOFF_FS_FAILED_LOAD_FORGET:-1}
 # Cost: one extra forward step for those prompts. 1 = fix (default), 0 = upstream.
 # Patch: kv-cache/patch_sched_align_last_block.py.
 KVOFF_ALIGN_LAST_BLOCK=${KVOFF_ALIGN_LAST_BLOCK:-1}
+# KVOFF_CANONICAL_CHUNKS (2026-10-10): make a cached request bit-identical to an uncached one, at fp16 AND
+# fp32 GDN state. A block's KV/state depends on the LENGTH of the prefill chunk it was computed in, so a
+# prefix hit must resume on, and only reuse blocks from, the same chunk grid a cold prefill uses (S = token
+# budget floored to a block). Drops vLLM's shared-prefix junction stop, adds a cold-grid stop, floors hits to
+# the grid, caches (GPU + offload store) only blocks computed in a full grid chunk, refuses off-grid tier hits.
+# Without it a cached resume differs from a cold prefill in the low bits (fp16 state diverges more, but it is
+# the same mechanism at fp32). Gate: turnbench 21/21 bit-exact at fp16 and fp32. Cost: prompts shorter than
+# the grid (~3.5k tokens) never prefix-hit. Exactness is for SOLO requests: concurrent batching changes the
+# numerics either way. 1 = on (default), 0 = upstream. Patch: kv-cache/patches/patch_sched_canonical_chunks.py.
+KVOFF_CANONICAL_CHUNKS=${KVOFF_CANONICAL_CHUNKS:-1}
+# KVOFF_CANON_RECEIPTS (hunk 5): the drafter (EAGLE) group caches ONE block past the canonical end again, as a
+# receipt-only block: vLLM peeks it on a hit to verify the next draft and drops it; it is never read as KV.
+# Without it every follow-up turn resumes one whole grid chunk early (~-34% recompute on a real agent replay).
+# Needs KVOFF_CANONICAL_CHUNKS=1. Patch: kv-cache/patches/patch_canon_receipts.py. 1 = on (default).
+KVOFF_CANON_RECEIPTS=${KVOFF_CANON_RECEIPTS:-1}
+# KVOFF_CANON_MIXED (hunk 6): with a step budget above the grid (CHUNK=auto) a grid chunk can share its step
+# with the other sequences' speculative decodes and still count as canonical (the kernels on that path are
+# row-invariant). Without it a prompt prefilled during another request's decode is never cached. A draft-less
+# decode or another prefill in the step still freezes caching for that request. Inert when CHUNK equals the
+# grid. Gate: prompts 14.7k/39.4k/70.6k prefilled beside a decode, re-sent: cached and exact vs a cold solo
+# prefill. Patch: kv-cache/patches/patch_canon_mixed.py. 1 = on (default).
+KVOFF_CANON_MIXED=${KVOFF_CANON_MIXED:-1}
 # KVOFF_MINIMAL: 1 = apply ONLY the three behavioural KV-offload patches and skip every
 # instrumentation patch. The three are mixed-hit (crash guard + the cross-nonce
 # correctness fix), eagle-groups (stop labelling all nine KV groups as MTP draft) and
@@ -1179,6 +1211,9 @@ _kvc_snap="${SNAP:-$MODELS/Qwen3.8-27B-MXFP4-mtpfp8}"
 # The tier's on-disk config.json is written once and is NOT rewritten when the block geometry changes,
 # and fp16 GDN state halves the block (1648 -> 880), so each state width gets its own tree.
 _kvc_geom=""; [ "$MAMBA_SSM_FP16" = 1 ] && _kvc_geom="-f16ssm"
+# Canonical chunks change which bytes a row holds (2026-10-11), so canonical rows get their own tree too:
+# rows written without them would otherwise be served as hits and break cached == uncached.
+[ "$KVOFF_CANONICAL_CHUNKS" = 1 ] && _kvc_geom="$_kvc_geom-canon"
 KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")$_kvc_geom}}
 
 # KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
@@ -2079,6 +2114,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_LOOKUP_INVALIDATE="$KVOFF_LOOKUP_INVALIDATE" \
   -e RADIANCE_FS_FAILED_LOAD_FORGET="$KVOFF_FS_FAILED_LOAD_FORGET" \
   -e RADIANCE_ALIGN_PROMPT_LAST_BLOCK="$KVOFF_ALIGN_LAST_BLOCK" \
+  -e RADIANCE_CANONICAL_CHUNKS="$KVOFF_CANONICAL_CHUNKS" \
+  -e RADIANCE_CANON_RECEIPTS="$KVOFF_CANON_RECEIPTS" \
+  -e RADIANCE_CANON_MIXED="$KVOFF_CANON_MIXED" \
   -e RADIANCE_LOOKUP_STALE_WATCH="$KVOFF_STALE_WATCH" \
   -e RADIANCE_OFFLOAD_EAGLE_GROUPS="$KVOFF_EAGLE_GROUPS" \
   -e RADIANCE_MAMBA_STORE_STRIDE="$KVOFF_MAMBA_STRIDE" \
@@ -2176,6 +2214,12 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # it a cached multi-turn resume can differ from a cold prefill in the low bits.
     hp /house/patch_sched_align_last_block.py \
       || echo "[radiance] WARNING: last-block align did NOT apply -- cached turns can differ from cold in the low bits"
+    # House patches 2026-10-10: canonical prefill chunks, hunks 1-4, 5 (receipts) and 6 (mixed steps); see
+    # KVOFF_CANONICAL_CHUNKS. FATAL: a partial apply would leave some caching paths uncapped. Each is inert
+    # with its env gate at 0.
+    hp /house/patch_sched_canonical_chunks.py
+    hp /house/patch_canon_receipts.py
+    hp /house/patch_canon_mixed.py
     # Two gates, interleaved because the anchors stack (kv-cache/patches/APPLY-ORDER.txt):
     # KVOFF_MINIMAL=0 adds the instrumentation (debug sink, tier report, promotion and miss
     # counters); KVOFF_FS_TIER=1, set whenever the disk tier is on, adds the disk tier
@@ -2296,6 +2340,10 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # silently (it hid a never-armed verify head). Non-fatal.
     hp /house/patch_verify_head_loud.py \
       || echo "[radiance] WARNING: verify-head-loud patch did not apply"
+    # House patch 2026-10-09, from SlyBase patch_short_prefill: a 1-token prefill (a fresh 1-token prompt, or
+    # a cached prefix with one uncomputed token) took the GDN recurrent decode path against the wrong state.
+    # Plain vLLM bug (split_decodes_and_prefills early return). FATAL.
+    hp /house/patch_short_prefill.py
     echo "[radiance] vLLM patches applied (each patch prints only on failure)"
     # END patch prelude
     fi

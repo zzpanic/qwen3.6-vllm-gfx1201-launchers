@@ -20,9 +20,39 @@
 # VALIDATION (2026-10-06, one R9700): SlyBase's cells -5..-6% kernel time on o_proj/out_proj at M 16/24;
 # served under the final BetterBench (c2 aggregate 202.0 t/s) and the two-agent soak, 0 faults.
 #
---- a/radiance_mxfp4_fp8.hip	2026-10-06 15:52:51.786213298 +1000
-+++ b/radiance_mxfp4_fp8.hip	2026-10-06 15:52:51.789213364 +1000
-@@ -1189,6 +1189,17 @@
+# SPLIT-K FENCE FIX (2026-10-09, correctness; same fix as SlyBase 1.1.1 b37a2e8): the split-K decode reduction
+# fenced only on thread 0 before bumping the per-tile counter. A fence orders only the executing thread's stores
+# and __syncthreads is workgroup scope, so the reducing block on another CU could read partial sums the other
+# threads had not drained yet (rare, load-dependent wrong output). Now every thread fences, the counter bump is
+# an agent-scope acq_rel atomic, and the reducing block fences (acquire) before it reads the partials.
+#
+--- a/radiance_mxfp4_fp8.hip
++++ b/radiance_mxfp4_fp8.hip
+@@ -988,14 +988,19 @@
+   // (-5.5% on gate_up to -29% on gdn.out) because the partials are still in cache when the
+   // reduction reads them. The last block resets the counter, leaving it zeroed for the next
+   // launch; launches on one stream are serialised, so no separate clearing pass is needed.
++  // House fix 2026-10-09 (SlyBase 1.1.1 b37a2e8): release on EVERY thread. A fence orders only the
++  // executing thread stores and __syncthreads is workgroup scope, so a fence on thread 0 alone let the
++  // reducer on another CU read partials the other threads had not drained yet. Then an agent-scope
++  // acq_rel counter bump, and an acquire on the reducing block before it reads the partials.
++  __threadfence();
+   __syncthreads();
+-  if (tid == 0) {
+-    __threadfence();
+-    s_last = (atomicAdd(&cnt[blockIdx.x], 1) == DKS - 1);
+-  }
++  if (tid == 0)
++    s_last = (__hip_atomic_fetch_add(&cnt[blockIdx.x], 1, __ATOMIC_ACQ_REL,
++                                     __HIP_MEMORY_SCOPE_AGENT) == DKS - 1);
+   __syncthreads();
+   if (!s_last) return;
+   if (tid == 0) cnt[blockIdx.x] = 0;
++  __threadfence();
+ 
+   const int nhi = min(n0 + BND, N);
+   for (int nn = n0 + tid; nn < nhi; nn += DNTHREADS) {
+@@ -1189,6 +1194,17 @@
      //     (down goes non-monotonic: at M >= 96 the wide split + BK=64's occupancy wins,
      //      d4/b64 111.8 vs d2/b128 153.4 at M=128)
      //   nblk ~40, K <  6144 (out: 24 k-slabs)  -> dks1/bk128 (few slabs, splits never pay)
@@ -40,7 +70,7 @@
      int dks, bkx;
      if (M > 64) {
        if (dec_nblk >= 110)      { dks = 1; bkx = 64; }
-@@ -1197,6 +1208,19 @@
+@@ -1197,6 +1213,19 @@
        else if (K >= 6144)       { if (M <= 80) { dks = 2; bkx = 128; }
                                    else         { dks = DEC_KS; bkx = 64; } }
        else                      { dks = 1; bkx = 128; }

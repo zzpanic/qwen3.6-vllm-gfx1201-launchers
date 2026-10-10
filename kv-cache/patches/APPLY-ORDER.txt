@@ -1,8 +1,8 @@
  WHICH BUILD APPLIES WHAT
  
-   startup-qwen3.8-27b-mxfp4.sh always applies the six marked [default]: the crash guard plus
+   startup-qwen3.8-27b-mxfp4.sh always applies the nine marked [default]: the crash guard plus
    the behavioural fixes (draft-group annotation, store stride, reconcile re-ask,
-   swa-align/touch-all and last-block align). With the disk tier on (KVOFF_FS_TIER=1, set by
+   swa-align/touch-all, last-block align and the three canonical-chunk patches 8a-8c). With the disk tier on (KVOFF_FS_TIER=1, set by
    KVCACHE_DISK_TIER=1, the default) it adds the three marked [disk]. KVOFF_MINIMAL=0 (off by
    default) adds the six marked [instr], which are instrumentation only.
  
@@ -17,6 +17,9 @@
   6  patch_reconcile_reask.py                 [default]  behavioural; outside KVOFF_MINIMAL
   7  patch_swa_align_touch.py                 [default]  behavioural; outside KVOFF_MINIMAL
   8  patch_sched_align_last_block.py          [default]  behavioural; outside KVOFF_MINIMAL
+  8a patch_sched_canonical_chunks.py          [default]  FATAL; canonical chunks hunks 1-4 (2026-10-10)
+  8b patch_canon_receipts.py                  [default]  FATAL; hunk 5, needs 8a
+  8c patch_canon_mixed.py                     [default]  FATAL; hunk 6, needs 8a
   9  patch_offload_debug_instrument.py            [instr]
  10  patch_offload_fs_fanout.py                   [disk]     ported from PR #49225
  11  patch_offload_tier_report.py                 [instr]    needs 2
@@ -34,6 +37,9 @@
                                                    for the V2 runner: a prefill chunk of exactly
                                                    1 + num_speculative_tokens tokens replayed the
                                                    spec-decode cudagraph (garbage reply). Order-free.
+ 20  patch_short_prefill.py                           always applied, FATAL on failure. Correctness fix
+                                                   (SlyBase): a 1-token prefill took the GDN recurrent
+                                                   decode path against uninitialised state. Order-free.
  
  This order is a dependency, not a preference. 11 extends the get_stats() that 2
  creates on the fs tier, and refuses to apply if 2 has not run -- it says so
@@ -63,6 +69,16 @@
  a cached multi-turn resume can differ from a cold prefill in the low bits. Gated on
  RADIANCE_ALIGN_PROMPT_LAST_BLOCK (default 1 = on).
  
+ 8a-8c (canonical chunks, 2026-10-10) make a cached request bit-identical to an uncached one
+ at fp16 AND fp32 GDN state. A block's KV/state depends on the LENGTH of the prefill chunk it
+ was computed in, so prefix hits resume on, and only reuse blocks from, the cold chunk grid:
+ 8a drops vLLM's shared-prefix junction stop, adds a grid stop, floors hits to the grid and
+ caches (GPU + offload store) only blocks computed in a full grid chunk; 8b keeps the drafter's
+ one-block lookahead as a receipt-only block (a hit may drop it, never read it); 8c lets a grid
+ chunk that shared its step with other sequences' speculative decodes still count (needs
+ CHUNK above the grid, the launcher's CHUNK=auto). Gated on RADIANCE_CANONICAL_CHUNKS,
+ RADIANCE_CANON_RECEIPTS, RADIANCE_CANON_MIXED (all default 1 = on).
+
  REMOVED 2026-09-12 / 2026-09-19, deliberately, and not to be re-added:
    patch_offload_split_pool.py              dead in both builds since 2026-09-19 (KVOFF_SPLIT_POOL_SHARE off).
    the re-ask MEMO sub-path of reconcile_reask  dead since 2026-09-19 (KVOFF_REASK_MEMO=0; it crashed EngineCore).

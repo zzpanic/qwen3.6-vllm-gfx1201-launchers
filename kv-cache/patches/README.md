@@ -4,15 +4,16 @@ These are **not standalone scripts.** Read this before you try to run one.
 
 ## Which build applies which
 
- The **default** build applies six: `patch_offload_mixed_hit.py`, `patch_eagle_groups.py`,
- `patch_mamba_stride.py`, `patch_reconcile_reask.py`, `patch_swa_align_touch.py` and
- `patch_sched_align_last_block.py`. They are the ones that change what is served — a crash
+ The **default** build applies nine: `patch_offload_mixed_hit.py`, `patch_eagle_groups.py`,
+ `patch_mamba_stride.py`, `patch_reconcile_reask.py`, `patch_swa_align_touch.py`,
+ `patch_sched_align_last_block.py` and the three canonical-chunk patches
+ (`patch_sched_canonical_chunks.py`, `patch_canon_receipts.py`, `patch_canon_mixed.py`). They are the ones that change what is served — a crash
  guard plus the behavioural fixes: the draft-group annotation this model needs, the
  recurrent-state store stride that makes the RAM tier hold enough, reconcile re-ask (stop
  recomputing prefixes the tier holds), the swa-align/touch-all eviction fix, and the
- last-block align (cached == cold). Everything else here is instrumentation or fs-tier-only
+ last-block align and canonical chunks (cached == cold). Everything else here is instrumentation or fs-tier-only
  and is applied only by the **disk** build (`KVCACHE_DISK_TIER=1`).
- `APPLY-ORDER.txt` marks the six.
+ `APPLY-ORDER.txt` marks the nine.
 
 ## What they are
 
@@ -85,6 +86,7 @@ root the script expects. The launcher does all three for you; nothing else does.
  | 6 | `patch_reconcile_reask.py` | warns; a GPU attention hit with no Mamba state recomputes the whole prompt |
  | 7 | `patch_swa_align_touch.py` | warns; every drafter chunk stored, stock eviction touch |
  | 8 | `patch_sched_align_last_block.py` | warns; cached turns can differ from cold in the low bits |
+ | 8a-8c | `patch_sched_canonical_chunks.py`, `patch_canon_receipts.py`, `patch_canon_mixed.py` | **FATAL** — a partial apply would leave some caching paths uncapped |
  | 9 | `patch_offload_debug_instrument.py` | warns; miss playback events absent |
  | 10 | `patch_offload_fs_fanout.py` | warns; one fs job per promotion |
  | 11 | `patch_offload_tier_report.py` | warns; no per-tier metrics, so `tools/tierreport.py` has no rows |
@@ -127,6 +129,7 @@ patch's metric series actually exists in `/metrics` before you believe a result;
  | `reconcile_reask` | `RADIANCE_RECONCILE_REASK` |
  | `swa_align_touch` | `RADIANCE_SWA_STORE_MAMBA_ALIGN`, `RADIANCE_TOUCH_ALL_GROUPS`, `RADIANCE_TOUCH_POSITION_ORDER` |
  | `sched_align_last_block` | `RADIANCE_ALIGN_PROMPT_LAST_BLOCK` |
+ | `sched_canonical_chunks`, `canon_receipts`, `canon_mixed` | `RADIANCE_CANONICAL_CHUNKS`, `RADIANCE_CANON_RECEIPTS`, `RADIANCE_CANON_MIXED` |
  | `fs_failed_load` | `RADIANCE_FS_FAILED_LOAD_FORGET` |
  | `lookup_invalidate` | `RADIANCE_LOOKUP_INVALIDATE` |
  | `fs_fanout` | `RADIANCE_FS_FANOUT_MAX`, `RADIANCE_FS_FANOUT_TARGET_MB` |

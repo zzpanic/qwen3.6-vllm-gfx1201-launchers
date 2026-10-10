@@ -22,6 +22,7 @@ Qwen3.8-27B MXFP4, with:
 | `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively (fp16 is the default since 2026-10-08). | Same arithmetic |
 | Lazy-GDN materialize: no stash needed when nothing is replayed (rx17) | `r4d_kernels.patch` | Fixes garbage after an offload-tier resume whenever a prefill step spans more than one block -- what broke fp16 state and any CHUNK above one block. Enables fp16 + CHUNK=3532. | Resume through the tier bit-identical to cold at fp32 4956 and fp16 3532; decode path unchanged |
 | MXFP4 W4A8 decode band, M 9-64 | `radiance_mxfp4_fp8.patch` | o_proj/out_proj -5..-6% kernel time with two concurrent sequences | Single-stream (M <= 8) untouched, byte for byte |
+| MXFP4 split-K reduction fence (2026-10-11) | `radiance_mxfp4_fp8.patch` | Correctness: the split-K decode reduction could read partial sums before other threads had stored them (rare, load-dependent wrong output). Same fix as SlyBase 1.1.1. | Fixes a race; the arithmetic is unchanged |
 
 **Released configuration** (2026-10-08: fp16 GDN state, CHUNK=3532, libr4d rx17), BetterBench 0.6.0,
 20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
@@ -146,6 +147,17 @@ The patch adds that branch to the shipped launch code and nothing else. **M <= 8
 single-stream decode runs byte-identical kernels.
 - Runtime off switch: `RADIANCE_MXFP4_DECODE_TUNE16=0`.
 - Build-time: `MFX_PATCH=` (empty) compiles the clone's kernel unchanged.
+
+### Split-K reduction fence (correctness, 2026-10-11)
+
+The split-K decode path has each K-slice block write its partial sums, bump a per-tile counter, and
+the last block to arrive reduces them. ggz14's kernel fenced on thread 0 only before the counter
+bump. A fence orders only the stores of the thread that runs it, and `__syncthreads` is workgroup
+scope, so the reducing block on another CU could read partials that other threads had not drained
+yet. Now every thread fences, the bump is an agent-scope acquire-release atomic, and the reducing
+block fences (acquire) before it reads. SlyBase found and fixed the same race in their 1.1.1
+(`b37a2e8`). It applies with `R4D_RX13=1` (the default); `MFX_PATCH=` (empty) compiles ggz14's
+kernel without it.
 
 The launcher patches a **copy** of `radiance_mxfp4_fp8.hip` from your ggz14 clone, keyed on the content
 of both files. Your clone is never edited, and if ggz14 changes the file and the patch stops applying,

@@ -65,8 +65,16 @@ block's worth of evidence.
 ## Exact, not approximate
 
 A turn served from the cache produces the **same tokens and the same logprobs** as a cold prefill of
-the same prompt. That is stricter than upstream vLLM promises. It holds serially; under concurrent
-batches the batch shape itself changes the numerics.
+the same prompt, at fp16 and at fp32 GDN state. That is stricter than upstream vLLM promises. It holds
+serially; under concurrent batches the batch shape itself changes the numerics.
+
+What makes it exact (2026-10-10, **canonical prefill chunks**, `KVOFF_CANONICAL_CHUNKS=1`): a block's
+KV and recurrent state depend on the LENGTH of the prefill chunk they were computed in, not only on
+the tokens. Stock vLLM stops a chunk at the shared-prefix boundary of a cache hit, which a cold prefill
+never does, so a cached resume continued on a different chunk grid and differed from cold in the low
+bits (fp16 state shows it more, but fp32 has the same mechanism). The launcher now prefills on one
+fixed grid from token 0, resumes only on that grid, and caches only blocks computed in a full grid
+chunk. The cost: prompts shorter than one grid chunk (~3.5k tokens) are never served from cache.
 
 Checking it:
 - `kv-cache/bench/turnbench.py --yes` compares every cached turn of 3 sessions x 7 turns against a
@@ -74,11 +82,8 @@ Checking it:
 - `kv-cache/tools/val_resume.py --evict 9` pushes a conversation out through every tier and checks
   the resume against a cold run.
 
-Two things are not exact, and the launcher keeps both off:
-- **fp16 GDN state** (`MAMBA_SSM_FP16=1`): a GDN state restored from RAM or disk at fp16 answers
-  garbage, while fp32 round-trips bit-exactly. This is open work; see ROADMAP.md section 1.
-- **Non-exact split-KV prefill kernels**: they change the summation order, so they are not used
-  (KERNEL.md).
+Not exact, and kept off: **non-exact split-KV prefill kernels**. They change the summation order,
+so they are not used (KERNEL.md).
 
 ## How it is set up
 

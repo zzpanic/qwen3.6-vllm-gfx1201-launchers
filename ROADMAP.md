@@ -10,10 +10,11 @@ drafter, fp8 KV cache, `MAXSEQS=2`, `vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model
 The current shape:
 - **Kernels and GDN:** libr4d v0.5.0 + `r4d_kernels` (exact-decay GDN chunk scan, exact-wide prefill, block-table clamp),
   fp16 GDN state, lazy GDN (with the rx17 materialize fix), four 880-token blocks per prefill step
-  (CHUNK=3532).
+  (CHUNK=auto, 3540 at two sequences), the MXFP4 split-K fence fix.
 - **Speculative decoding:** the int2 draft head plus the global top-256 target verify head.
 - **Memory:** the input embedding in pinned host RAM.
-- **Correctness:** the uniform-decode guard and the DFlash2 sampling-RNG fix.
+- **Correctness:** the uniform-decode guard, the DFlash2 sampling-RNG fix, canonical prefill chunks
+  (cached == uncached at fp16 and fp32, KV-CACHE.md) and the 1-token prefill fix.
 - **ROCm allocator:** the load-time allocator split.
 
 BetterBench 0.6.0, 20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
