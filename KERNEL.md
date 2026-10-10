@@ -25,19 +25,15 @@ Qwen3.8-27B MXFP4, with:
 | DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (five patches + two modules) | Drafter VRAM -0.78 GiB (KV pool +6.5%); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
 | MXFP4 split-K reduction fence (2026-10-11) | `radiance_mxfp4_fp8.patch` | Correctness: the split-K decode reduction could read partial sums before other threads had stored them (rare, load-dependent wrong output). Same fix as SlyBase 1.1.1. | Fixes a race; the arithmetic is unchanged |
 
-**Released configuration** (2026-10-11: fp16 GDN state, canonical prefill chunks, libr4d rx17, the
-DFlash2-W4A16 drafter, checkpoint retention), BetterBench 0.6.0, 20 passes, temperature 1.0, measured
-at MAXSEQS=4 (BETTERBENCH-20261011.md):
+**Released configuration** (2026-10-08: fp16 GDN state, CHUNK=3532, libr4d rx17), BetterBench 0.6.0,
+20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
 
 | Metric | Result |
 |---|---|
-| Decode | 135.5 t/s (update p99 36.4 ms) |
-| Concurrency 1 / 2 / 3 / 4 | 118.9 / 211.3 / 262.6 / 326.7 t/s aggregate |
-| Prefill 2k / 8k / 16k / 32k / 64k / 128k / 180k (targets) | 2927 / 3148 / 3210 / 3091 / 2891 / 2490 / 2235 t/s |
-| Stalls | none (0 preemptions) |
-
-The 2026-10-08 release (BETTERBENCH-20261008.md, same BetterBench): decode 132.5 t/s, concurrency 2
-209.4 t/s, prefill 128k 2470 t/s.
+| Decode | 132.5 t/s (update p99 38.5 ms) |
+| Concurrency 1 / 2 | 116.9 / 209.4 t/s aggregate |
+| Prefill 2k / 8k / 16k / 32k / 64k / 128k | 2896 / 3119 / 3190 / 3084 / 2870 / 2470 t/s |
+| Stalls | none |
 
 Prefill against the previous release's shape (fp32, CHUNK=2048) measured the same night with the same
 BetterBench 0.6.0: +7.4% at 16k, +8.8% 32k, +10.6% 64k, +11.9% 128k. The 2026-10-06 release figures
