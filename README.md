@@ -5,8 +5,8 @@ speculative drafter on a single R9700 (gfx1201 / RDNA4, 32 GB). It has a 262,144
 its prefix cache spills from the GPU to RAM to disk, so a returning conversation is restored rather
 than recomputed.
 
-**Decode 129.7 t/s · 2 clients 202.0 t/s aggregate · prefill 3,025 t/s at 2k, 2,185 t/s at 128k** —
-[BETTERBENCH-20261006.md](BETTERBENCH-20261006.md)
+**Decode 135.5 t/s · 2 clients 211.3 t/s aggregate (4 clients 326.7) · prefill 3,210 t/s at 16k, 2,490 t/s at
+128k** — [BETTERBENCH-20261011.md](BETTERBENCH-20261011.md)
 
 ## Where it comes from
 

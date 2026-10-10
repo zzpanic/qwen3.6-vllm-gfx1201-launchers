@@ -8,7 +8,7 @@ model max context: 204800 tokens
 ```
 
 - **betterbench**: 0.6.0, [GGZ14/BetterBench](https://github.com/GGZ14/BetterBench) `v0.6.0` (`d00ad5e`) plus local commit `9a9e69f` (per-run nonce salt). Same build as BETTERBENCH-20261008.md.
-- **config**: the house production config of 2026-10-11. CHUNK=3568, MAXSEQS=4, checkpoint retention and the canonical-chunk wait are not yet in this repo's launcher. BetterBench prompts are one-off (nonce), so the prefix-cache changes are not exercised here: this is a no-regression check plus concurrency 3 and 4.
+- **config**: the launcher's 2026-10-11 defaults with `MAXSEQS=4` (CHUNK auto = 3568) and a 12 GiB RAM tier, no disk tier (the launcher default is MAXSEQS=2 and 16 GiB; set `MAXSEQS=4` for concurrency 3 and 4). BetterBench prompts are one-off (nonce), so the prefix-cache changes are not exercised here: this is a no-regression check plus concurrency 3 and 4.
 - **vs BETTERBENCH-20261008.md**: combined decode 132.5 -> 135.5 t/s; concurrency 2 aggregate 209.4 -> 211.3 t/s; prefill 128k 2470 -> 2490 t/s. New: concurrency 4 aggregate 326.7 t/s (2.75x concurrency 1), 0 preemptions; prefill at 180k target (132k real tokens) 2235 t/s.
 - **endpoint**: `http://127.0.0.1:5801/v1`  ·  **model**: `qwen3.8-27b-vllm`  ·  **host**: llama
 - **corpus**: v1.0  ·  **sampling**: temp 1.0  ·  **passes/cat**: 20  ·  prefix-cache: cold (nonce)
