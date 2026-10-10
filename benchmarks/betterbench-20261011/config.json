@@ -1,0 +1,23 @@
+{
+  "_comment": "BetterBench config for qwen3.8-27b-vllm, 2026-10-11: 20 passes, prefill to a 180k target, concurrency 1-4 (24 requests per level). See BETTERBENCH-20261011.md.",
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "concurrency_levels": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "concurrency_requests": 24,
+  "max_model_len": 204800,
+  "prefill_depths": [
+    2000,
+    8000,
+    16000,
+    32000,
+    64000,
+    128000,
+    180000
+  ]
+}
