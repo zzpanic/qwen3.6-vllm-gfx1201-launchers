@@ -97,9 +97,10 @@ Everything is an environment variable; these are the ones worth knowing.
   R4D_SO=<dir>              use your own libr4d checkout instead of building one
   EXTRA="--enforce-eager"   extra `vllm serve` flags (same as passing them as arguments)
   DRY_RUN=1                 print the container command instead of running it
-  QUIET=1                   quieter log, nothing else changes: no per-request access lines, engine
-                            stats every 60 s (LOG_STATS_INTERVAL), no radiance banner (RADIANCE_BANNER=1
-                            shows it), transformers warnings off. QUIET=0 = the stock output
+  QUIET=1                   quieter log, nothing else changes: engine stats every 60 s
+                            (LOG_STATS_INTERVAL), transformers warnings off. QUIET=0 = the stock output
+  ACCESS_LOG=1              one line per request (0 = --disable-uvicorn-access-log)
+  RADIANCE_BANNER=1         the image's banner + environment preamble (0 = one start line instead)
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
 
 Full knob reference: README.md. KV-cache offload: KV-CACHE.md. Kernels: KERNEL.md.
@@ -922,26 +923,24 @@ fi
 # mxfp4 quantization squashes NaN to a finite code. RADIANCE_MXFP4_SANITIZE (default 1) fixes it.
 # Extra vllm serve args, for bisecting (e.g. EXTRA="--enforce-eager").
 EXTRA=${EXTRA:-}
-# QUIET (2026-10-11, default 1): log volume only -- no knob here changes what is served or measured.
-#   --disable-uvicorn-access-log  one "POST /v1/chat/completions 200" line per request (and per /metrics scrape)
-#   VLLM_LOG_STATS_INTERVAL       the throughput / spec-decoding / KV-transfer summary lines, every 10 s stock;
-#                                 /metrics is unaffected (it is not the log)
-#   TRANSFORMERS_VERBOSITY=error  the image processor's use_fast deprecation notice, printed twice per boot
-#   RADIANCE_BANNER=0             skip the image's banner + environment preamble (~60 lines, mostly toggles this
-#                                 model does not use); the container then execs vllm serve directly. The preamble
-#                                 only prints, so nothing is lost; NUMA binding or RADIANCE_RUN_BWTEST still use it.
+# Log volume only -- no knob here changes what is served or measured (2026-10-11).
+#   QUIET=1 (default)  VLLM_LOG_STATS_INTERVAL 60 s instead of 10 (the throughput / spec-decoding / KV-transfer
+#                      summary lines; /metrics is unaffected) and TRANSFORMERS_VERBOSITY=error (the image
+#                      processor's use_fast deprecation notice, printed twice per boot).
+#   ACCESS_LOG=1 (default)  one "POST /v1/chat/completions 200" line per request; 0 = --disable-uvicorn-access-log.
+#   RADIANCE_BANNER=1 (default)  the image's banner + environment preamble; 0 = one start line, and the container
+#                      execs vllm serve directly (the preamble only prints; NUMA binding / RADIANCE_RUN_BWTEST use it).
 QUIET=${QUIET:-1}
+ACCESS_LOG=${ACCESS_LOG:-1}
+RADIANCE_BANNER=${RADIANCE_BANNER:-1}
 if [ "$QUIET" = 1 ]; then
   LOG_STATS_INTERVAL=${LOG_STATS_INTERVAL:-60}
-  RADIANCE_BANNER=${RADIANCE_BANNER:-0}
-  QUIET_ARGS="--disable-uvicorn-access-log"
   QUIET_ENV=(-e TRANSFORMERS_VERBOSITY=error)
 else
   LOG_STATS_INTERVAL=${LOG_STATS_INTERVAL:-10}
-  RADIANCE_BANNER=${RADIANCE_BANNER:-1}
-  QUIET_ARGS=""
   QUIET_ENV=()
 fi
+QUIET_ARGS=""; [ "$ACCESS_LOG" = 1 ] || QUIET_ARGS="--disable-uvicorn-access-log"
 # Prefetch the checkpoint into page cache in parallel before loading (served configuration).
 case " $EXTRA " in *--safetensors-load-strategy*) ;; *) EXTRA="$EXTRA --safetensors-load-strategy prefetch" ;; esac
 # MAMBA_SSM_FP16 -- see the knob's block above for the risk and the geometry consequence.
@@ -2536,7 +2535,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     if [ "${RADIANCE_BANNER:-1}" = 1 ] || [ -n "${RADIANCE_NUMA_BIND:-}" ] || [ "${RADIANCE_RUN_BWTEST:-0}" = 1 ]; then
       exec /opt/radiance_entrypoint.sh "$@"
     fi
-    echo "[radiance] ${RADIANCE_LAUNCH_IMAGE:-image}: vllm serve starting (banner off: QUIET=1; RADIANCE_BANNER=1 shows it)"
+    echo "[radiance] ${RADIANCE_LAUNCH_IMAGE:-image}: vllm serve starting (banner off: RADIANCE_BANNER=0)"
     exec vllm serve "$@"' _ \
      "$CSNAP" --served-model-name "$SERVED" --host 0.0.0.0 --port "$PORT" \
     --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \
