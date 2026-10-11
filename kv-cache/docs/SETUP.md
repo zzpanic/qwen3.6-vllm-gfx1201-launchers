@@ -14,8 +14,9 @@ instrumentation to either. Everything not marked *disk build* applies to both.
 - `/dev/shm` **larger than the RAM tier**. The tier is a shared-memory region; if `/dev/shm` cannot
   hold it the boot dies with no log line at all. The kernel default is half of RAM; check it against
   the tier size below.
-- *Disk build only:* a filesystem for the disk tier. Ordinary SATA SSD is fine — the tier reads
-  at 228 MB/s and is device-bound, so a faster disk helps and a slower one is the limit.
+- *Disk build only:* a filesystem for the disk tier. Ordinary SATA SSD is fine — the tier is
+  device-bound, so a faster disk helps and a slower one is the limit (the reference box's virtual disk reads
+  whole block files at 530-700 MB/s raw, `tierreport.py --calibrate`, 2026-10-11).
 
 ```bash
 python3 -c "import os;s=os.statvfs('/dev/shm');print('/dev/shm: %.2f GiB'%(s.f_blocks*s.f_frsize/2**30))"

@@ -17,7 +17,7 @@ With offload, the evicted blocks have already been copied to RAM, and from there
 turn loads them back:
 - from RAM at about 12 GB/s, roughly 170x faster than recomputing (that is the PCIe 3.0 x16 ceiling
   of the reference board; SYSTEM.md);
-- from disk at about 1 GB/s, roughly 15x faster.
+- from disk at about 0.5-0.7 GB/s on the reference box (raw read test, 2026-10-11; a few times faster than recomputing at 2,200-3,000 tokens/s, since a cached token is about 46 KB).
 
 Only the genuinely new tokens are prefilled.
 
