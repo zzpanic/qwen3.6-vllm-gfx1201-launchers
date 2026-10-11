@@ -74,7 +74,7 @@ Everything is an environment variable; these are the ones worth knowing.
                             detected cards can fill (head counts rule out 3, 6 and 12)
   GPUS=0,1                  HIP indices to serve on; defaults to every card with enough VRAM
   MIN_GPU_MIB=8192          VRAM floor for "usable"; excludes iGPUs from the count
-  KV_MEM=12250000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1 (11.5e9 with the
+  KV_MEM=12650000000        KV cache bytes, pinned for one R9700 with EMBED_HOST=1 (11.5e9 with the
                             FP8 drafter or mtp); auto uses a pin
                             measured for your hardware if
                             kv-profiles.tsv has one and lets vLLM profile if not; <bytes> pins
@@ -101,6 +101,7 @@ Everything is an environment variable; these are the ones worth knowing.
                             (LOG_STATS_INTERVAL), transformers warnings off. QUIET=0 = the stock output
   ACCESS_LOG=1              one line per request (0 = --disable-uvicorn-access-log)
   RADIANCE_BANNER=1         the image's banner + environment preamble (0 = one start line instead)
+  JIT_WARMUP=1              tiny requests right after /health so Triton kernels compile/load before real traffic
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
 
 Full knob reference: README.md. KV-cache offload: KV-CACHE.md. Kernels: KERNEL.md.
@@ -573,8 +574,10 @@ GPU_UTIL=${GPU_UTIL:-0.97}
 # activations, hence 11.5e9 rather than fp32/2048's 11.8e9 (329,035 tokens, 31.23 GiB peak).
 # With EMBED_HOST=0 the embedding is back on the card: lower this by ~2.5e9 or the boot OOMs.
 # 2026-10-11: the default depends on the drafter and is resolved once DRAFTER is known (below): the
-# DFlash2-W4A16 drafter frees 0.78 GiB of VRAM against the FP8 one, so it gets 12.25e9 (~353,000 tokens,
-# +6.5%); the FP8 drafter keeps 11.5e9. An explicit KV_MEM wins.
+# DFlash2-W4A16 drafter frees 0.78 GiB of VRAM against the FP8 one, so it gets 12.65e9 (369,614 tokens at
+# MAXLEN 262144); the FP8 drafter keeps 11.5e9. An explicit KV_MEM wins. Stress peak at 12.65e9 (MAXSEQS 4: three
+# concurrent ~110k prefills + a 2048x2048 image in the fourth slot): 31.53 of 31.86 GiB, 0.33 GiB spare; the
+# transient over idle is +0.23 GiB at both 12.25e9 and 12.65e9.
 KV_MEM=${KV_MEM:-}
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
@@ -613,7 +616,7 @@ MODELS="$(realpath -m "${MODELS:-$HOME/models}")"   # where ggz14 setup-mxfp4.sh
 # DRAFTER=$MODELS/Qwen3.8-27B-DFlash2-FP8 restores the FP8 drafter (and its 11.5e9 KV pin).
 DRAFTER=${DRAFTER:-$MODELS/Qwen3.8-27B-DFlash2-W4A16}
 case "$SPEC_METHOD:$DRAFTER" in
-  dflash:*W4A16*) KV_MEM=${KV_MEM:-12250000000}
+  dflash:*W4A16*) KV_MEM=${KV_MEM:-12650000000}
            # torch.compile does not key on the drafter quantisation, and the W4A16 patches change the
            # drafter params (tiled layout) and the traced graph (fusions): its own compile cache.
            CACHE_SUF="$CACHE_SUF-dw4-sk-fu"
@@ -941,6 +944,14 @@ else
   QUIET_ENV=()
 fi
 QUIET_ARGS=""; [ "$ACCESS_LOG" = 1 ] || QUIET_ARGS="--disable-uvicorn-access-log"
+# JIT warm-up (2026-10-11). /health answers before any forward pass, so without this the first real requests pay
+# the Triton first calls -- the speculative sampler, the drafter input prep, the W4A16 GEMMs at batch > 1: a compile
+# each on a cold cache, a ~1 s cache load on a warm one, and a jit_monitor "JIT compilation during inference" warning.
+#   JIT_WARMUP=1 (default)  right after /health the container sends a few tiny requests (greedy, sampled, one
+#                     prefill-sized prompt, 2..MAXSEQS concurrent, a 64x64 image) and logs one "[radiance] jit
+#                     warm-up" line. They show in the access log. Requests arriving meanwhile are served as usual.
+#   JIT_WARMUP=0      off. Script: kv-cache/patches/radiance_jit_warmup.py (mounted at /house).
+JIT_WARMUP=${JIT_WARMUP:-1}
 # Prefetch the checkpoint into page cache in parallel before loading (served configuration).
 case " $EXTRA " in *--safetensors-load-strategy*) ;; *) EXTRA="$EXTRA --safetensors-load-strategy prefetch" ;; esac
 # MAMBA_SSM_FP16 -- see the knob's block above for the risk and the geometry consequence.
@@ -2236,6 +2247,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e VLLM_LOG_STATS_INTERVAL="$LOG_STATS_INTERVAL" \
   -e RADIANCE_BANNER="$RADIANCE_BANNER" \
   -e RADIANCE_LAUNCH_IMAGE="$IMAGE" \
+  -e RADIANCE_JIT_WARMUP="$JIT_WARMUP" -e RADIANCE_WARMUP_MAXSEQS="${MAXSEQS:-8}" \
   ${QUIET_ENV[@]+"${QUIET_ENV[@]}"} \
   -e RADIANCE_VRAM_RETENTION="$KVOFF_VRAM_RETENTION" \
   -e RADIANCE_VRAM_KEEP_PREFIX="$KVOFF_KEEP_PREFIX" \
@@ -2541,7 +2553,11 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
         until bash -c "exec 3<>/dev/tcp/localhost/${RADIANCE_HEALTH_PORT:-8080}" 2>/dev/null; do sleep 2; done
       fi
       { date -u +%Y-%m-%dT%H:%M:%SZ | sed "s/^/ts=/"; echo "host=$HOSTNAME"; } > /cache/.last-boot-ok 2>/dev/null || true
-    ) >/dev/null 2>&1 &
+      # JIT warm-up (JIT_WARMUP above): its one summary line goes to the container log (fd 3 = the original stdout).
+      if [ "${RADIANCE_JIT_WARMUP:-1}" = 1 ] && [ -f /house/radiance_jit_warmup.py ]; then
+        python3 /house/radiance_jit_warmup.py "${RADIANCE_HEALTH_PORT:-8080}" "${RADIANCE_WARMUP_MAXSEQS:-4}" >&3 2>&1 || true
+      fi
+    ) 3>&1 >/dev/null 2>&1 &
     if [ "${RADIANCE_BANNER:-1}" = 1 ] || [ -n "${RADIANCE_NUMA_BIND:-}" ] || [ "${RADIANCE_RUN_BWTEST:-0}" = 1 ]; then
       exec /opt/radiance_entrypoint.sh "$@"
     fi

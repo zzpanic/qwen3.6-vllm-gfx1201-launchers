@@ -168,7 +168,8 @@ the boot stops and says so instead of compiling something stale.
 
 `syvai/Qwen3.8-27B-DFlash2-W4A16` is the DFlash2 drafter quantised to 4-bit weights (compressed-tensors
 W4A16). It is 1.2 GB on disk against the FP8 drafter's 2.0, frees 0.78 GiB of VRAM, and the launcher
-gives that to the KV pool (`KV_MEM` 11.5e9 -> 12.25e9, ~331,800 -> ~353,400 tokens). Five patches make it
+gives that to the KV pool (`KV_MEM` 11.5e9 -> 12.65e9: 369,614 tokens at MAXLEN 262144, 0.33 GiB spare at the
+stress peak). Five patches make it
 load and run fast; each is inert for the FP8 drafter:
 
 | Patch | What it does | Source |
