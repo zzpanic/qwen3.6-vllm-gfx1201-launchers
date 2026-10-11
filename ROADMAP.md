@@ -147,9 +147,13 @@ one used for DSPLIT.
 
 - **The public launcher's own gates.** On 2026-10-11 it was booted cold and warm, benched (BETTERBENCH-20261011.md)
   and VRAM-stressed. The exactness gates (`turnbench.py`, `val_resume.py --evict`, `lenprobe.py`) ran on
-  the production twin of this launcher, with the same patches, not on this script itself. Still to run on
-  it: those gates, a raw read-rate check of the disk tier (the docs quote both ~1 GB/s and 228 MB/s), a real
-  boot with the built-in reaper active, and a BetterBench pass that includes `patch_w4a16_prefill.py`.
+  the production twin of this launcher, with the same patches, not on this script itself. Run on this
+  script itself on 2026-10-11, on a direct boot of it (port 5899, throwaway disk folder): the built-in reaper deleted
+  oldest-first down to its limit and touched nothing else; `lenprobe.py` 0 bad of 15; `val_resume.py --evict 12`
+  bit-identical, 8/8 prompts, resumed from the tier (~689 MB loaded). `turnbench.py` was 21/21 exact but never
+  left the GPU (the 369,614-token pool outgrew its workload), so it did not exercise the tier. Still open: the raw read rate of the disk tier (the docs quote both
+  ~1 GB/s and 228 MB/s) and the same gates through the llama-swap entry. A BetterBench
+  re-run through the llama-swap entry with `patch_w4a16_prefill.py` is in BETTERBENCH-20261011.md.
 - **Full-length context is untested.** The default is 262,144 tokens. The stress test held three ~110k
   prefills at once and BetterBench prefilled 132k; a single 262k prefill and resume (GPU pool and the
   16 GiB RAM tier) has not been run.

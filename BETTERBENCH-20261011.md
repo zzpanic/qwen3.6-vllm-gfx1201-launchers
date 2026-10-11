@@ -75,6 +75,22 @@ Prefill throughput = prompt tokens ÷ TTFT, at increasing input depth (tiny deco
 | 128000 | 94192 | 38107.9 | 2468.5† | 2471.2 | 2480.0† |
 | 180000 | 132338 | 59547.9 | 2222.2† | 2223.2 | 2229.9† |
 
+## Re-run with the drafter prefill tiles (same day, later)
+
+The report above predates `patch_w4a16_prefill.py`. The same config was re-run through the llama-swap entry on the same card (`benchmarks/betterbench-20261011-prefill-patch/`): decode 136.8 t/s (138.0 above; inside the run-to-run band), concurrency 1 / 2 / 3 / 4 at 123.0 / 217.2 / 273.4 / 346.5 t/s (124.7 / 218.1 / 273.5 / 333.7 above; the four-client figure moves by a few percent between runs), and prefill 0.8-1.1% faster at every depth from 6k up:
+
+| prompt tokens (med) | PP t/s above | PP t/s re-run |
+|--:|--:|--:|
+| 1552 | 2921.9 | 2921.0 |
+| 5940 | 3123.0 | 3150.4 |
+| 11834 | 3167.2 | 3192.6 |
+| 23568 | 3052.6 | 3085.8 |
+| 47098 | 2862.6 | 2885.9 |
+| 94070 | 2471.2 | 2494.4 |
+| 132366 | 2223.2 | 2240.7 |
+
+The tables above stay as the reference run; the end-to-end prefill gain matches the 0.8-1.4% measured when the patch was shipped (ROADMAP.md section 2, item 13).
+
 ---
 *† this percentile rests on fewer samples than `n · tail ≥ 5` requires — a p99 needs 500 observations, and 20 passes give 20. Read it as "roughly the worst observed", not as a percentile. The full list is under `sample_gate` in `results.json`.*
 
