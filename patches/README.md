@@ -6,6 +6,10 @@
 > reachable from it and none of these numbers apply to it. The `dflash2/` subdirectory is
 > the exception — those patches are about the draft head and are used by both.
 >
+> Since 2026-10-11 the MXFP4 launcher's default drafter is W4A16 (`syvai/Qwen3.8-27B-DFlash2-W4A16`). Its
+> GEMMs are tuned by `kv-cache/patches/patch_w4a16_tiles.py` (a measured gfx1201 table for the drafter's own
+> shapes), not by anything in this directory.
+>
 > Note also that the image reference below is `:0.5.8`, the version this tuning was done
 > against. Current scripts pin `:0.9.3`; the kernel and its heuristic are unchanged there,
 > but the path is worth re-checking if you are reading this against a newer image.

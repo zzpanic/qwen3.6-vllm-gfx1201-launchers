@@ -22,24 +22,30 @@ Qwen3.8-27B MXFP4, with:
 | `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively (fp16 is the default since 2026-10-08). | Same arithmetic |
 | Lazy-GDN materialize: no stash needed when nothing is replayed (rx17) | `r4d_kernels.patch` | Fixes garbage after an offload-tier resume whenever a prefill step spans more than one block -- what broke fp16 state and any CHUNK above one block. Enables fp16 + CHUNK=3532. | Resume through the tier bit-identical to cold at fp32 4956 and fp16 3532; decode path unchanged |
 | MXFP4 W4A8 decode band, M 9-64 | `radiance_mxfp4_fp8.patch` | o_proj/out_proj -5..-6% kernel time with two concurrent sequences | Single-stream (M <= 8) untouched, byte for byte |
-| DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (five patches + two modules) | Drafter VRAM -0.78 GiB (KV pool +6.5%); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
+| DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (five patches + two modules) | Drafter VRAM -0.78 GiB (KV pin 11.5e9 -> 12.65e9); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
 | MXFP4 split-K reduction fence (2026-10-11) | `radiance_mxfp4_fp8.patch` | Correctness: the split-K decode reduction could read partial sums before other threads had stored them (rare, load-dependent wrong output). Same fix as SlyBase 1.1.1. | Fixes a race; the arithmetic is unchanged |
 
-**Released configuration** (2026-10-08: fp16 GDN state, CHUNK=3532, libr4d rx17), BetterBench 0.6.0,
-20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
+**Released configuration** (2026-10-11: everything above, launcher defaults, `MAXSEQS=4`, CHUNK=3568),
+BetterBench 0.6.0, 20 passes, at BetterBench's default sampling, temperature 0.7 (BETTERBENCH-20261011.md):
 
 | Metric | Result |
 |---|---|
-| Decode | 132.5 t/s (update p99 38.5 ms) |
-| Concurrency 1 / 2 | 116.9 / 209.4 t/s aggregate |
-| Prefill 2k / 8k / 16k / 32k / 64k / 128k | 2896 / 3119 / 3190 / 3084 / 2870 / 2470 t/s |
+| Decode | 138.0 t/s (update p99 36.5 ms) |
+| Concurrency 1 / 2 / 3 / 4 | 124.7 / 218.1 / 273.5 / 333.7 t/s aggregate |
+| Prefill at 1.5k / 6k / 12k / 24k / 47k / 94k / 132k real tokens | 2922 / 3123 / 3167 / 3053 / 2863 / 2471 / 2223 t/s |
 | Stalls | none |
 
-Prefill against the previous release's shape (fp32, CHUNK=2048) measured the same night with the same
-BetterBench 0.6.0: +7.4% at 16k, +8.8% 32k, +10.6% 64k, +11.9% 128k. The 2026-10-06 release figures
-(BETTERBENCH-20261006.md) were taken with BetterBench 0.4.0 and are not directly comparable.
+The 2026-10-08 release (BETTERBENCH-20261008.md) ran at temperature 1.0: 132.5 t/s decode, 116.9 / 209.4 at
+1 / 2 clients. Sampling temperature moves decode through acceptance, so the two are not directly
+comparable. Its prefill was +7.4% at 16k to +11.9% at 128k over the release before it (fp32, CHUNK=2048),
+measured the same night. The 2026-10-06 figures (BETTERBENCH-20261006.md) used BetterBench 0.4.0.
 
 These numbers include the non-kernel work listed further down; the gains are not separable per kernel.
+
+Where decode and prefill time goes today (a torch-profiler audit, 2026-10-11) is in ROADMAP.md section 2. The
+MXFP4 GEMMs are at about 83% of DRAM bandwidth (decode) and about 70% of matrix peak (prefill), and every Triton
+kernel on the decode path has measured gfx1201 tiles. Their first calls happen during a boot warm-up
+(`JIT_WARMUP=1`), not on the first real requests.
 
 ## Why libr4d at all
 
@@ -239,7 +245,7 @@ They are not kernels, but the benchmark numbers above depend on them.
 |---|---|
 | DSPLIT bit-identity and speed | `r4d_kernels/tests/dsplit_bench.py`, `dsplit_cmp.py` (inside the serving image, against the built `r4d.so`) |
 | GDN scan vs fp64 | `check_gdn_extreme_decay.py` from magiccodingman/vllm-radiance#8 |
-| Cold vs offload-tier resume | `kv-cache/tools/val_resume.py --evict 9` |
+| Cold vs offload-tier resume | `kv-cache/tools/val_resume.py --evict 12` |
 | Lazy GDN, multi-turn | `kv-cache/tools/mt_lazy_gate.py --copy` (run two at once for concurrency) |
 | Uniform-decode regression | `kv-cache/tools/lenprobe.py` |
 | Output quality, approximate heads | `kv-cache/tools/quality_ab.py` |

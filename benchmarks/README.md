@@ -38,6 +38,8 @@ Two things worth reading before you compare any of it:
 
 | folder | what it measures |
 | --- | --- |
+| `betterbench-20261011/` | **MXFP4 W4A8, current release.** BetterBench 0.6.0 at its default sampling (temperature 0.7), launcher defaults: decode, concurrency 1-4, prefill to 132k real tokens. Report: BETTERBENCH-20261011.md |
+| `betterbench-20261006/` | **MXFP4 W4A8.** BetterBench 0.4.0 at temperature 1.0, the 2026-10-06 configuration (BETTERBENCH-20261006.md) |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
 | `deep-prefill-20260905/bfcl-mxfp4/` | **MXFP4 W4A8.** BFCL v4 tool calling, 8 single-turn categories / 1354 problems, matched per-category against the August int4 run — and why this harness's "Overall Acc" must not be quoted for a subset |
 | `deep-prefill-20260905/` | **MXFP4 W4A8.** The near-full-context sweep: BetterBench prefill and bench-live generation at 8 depths up to a real 200k tokens, plus the ladder-misalignment warning that applies to any comparison between the two harnesses |

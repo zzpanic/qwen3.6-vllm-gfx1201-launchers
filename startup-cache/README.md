@@ -76,7 +76,7 @@ bash /startup-cache/hip-so-cache.sh foo.hip "$SP"/foo.so -O3 -fPIC -shared $(pyt
 
 ## What it saves
 
-Measured 2026-10-05 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 with DFlash2 ×7, a
+Measured 2026-10-11 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 with DFlash2 ×7, a
 16 GiB KV offload tier. Launch to first reply:
 
 | Boot | `startup-qwen3.8-27b-mxfp4.sh` |
@@ -88,7 +88,9 @@ Measured 2026-10-05 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 wi
 (Re-measured 2026-10-11 on the release configuration: every cache under `~/.radiance-cache-w4a8-*`,
 `~/.cache/radiance-libr4d` and `~/.cache/startup-cache` deleted first, page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`; `/health` and the first reply landed within a second of each other.
-The previous figures, 527 / 196 / 161 s, were taken on 2026-10-06 with an older patch set.)
+The previous figures, 527 / 196 / 161 s, were taken on 2026-10-06 with an older patch set. Since these were
+taken, the launcher runs a JIT warm-up of about 20 s in the background right after `/health`; a request that
+arrives during it is served alongside, not refused.)
 
 The gap between the last two rows is reading 20 GiB of weights from disk, which no cache here helps
 with.

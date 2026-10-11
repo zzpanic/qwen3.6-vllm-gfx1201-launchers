@@ -1,0 +1,23 @@
+{
+  "_comment": "BetterBench config for qwen3.8-27b-zzpanic (public launcher release-20261011 incl. de70e39 capture sizes), 2026-10-11, at BetterBench's default sampling (temperature 0.7, top_p 0.95, top_k 20 -- what Sly and ggz14 publish at) for comparison. Otherwise as the temperature-1.0 run: 20 passes, prefill to 180k, concurrency 1-4.",
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "top_k": 20,
+  "concurrency_levels": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "concurrency_requests": 24,
+  "max_model_len": 204800,
+  "prefill_depths": [
+    2000,
+    8000,
+    16000,
+    32000,
+    64000,
+    128000,
+    180000
+  ]
+}

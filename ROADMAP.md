@@ -1,9 +1,9 @@
 # Roadmap
 
-Where this stack stands and what is still worth doing, as of 2026-10-08. Everything below was
+Where this stack stands and what is still worth doing, as of 2026-10-11. Everything below was
 measured on one AMD Radeon AI PRO R9700 (gfx1201, 32 GB) serving Qwen3.8-27B MXFP4 with a DFlash2 x7
 drafter, fp8 KV cache, `MAXSEQS=4`, `vllm-radiance:0.9.3` (vLLM 0.27.1, V2 model runner). The launcher is
-`startup-qwen3.8-27b-mxfp4.sh`; KERNEL.md, KV-CACHE.md, SYSTEM.md and BETTERBENCH-20261008.md cover the detail.
+`startup-qwen3.8-27b-mxfp4.sh`; KERNEL.md, KV-CACHE.md, SYSTEM.md and BETTERBENCH-20261011.md cover the detail.
 
 ## Where we are
 
@@ -12,19 +12,21 @@ The current shape:
   fp16 GDN state, lazy GDN (with the rx17 materialize fix), four 880-token blocks per prefill step
   (CHUNK=auto, 3568 at four sequences), the MXFP4 split-K fence fix.
 - **Speculative decoding:** the int2 draft head plus the global top-256 target verify head.
-- **Memory:** the input embedding in pinned host RAM; the 4-bit DFlash2 drafter (-0.78 GiB, KV pool +6.5%).
+- **Memory:** the input embedding in pinned host RAM; the 4-bit DFlash2 drafter (-0.78 GiB) and KV pin 12.65e9;
+  checkpoint retention (a 16 GiB RAM tier and a 128 GiB disk at 75% hold what dense storage needed twice that for).
 - **Correctness:** the uniform-decode guard, the DFlash2 sampling-RNG fix, canonical prefill chunks
   (cached == uncached at fp16 and fp32, KV-CACHE.md) and the 1-token prefill fix.
 - **ROCm allocator:** the load-time allocator split.
+- **Startup:** CUDA graphs captured up to `MAXSEQS x 8` tokens, and a JIT warm-up after `/health`.
 
-BetterBench 0.6.0, 20 passes, temperature 1.0 (BETTERBENCH-20261008.md):
+BetterBench 0.6.0, 20 passes, temperature 0.7 (BETTERBENCH-20261011.md):
 
 | | |
 |---|---|
-| Decode, combined | 132.5 t/s (update p99 38.5 ms, no stalls) |
-| Concurrency 1 / 2, aggregate | 116.9 / 209.4 t/s |
-| Prefill 2k / 8k / 16k / 32k / 64k / 128k | 2896 / 3119 / 3190 / 3084 / 2870 / 2470 t/s |
-| KV pool | 331,759 tokens at KV_MEM 11.5e9 (measured at MAXLEN 204,800) |
+| Decode, combined | 138.0 t/s (update p99 36.5 ms, no stalls) |
+| Concurrency 1 / 2 / 3 / 4, aggregate | 124.7 / 218.1 / 273.5 / 333.7 t/s |
+| Prefill at 12k / 47k / 132k real tokens | 3167 / 2863 / 2223 t/s |
+| KV pool | 369,614 tokens at KV_MEM 12.65e9, MAXLEN 262,144 |
 
 Each item below says what it is, why it is worth doing, what is already known, and how to tell whether it
 worked. The tools named live in `kv-cache/tools/`.
@@ -95,26 +97,22 @@ one used for DSPLIT.
 
 ## 3. Speculative decoding
 
-- **Drafter attention split-KV tuning** (SlyBase `radiance_attn_drafter`). The DFlash2 drafter's
-  sliding-window attention (5 layers, window 2048, non-causal) runs on vLLM's stock Triton launch, which
-  under-fills the GPU at long context. Value: more draft speed at depth. It is written for vLLM 0.29 and
-  needs porting.
-- **Prompt-lookup drafting** (SlyBase `radiance_lookup_draft`). Overrides the DFlash2 draft with an n-gram
-  match from the context. Agent work (editing code, repeating tool output) is copy-heavy, which is where
-  this raises acceptance. Measure it with BetterBench's `file_edit` / `code` categories and real agent traces.
+- **Done 2026-10-11:** drafter attention split-KV (1.37 -> 0.21 ms per step at ~119k context) and
+  prompt-lookup drafting (verbatim copies ~4.2 -> ~7.6 tokens per update), both ported from SlyBase with the
+  W4A16 drafter (KERNEL.md).
 - **Load-adaptive draft depth on the V2 runner.** The old dynamic drafter (`RADIANCE_DYNAMIC_DRAFT`) hooks
   the V1 runner and does nothing on V2. With two concurrent agents, per-stream decode drops from 144.8 to
   138.0 t/s, which is small, so this is low priority unless concurrency goes up.
-- **`MAXSEQS=3`.** ggz14's single-card profile runs 3 sequences. The 329k pool now leaves room for that
-  at long context. Measure concurrency 3 against per-stream latency.
+- **Done 2026-10-11: `MAXSEQS=4` is the default.** At temperature 0.7, 1 / 2 / 3 / 4 clients give 124.7 /
+  218.1 / 273.5 / 333.7 t/s aggregate, 161 / 145 / 122 / 116 t/s per request (BETTERBENCH-20261011.md).
 
 ---
 
 ## 4. Capacity and memory
 
-- **VRAM headroom.** The stress peak, with two 158k sequences resident plus a 2048x2048 image, is
-  31.23 / 31.86 GiB, leaving 0.62 GiB spare. `KV_MEM=11.3e9` would keep about 1 GiB spare for about 315k
-  tokens. Decide after more real-world use.
+- **VRAM headroom.** At the default `KV_MEM=12.65e9` the stress peak (`MAXSEQS=4`: three concurrent ~110k
+  prefills plus a 2048x2048 image in the fourth slot) is 31.53 / 31.86 GiB, 0.33 GiB spare; the transient over
+  idle is +0.23 GiB. `KV_MEM=12.25e9` keeps 0.66 GiB spare for 357,813 tokens. Watch real-world use.
 - **Vision tower to host.** The stock V2 runner never installs the UVA offloader. A 0.29 backport exists
   (`patch_tower_offload.py`), but VRAM *rose* when it was tried, so it needs a look at what was allocated.
   mtstanfield reported about +100k tokens with the tower and an fp8 embedding moved together.
@@ -127,12 +125,12 @@ one used for DSPLIT.
 
 ## 5. Correctness and validation debt
 
-- **The merged launcher has not been boot-tested.** `startup-qwen3.8-27b-mxfp4.sh` now carries the
-  served stack; it dry-runs to the served command, but it has not served yet. Boot it, then run
-  `lenprobe.py`, `val_resume.py --evict 9` and a short BetterBench before tagging a release.
-- **Full-length context is untested.** The default is now 262,144 tokens. The stress test held two 158k
-  sequences and BetterBench prefilled 94k; a single 262k prefill and resume (GPU pool and the 19 GiB
-  RAM tier) has not been run.
+- **The public launcher's own gates.** On 2026-10-11 it was booted cold and warm, benched (BETTERBENCH-20261011.md)
+  and VRAM-stressed. The exactness gates (`turnbench.py`, `val_resume.py --evict`, `lenprobe.py`) ran on
+  the production twin of this launcher, with the same patches, not on this script itself.
+- **Full-length context is untested.** The default is 262,144 tokens. The stress test held three ~110k
+  prefills at once and BetterBench prefilled 132k; a single 262k prefill and resume (GPU pool and the
+  16 GiB RAM tier) has not been run.
 
 - **Lazy GDN's original corruption** (ggz14 0cadf57) has never been reproduced. Even a control with the
   invalidation fix off passes the multi-turn gates, and a concurrent soak with a lazy-off control showed
@@ -150,10 +148,9 @@ one used for DSPLIT.
 - **Disk-tier reaper alerting.** `KVCACHE_MIN_FREE_GB` sizes the free-space floor to the write rate.
   Write failures (ENOSPC) and the reaper's "volume too small" warning should also reach a notifier, not
   just the journal.
-- **Host RAM.** About 27 GB at peak with a 16 GiB RAM KV tier and the 2.37 GiB pinned embedding; the
-  shipped default is a 19 GiB tier (one full 262,144-token context), so plan on ~30 GB and size the VM at
-  32 GiB or more. A 2x tier (37 GiB, two full-length sessions) would need ~56 GiB.
-- **Disk tier volume.** 128 GiB or more recommended (KV-CACHE.md); the reference box runs 94 GiB.
+- **Host RAM.** About 27 GB at peak with the default 16 GiB RAM KV tier and the 2.37 GiB pinned embedding:
+  size the box at 32 GiB or more.
+- **Disk tier volume.** 128 GiB at 75% recommended (KV-CACHE.md); the reference box runs 94 GiB at 70%.
 
 ---
 

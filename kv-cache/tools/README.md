@@ -107,9 +107,9 @@ cannot hit each other's cached prefixes.
   `1 + num_speculative_tokens` tokens. Exit 0 = guard working. `--block` is the attention block
   size from the boot log, `--spec` the draft count. About 2 minutes.
 - **`val_resume.py`** -- the same long prompts answered cold and resumed from the prefix cache,
-  compared token by token. `--evict 9` first pushes the cache out of the GPU with ~310k unrelated
+  compared token by token. `--evict 12` first pushes the cache out of the GPU with ~420k unrelated
   tokens so the resume is restored from the CPU/disk tier -- the test that caught fp16 ssm state
-  failing there. Expect bit-exact at fp32.
+  failing there. Expect bit-exact at fp16 and fp32 (canonical chunks, KV-CACHE.md).
 - **`val_long.py`** -- ~25k-token registry with checkable answers (verbatim copies, deep lookups).
 - **`mt_lazy_gate.py`** -- multi-turn, prefix-reuse gate. `--copy N` makes every turn copy N records
   back verbatim, so answers cross cache-block boundaries during decode.

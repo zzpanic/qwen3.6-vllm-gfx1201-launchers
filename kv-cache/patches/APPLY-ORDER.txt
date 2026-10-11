@@ -20,6 +20,10 @@
   8a patch_sched_canonical_chunks.py          [default]  FATAL; canonical chunks hunks 1-4 (2026-10-10)
   8b patch_canon_receipts.py                  [default]  FATAL; hunk 5, needs 8a
   8c patch_canon_mixed.py                     [default]  FATAL; hunk 6, needs 8a
+  8d patch_vram_retention.py                  [default]  FATAL; checkpoint retention, GPU pool (2026-10-10), needs 8a
+  8e patch_tier_retention.py                  [default]  FATAL; checkpoint retention, RAM/disk tiers, needs 8a
+  8f patch_canon_wait.py                      [default]  FATAL; concurrent prefills wait for the grid, needs 8a
+  8g patch_warm_history.py                    [default]  non-fatal; the warm-history boot line (logging only)
   9  patch_offload_debug_instrument.py            [instr]
  10  patch_offload_fs_fanout.py                   [disk]     ported from PR #49225
  11  patch_offload_tier_report.py                 [instr]    needs 2

@@ -7,7 +7,7 @@ Everything for it is in [`kv-cache/`](kv-cache/), and `startup-qwen3.8-27b-mxfp4
 ## The benefit
 
 An agent session is a long prompt that grows a little every turn. vLLM's prefix cache already reuses
-that prompt, but only while it stays in GPU memory. On one 32 GB card the GPU pool holds 329,035
+that prompt, but only while it stays in GPU memory. On one 32 GB card the GPU pool holds 369,614
 tokens. Two agents, or one agent plus anything else, push each other's history out.
 
 Without offload, the next turn of an evicted conversation re-runs prefill over the **whole** history.
@@ -79,7 +79,7 @@ chunk. The cost: prompts shorter than one grid chunk (~3.5k tokens) are never se
 Checking it:
 - `kv-cache/bench/turnbench.py --yes` compares every cached turn of 3 sessions x 7 turns against a
   cold twin: 21/21 exact on both the RAM-only and the disk build.
-- `kv-cache/tools/val_resume.py --evict 9` pushes a conversation out through every tier and checks
+- `kv-cache/tools/val_resume.py --evict 12` pushes a conversation out through every tier and checks
   the resume against a cold run.
 
 Not exact, and kept off: **non-exact split-KV prefill kernels**. They change the summation order,
@@ -114,18 +114,27 @@ and disk, and with 3-4 agents in parallel it served far more follow-up turns fro
 56% -> 77%, 3 agents 69% -> 85%).
 
 **What the sizes hold.** vLLM reports the GPU KV pool and the context per request; neither says how
-much *finished* conversation stays ready to resume. The launcher prints that on the first request
-(`[radiance] warm history ...`, with the recommended minimums for your box). At 100k-token
-conversations, on the reference box:
+much *finished* conversation stays ready to resume. The launcher prints that on the first request,
+with the recommended minimums for your box. The reference box, launcher defaults (its disk volume is
+101 GB with the reaper at 70%, so 70.6 GB of cache):
+
+```
+[radiance] warm history (tokens of finished conversations kept ready to resume, at 100k-token conversations):
+VRAM ~325k (dense 172k), RAM ~361k (dense 233k), disk ~1.52M (dense 957k). Context per request is unchanged:
+max_model_len 262144. Recommended minimum: RAM tier 10 GiB (stages one 262144-token resume), disk tier ~16 GB
+per concurrent agent, at least 32 GB. [grid 3520, block 14.4 MB, 8 attention + 10 checkpoint blocks per grid
+chunk, tier 45.9 KB/token]
+```
 
 | | with retention | dense (before) |
 |---|--:|--:|
-| GPU pool | ~314k tokens | ~166k |
-| RAM tier, 16 GiB | ~355k | ~233k |
-| disk tier, 96 GiB usable | ~2.2M | ~1.4M |
+| GPU pool (369,614 tokens) | ~325k tokens | ~172k |
+| RAM tier, 16 GiB | ~361k | ~233k |
+| disk tier, 70.6 GB (the reference box) | ~1.52M | ~957k |
+| disk tier, 128 GiB at 75% (103 GB) | ~2.2M | ~1.4M |
 
-(Measured from that line at a 12 GiB RAM tier and 66 GiB of disk, scaled to these sizes: about
-46 KB per cached token in the tiers with retention, 74 KB dense. Context per request is unchanged.)
+The last row is the same 45.9 KB per cached token (74 KB dense) applied to the recommended volume;
+the line on your box prints it for your sizes.
 
 **The minimums.**
 - **RAM tier: ~10 GiB at 262,144 context** (8 GiB at 204,800). A disk hit is restored disk -> RAM ->
@@ -167,6 +176,10 @@ The offload path is vLLM 0.27.1's own `OffloadingConnector`, plus house patches 
 - **Re-asked turns**: reconcile a re-asked turn.
 - **Alignment**: the prompt's last block and the sliding-window touch order.
 - **Disk-tier failures**: forget a failed disk load and recompute that one block.
+- **Canonical prefill chunks**: one fixed chunk grid for cold and cached prefill, so a resume is exact
+  (above), including under concurrent prefills (canon wait).
+- **Checkpoint retention**: which GDN and drafter checkpoints the GPU pool and the tiers keep (above).
+- **Warm history**: the boot-time line above. Logging only.
 - **Instrumentation**: the counters behind `kvtable.py`, `kvvalidate.py` and `tierreport.py`.
 
 Every behaviour change sits behind an environment gate whose unset state is stock vLLM.

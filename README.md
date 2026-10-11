@@ -5,8 +5,8 @@ speculative drafter on a single R9700 (gfx1201 / RDNA4, 32 GB). It has a 262,144
 its prefix cache spills from the GPU to RAM to disk, so a returning conversation is restored rather
 than recomputed.
 
-**Decode 129.7 t/s · 2 clients 202.0 t/s aggregate · prefill 3,025 t/s at 2k, 2,185 t/s at 128k** —
-[BETTERBENCH-20261006.md](BETTERBENCH-20261006.md)
+**Decode 138.0 t/s · 4 clients 333.7 t/s aggregate · prefill 3,167 t/s at 12k, 2,223 t/s at 132k** —
+[BETTERBENCH-20261011.md](BETTERBENCH-20261011.md)
 
 ## Where it comes from
 
@@ -134,8 +134,8 @@ How the two entries fit together:
 - **`cmdStop`** stops the container by name, so the name must match `NAME`. Otherwise a killed launcher
   can leave the container holding the GPU and the 16 GiB `/dev/shm` region.
 - **One model at a time.** The models swap; only one fits on the card.
-- **Separate disk caches.** Each model gets its own disk-tier directory (`/kvcache/blocks/<model>`), so
-  the two can never load each other's cached KV.
+- **Separate disk caches.** Each model gets its own disk-tier directory under `/kvcache/blocks/`, named for the
+  checkpoint and its numerics, so the two can never load each other's cached KV.
 
 Everything else is a launcher default, and the defaults are the configuration measured here.
 `./startup-qwen3.8-27b-mxfp4.sh -h` lists every setting.
@@ -144,12 +144,14 @@ Everything else is a launcher default, and the defaults are the configuration me
 
 ```bash
 curl -s localhost:<port>/v1/models | python3 -m json.tool        # max_model_len: 262144
-python3 kv-cache/tools/lenprobe.py --base http://127.0.0.1:<port> --model qwen3.8-27b --block 1648 --spec 7
+python3 kv-cache/tools/lenprobe.py --base http://127.0.0.1:<port> --model qwen3.8-27b --block 880 --spec 7
 python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # hits per tier
 ```
 
 `logs/bootlog-first.txt` and `logs/bootlog-second.txt` show what a first (cold) boot and a second
-(warm) boot print.
+(warm) boot print. About 20 seconds after `/health` answers, the log shows one `[radiance] jit warm-up` line:
+a few tiny requests that compile or load the remaining Triton kernels before real traffic (`JIT_WARMUP=0` turns
+it off).
 
 ## Clearing the caches
 

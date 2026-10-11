@@ -11,7 +11,7 @@ matter can be copied.
 |---|---|
 | Host | ASUS P10S WS (Intel C236, LGA1151), Intel Skylake-family CPU (the guest sees `Intel Core Processor (Skylake, IBRS)`); TrueNAS SCALE 25.10.7, kernel `6.12.105-production+truenas` |
 | GPU | AMD Radeon AI PRO R9700 (`1002:7551`, gfx1201 / RDNA4, 32 GB, 300 W), passed through whole to one VM (VFIO). **Physical link: PCIe 3.0 x16** (the board's limit; the card is Gen5) |
-| Guest | Ubuntu 24.04.4 LTS, kernel `6.8.0-138-generic`, `amdgpu-dkms` 6.19.14 (out-of-tree driver from AMD's ROCm repository), 4 vCPUs, 40 GiB RAM |
+| Guest | Ubuntu 24.04.5 LTS, kernel `6.8.0-146-generic`, `amdgpu-dkms` 6.19.14 (out-of-tree driver from AMD's ROCm repository), 4 vCPUs, 32 GiB RAM |
 | Serving | Podman, `stilldeadcode/vllm-radiance:0.9.3`, launched by llama-swap through `startup-qwen3.8-27b-mxfp4.sh` |
 
 ### PCIe 3.0 x16, and what it limits
@@ -138,15 +138,14 @@ instead.
 
 | Setting | Value | Why |
 |---|---|---|
-| `/dev/shm` | `tmpfs size=28G` in `/etc/fstab` | The RAM KV tier lives here. It must hold the tier (19 GiB for one full 262,144-token context) plus a 0.25 GiB margin. The default (50% of RAM) is too small on a 40 GiB VM. |
-| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB or more recommended**; this box's 94 GiB volume is below that (KV-CACHE.md). |
+| `/dev/shm` | `tmpfs size=20G` in `/etc/fstab` | The RAM KV tier lives here. It must hold the tier (16 GiB by default; 20G is enough for that) plus a 0.25 GiB margin. |
+| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB with the reaper at 75% recommended**; this box's 94 GiB volume, reaped at 70%, is below that (KV-CACHE.md). |
 | `vm.swappiness` | 10 | Evict disposable page cache before swapping anonymous memory. |
 | `vm.max_map_count` | 1048576 | Large mmap counts (Ubuntu bug 2057792). |
 | Transparent huge pages | `madvise` (default) | Unchanged. |
 
 **Host RAM.** The peak during the stress run was about 27 GB: a 16 GiB RAM tier, the 2.37 GiB pinned
-embedding, and the engine. At the 19 GiB tier, plan on about 30 GB, so 40 GiB leaves room. Do not size
-the VM below 32 GiB with this configuration.
+embedding, and the engine; 16 GiB is the default tier. This 32 GiB VM is the minimum for this configuration.
 
 ## Reading the same settings on your machine
 

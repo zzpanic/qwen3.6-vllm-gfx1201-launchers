@@ -4,16 +4,19 @@ These are **not standalone scripts.** Read this before you try to run one.
 
 ## Which build applies which
 
- The **default** build applies nine: `patch_offload_mixed_hit.py`, `patch_eagle_groups.py`,
+ The **default** build applies thirteen: `patch_offload_mixed_hit.py`, `patch_eagle_groups.py`,
  `patch_mamba_stride.py`, `patch_reconcile_reask.py`, `patch_swa_align_touch.py`,
- `patch_sched_align_last_block.py` and the three canonical-chunk patches
- (`patch_sched_canonical_chunks.py`, `patch_canon_receipts.py`, `patch_canon_mixed.py`). They are the ones that change what is served — a crash
+ `patch_sched_align_last_block.py`, the three canonical-chunk patches
+ (`patch_sched_canonical_chunks.py`, `patch_canon_receipts.py`, `patch_canon_mixed.py`), the checkpoint-retention
+ pair (`patch_vram_retention.py`, `patch_tier_retention.py`), `patch_canon_wait.py` and the warm-history
+ boot line (`patch_warm_history.py`, logging only). They are the ones that change what is served — a crash
  guard plus the behavioural fixes: the draft-group annotation this model needs, the
  recurrent-state store stride that makes the RAM tier hold enough, reconcile re-ask (stop
  recomputing prefixes the tier holds), the swa-align/touch-all eviction fix, and the
- last-block align and canonical chunks (cached == cold). Everything else here is instrumentation or fs-tier-only
+ last-block align and canonical chunks (cached == cold), and which checkpoints each tier keeps. Everything else here is instrumentation or fs-tier-only
  and is applied only by the **disk** build (`KVCACHE_DISK_TIER=1`).
- `APPLY-ORDER.txt` marks the nine.
+ `APPLY-ORDER.txt` marks them `[default]`. The drafter and correctness patches further down (`patch_w4a16_*`,
+ `patch_short_prefill.py`, ...) are applied by every build; APPLY-ORDER.txt says which ones.
 
 ## What they are
 
@@ -87,6 +90,8 @@ root the script expects. The launcher does all three for you; nothing else does.
  | 7 | `patch_swa_align_touch.py` | warns; every drafter chunk stored, stock eviction touch |
  | 8 | `patch_sched_align_last_block.py` | warns; cached turns can differ from cold in the low bits |
  | 8a-8c | `patch_sched_canonical_chunks.py`, `patch_canon_receipts.py`, `patch_canon_mixed.py` | **FATAL** — a partial apply would leave some caching paths uncapped |
+ | 8d-8f | `patch_vram_retention.py`, `patch_tier_retention.py`, `patch_canon_wait.py` | **FATAL** — a partial apply could leave a store rule without its handoff |
+ | 8g | `patch_warm_history.py` | warns; no warm-history line |
  | 9 | `patch_offload_debug_instrument.py` | warns; miss playback events absent |
  | 10 | `patch_offload_fs_fanout.py` | warns; one fs job per promotion |
  | 11 | `patch_offload_tier_report.py` | warns; no per-tier metrics, so `tools/tierreport.py` has no rows |
@@ -130,11 +135,13 @@ patch's metric series actually exists in `/metrics` before you believe a result;
  | `swa_align_touch` | `RADIANCE_SWA_STORE_MAMBA_ALIGN`, `RADIANCE_TOUCH_ALL_GROUPS`, `RADIANCE_TOUCH_POSITION_ORDER` |
  | `sched_align_last_block` | `RADIANCE_ALIGN_PROMPT_LAST_BLOCK` |
  | `sched_canonical_chunks`, `canon_receipts`, `canon_mixed` | `RADIANCE_CANONICAL_CHUNKS`, `RADIANCE_CANON_RECEIPTS`, `RADIANCE_CANON_MIXED` |
+ | `vram_retention`, `tier_retention` | `RADIANCE_VRAM_RETENTION`, `RADIANCE_VRAM_KEEP_PREFIX`, `RADIANCE_TIER_RETENTION`, `RADIANCE_TIER_GEO_K` |
+ | `canon_wait` | `RADIANCE_CANON_WAIT`, `RADIANCE_CANON_WAIT_MAX` |
  | `fs_failed_load` | `RADIANCE_FS_FAILED_LOAD_FORGET` |
  | `lookup_invalidate` | `RADIANCE_LOOKUP_INVALIDATE` |
  | `fs_fanout` | `RADIANCE_FS_FANOUT_MAX`, `RADIANCE_FS_FANOUT_TARGET_MB` |
  | `skip_mm_warmup` | `RADIANCE_SKIP_MM_WARMUP` (launcher default 1; 0 = stock startup warmup, and the first image request of a boot pays it otherwise) |
- | `instrumentation`, `lookup_metrics`, `debug_instrument`, `tier_report`, `miss_deferral_metrics` | none — metrics only, no behaviour change |
+ | `instrumentation`, `lookup_metrics`, `debug_instrument`, `tier_report`, `miss_deferral_metrics`, `warm_history` | none — metrics or logging only, no behaviour change |
  
  Patching is therefore reversible without rebuilding: unset the gate and you get
  upstream behaviour with the patch still in place.
@@ -148,3 +155,9 @@ the external reaper entirely, and PR #54743 supplies the filtered-group primitiv
 patch 4 reinvents by hand.
 
 A house patch that duplicates merged upstream work is a liability, not an asset.
+
+## Not a patch: `radiance_jit_warmup.py`
+
+The container runs it once, right after `/health` answers (`JIT_WARMUP=1`, the default): a few tiny requests
+so the Triton kernels that real traffic would first call (speculative sampler, drafter input prep, W4A16
+GEMMs at batch > 1) compile or load at boot instead. It edits nothing and needs no `_patchlib`.

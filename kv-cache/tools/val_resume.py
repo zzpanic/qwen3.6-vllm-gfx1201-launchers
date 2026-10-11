@@ -44,7 +44,7 @@ def main():
     ap.add_argument("--records", type=int, default=500, help="registry size; moves the cached block's parity")
     ap.add_argument("--evict", type=int, default=0, metavar="N",
                     help="after the primer, prefill N unrelated ~35k-token registries so the primer's blocks "
-                         "leave the GPU and the warm turns restore from the offload tier (pool ~270k tokens: N>=9)")
+                         "leave the GPU and the warm turns restore from the offload tier (N x 35k must exceed the GPU pool: N>=12 at the default 369,614 tokens)")
     a = ap.parse_args()
     doc, recs = registry(11, a.records)
     by = {r["id"]: r for r in recs}

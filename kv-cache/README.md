@@ -3,7 +3,7 @@
 KV-cache offload for hybrid (Gated-DeltaNet + attention + drafter) models on one card,
 GPU → RAM → disk. Served by vLLM 0.27.1 / radiance 0.9.3 on one AMD Radeon AI PRO R9700
 (gfx1201 / RDNA4, 32 GB, TP=1) — here, Qwen3.8-27B (Gated-DeltaNet hybrid, MXFP4 weights,
-FP8 KV) at a 204,800-token context. It exists so that when **more than one client shares a
+FP8 KV) at a 262,144-token context. It exists so that when **more than one client shares a
 slot** (`--max-num-seqs`), a returning client's prefix is **loaded back from RAM (or disk)
 instead of reprocessed**: the prefix is kept off the card, and on the next turn it is restored
 rather than recomputed.
@@ -29,7 +29,7 @@ DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh             # print the command, run no
 | | Option 1 — GPU → RAM | Option 2 — GPU → RAM → disk (default) |
 |---|---|---|
 | select with | `KVCACHE_DISK_TIER=0` | nothing (`KVCACHE_DISK_TIER=1`) |
-| house patches | the 6 "always" behavioural | the 6 + the 3 disk-tier fixes |
+| house patches | the 13 default ones (behavioural fixes, canonical chunks, checkpoint retention; patches/README.md) | the 13 + the 3 disk-tier fixes |
 | needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
 | tools | `kvwatch.py`, `kvtable.py` | the same |
 
@@ -108,7 +108,7 @@ recomputed, and the block is re-stored intact.
 
 Anchored against vLLM 0.27.1 + radiance 0.9.3, applied at container start in a real dependency
 order. Every behaviour change sits behind an env gate whose **unset state is stock vLLM**; nothing
-hard-codes a model name, group index or block size. **Always: the 6 marked default. With the disk
+hard-codes a model name, group index or block size. **Always: the 13 marked default. With the disk
 tier: + the 3 marked disk. `KVOFF_MINIMAL=0`: + the 6 marked instrumentation.**
 
 | # | patch | does | scope |
@@ -121,6 +121,10 @@ tier: + the 3 marked disk. `KVOFF_MINIMAL=0`: + the 6 marked instrumentation.**
 | 6 | `patch_reconcile_reask` | reconcile a re-asked turn (memo off) | default |
 | 7 | `patch_swa_align_touch` | sliding-window align / touch | default |
 | 8 | `patch_sched_align_last_block` | align the prompt's last block — **upstream candidate** | default |
+| 8a-8c | `patch_sched_canonical_chunks`, `patch_canon_receipts`, `patch_canon_mixed` | canonical prefill chunks: cached == cold | default |
+| 8d-8e | `patch_vram_retention`, `patch_tier_retention` | checkpoint retention, GPU pool and tiers | default |
+| 8f | `patch_canon_wait` | concurrent prefills keep the canonical grid | default |
+| 8g | `patch_warm_history` | the warm-history boot line (logging only) | default |
 | 9 | `patch_offload_debug_instrument` | debug hooks | instrumentation |
 | 10 | `patch_offload_fs_fanout` | fs read fan-out | disk |
 | 11 | `patch_offload_tier_report` | tier-report metrics | instrumentation |
@@ -142,16 +146,16 @@ matter (ggz14 column = `serve-mxfp4.sh` TP=1 single-GPU profile at `980f891`):
 | setting | ggz14 (TP=1 profile) | here | why |
 |---|---|---|---|
 | KV offload tier | none (no `--kv-transfer-config` at all) | GPU → RAM (→ disk) | **this is the point** |
-| mamba ssm dtype | fp16 (conv bf16) | **fp32 ssm** | a tier can't round-trip a 16-bit temporal state |
-| context (`--max-model-len`) | 65,536 | 204,800 | extra context is gold; fits the cold pin |
-| `--max-num-seqs` | 8 | 2 | single-user agentic; serialises eviction |
-| prefill chunk (`--max-num-batched-tokens`) | 4,096 | 2,048 | smallest activation transient |
+| mamba ssm dtype | fp16 (conv bf16) | fp16 | the same, since 2026-10-08 (exact through the tier with canonical chunks) |
+| context (`--max-model-len`) | 65,536 | 262,144 | the model's maximum; fits the pin |
+| `--max-num-seqs` | 8 | 4 | a few agents at once, with a pool for long contexts |
+| prefill chunk (`--max-num-batched-tokens`) | 4,096 | 3,568 | four 880-token blocks (the canonical grid) + the speculative reserve |
 | `--gpu-memory-utilization` | 0.98 | 0.97 | 0.98 → profiling → device-lost without a pin (the pin overrides it regardless) |
-| `--kv-cache-memory` | auto → profile pin 6,535,819,798 | explicit pin 9,300,000,000 | no cold/warm gap |
-| GDN_LAZY | 1 | 0 | profile default, not adopted |
+| `--kv-cache-memory` | auto → profile pin 6,535,819,798 | explicit pin 12,650,000,000 | no cold/warm gap; stress-measured |
+| GDN_LAZY | 1 | 1 | adopted 2026-10-06 with the invalidation and materialize fixes (KERNEL.md) |
 | draft sampling | greedy | probabilistic | +10% acceptance, measured, no cost |
 | generation temp | 0.7 | 1.0 | model-card preset; 0.7 was benchmark-chasing |
-| capture sizes | `[1 … 64]` | `[1,2,4,8,16]` | capture only small-M decode shapes |
+| capture sizes | `[1 … 64]` | `[1,2,4,8,16,24,32]` | up to `MAXSEQS x (K+1)` decode tokens, no larger |
 
 ## Evidence scope
 
