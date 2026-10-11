@@ -7,7 +7,7 @@ the reference for the files.
 | file | what |
 |---|---|
 | `r4d_kernels.patch` | libr4d v0.5.0 + radiance extras + the exact-decay GDN scan (libr4d #4), exact-wide DSPLIT prefill, the prefill block-table clamp, lazy-GDN invalidation, and the rx17 lazy-GDN materialize fix (multi-block prefill steps after an offload-tier resume). Built once per image and GPU arch by the launcher (cached under `~/.cache/radiance-libr4d/v0.5.0-p<patch sha>-<image key>`). |
-| `radiance_mxfp4_fp8.patch` | ggz14's MXFP4 W4A8 kernel with the decode band M 9-64 re-tuned (two or more concurrent sequences). Applied to a copy of your clone's `radiance_mxfp4_fp8.hip`. |
+| `radiance_mxfp4_fp8.patch` | ggz14's MXFP4 W4A8 kernel with the decode band M 9-64 re-tuned (two or more concurrent sequences) and the split-K reduction fence (correctness, 2026-10-11). Applied to a copy of your clone's `radiance_mxfp4_fp8.hip`. |
 | `LICENSE.r4dx` | the MIT notice that must travel with the DSPLIT code from Crssz/r4dx |
 | `tests/dsplit_bench.py`, `tests/dsplit_cmp.py` | DSPLIT bit-identity and speed against DS=1 |
 
@@ -64,7 +64,7 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
 - `gdn_chunk_scan_k128_v128_c64_bf16_st`: the scan with the state width as an argument. With an fp16
   ssm cache, `kv-cache/patches/patch_gdn_state_fp16.py` lets prefill read and write the state
   natively instead of widening it in Python (same arithmetic, two fewer copies). Dormant on fp32.
-- **Lazy GDN (opt-in, `RADIANCE_GDN_LAZY=1`; see Validation below).** `gdn_lazy_materialize` mode 2 zeroes a
+- **Lazy GDN (on by default since 2026-10-06, `RADIANCE_GDN_LAZY=1`; see Validation below).** `gdn_lazy_materialize` mode 2 zeroes a
   prefilling request's stash headers in every row-split region (a recycled stash block could
   otherwise replay another request's candidates -- the multi-turn corruption ggz14 reported in
   0cadf57), plus stale-stash counters (`gdn_lazy_stale_counts_<tag>`), wired by
@@ -80,7 +80,7 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
   with lazy on, then 37 rounds (2,812 turns) with lazy off as the control. Same failures at the
   same rate in both, all traced to the uniform-decode bug below -- none specific to lazy; 0 engine
   faults. Lazy drift vs eager stays at or below the spec on/off noise floor (KL 0.0008-0.0023).
-  It is still opt-in: ggz14's original multi-turn corruption was never reproduced, so the fix for
+  It went default on 2026-10-06, although ggz14's original multi-turn corruption was never reproduced, so the fix for
   it is unproven, not disproven. With fp32 state it adds +13.2% KV (228,737 -> 259,011 tokens) and
   measured +7% decode for 1-3% prefill.
 - **fp16 ssm state (`MAMBA_SSM_FP16=1`, the default since 2026-10-08):** found here as a garbage reply
@@ -89,8 +89,8 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
   through the tier (ROADMAP.md section 1).
 - **Not a kernel bug, found by this validation:** vLLM 0.27.1's V2 runner replayed the
   speculative-decode CUDA graph over any prefill chunk of exactly `1 + num_speculative_tokens`
-  tokens -- an empty reply for roughly 1 prompt in 1,648. All three 0.9.3 launchers now apply
-  `kv-cache/patches/patch_uniform_decode_guard.py` (int4 as an overlay copy);
+  tokens -- an empty reply for roughly 1 prompt in 1,648. The launcher applies
+  `kv-cache/patches/patch_uniform_decode_guard.py`;
   `kv-cache/tools/lenprobe.py` is the regression test.
 
 ## Sources and licence status
@@ -107,7 +107,7 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
 | MXFP4 decode band measurements (M 9-64) | SlyBase, github.com/SlyBase/vllm-sly-radiance 0.2.1 | none published -- uncertain |
 | `_st` binding, lazy mode 2, stale-stash counters, DSPLIT launch law, launcher knobs, house patches, tools | this repository | Apache-2.0 |
 
-The first three are redistributed here without a licence grant from their authors; the patch header
+The parts marked "none published" are redistributed here without a licence grant from their authors; the patch header
 says so too. If you are one of them and want this changed or removed, open an issue.
 
 ## Tools

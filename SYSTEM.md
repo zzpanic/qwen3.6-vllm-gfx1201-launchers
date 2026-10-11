@@ -20,9 +20,9 @@ The R9700 is a PCIe 5.0 card on a PCIe 3.0 board: about 15.75 GB/s per direction
 Decode and prefill run from VRAM and do not notice. Three things cross the bus and do:
 
 - **The RAM KV tier.** Restores measured 12.0 GB/s, which is the practical ceiling of a 3.0 x16 link,
-  so the tier's speed here is set by the slot, not the software. A 100k-token restore (about 7 GB)
-  takes about 0.6 s. On a Gen4 or Gen5 board expect roughly 2x or 4x that rate.
-- **Weight loading** at boot: 18 GB of checkpoint, a few seconds of the boot either way.
+  so the tier's speed here is set by the slot, not the software. A 100k-token restore (about 3.5 GB:
+  attention for every block plus one checkpoint) takes about 0.3 s. On a Gen4 or Gen5 board expect roughly 2x or 4x that rate.
+- **Weight loading** at boot: 19 GiB of checkpoint, a few seconds of the boot either way.
 - **`EMBED_HOST=1`**: the input embedding is read across the bus, but only a few rows (10 KB each)
   per token, so it is not measurable.
 
@@ -139,7 +139,7 @@ instead.
 | Setting | Value | Why |
 |---|---|---|
 | `/dev/shm` | `tmpfs size=20G` in `/etc/fstab` | The RAM KV tier lives here. It must hold the tier (16 GiB by default; 20G is enough for that) plus a 0.25 GiB margin. |
-| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB recommended (96 GB of cache)**; this box's 94 GiB volume, reaped at 70%, is below that (KV-CACHE.md). |
+| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB recommended (96 GiB of cache)**; this box's 94 GiB volume, reaped at 70%, is below that (KV-CACHE.md). |
 | `vm.swappiness` | 10 | Evict disposable page cache before swapping anonymous memory. |
 | `vm.max_map_count` | 1048576 | Large mmap counts (Ubuntu bug 2057792). |
 | Transparent huge pages | `madvise` (default) | Unchanged. |

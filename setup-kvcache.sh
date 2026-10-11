@@ -211,7 +211,7 @@ fstab_add() {  # fstab_add LINE (backed up, verified, restored on failure)
 }
 step_disk() {
   hdr "Disk tier"
-  say "  A disk tier keeps finished conversations after the RAM tier is full: ~2.2M tokens in 96 GB,"
+  say "  A disk tier keeps finished conversations after the RAM tier is full: about 2M tokens in 96 GB,"
   say "  restored at disk speed instead of recomputed. The reaper holds it to a size you choose."
   say "  Without one, make the RAM tier larger."
   if ! yes_no "Use a disk tier?" y; then

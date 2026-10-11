@@ -1,38 +1,13 @@
-# Release manifest
+# What is in `kv-cache/`
 
-Assembled by `make-dist.sh` on 2026-09-28T02:41:50Z from the working
-tree at `<repo>`.
-
-| Path | Source | What it is |
-|---|---|---|
-| `README.md` | kv-cache/ | **Start here.** Status, roadmap, architecture. |
-| `docs/` | kv-cache/ | `SETUP.md` — prerequisites, sizing, the reaper, the tools and the metric traps. |
-| `patches/` | kv-cache/ | The house patches, their apply order and which build applies each, and `patches/README.md` — what they need to run, which two are fatal on failure, and the env gate on each. **Reconcile against upstream before using.** |
-| `launcher/` | kv-cache/ + vllm/ | The KV-cache entry launcher and the base launcher it wraps. |
-| `ops/` | vllm/ | The reaper (mandatory for the disk tier), its systemd units, the mount snippets. |
-| `bench/` | kv-cache/ | Harnesses, shipped for method, including `turnbench.py` -- the cached-vs-cold exactness gate. No result files. |
-| `tools/` | kv-cache/ | `kvwatch.py` — the live one-screen view, for either build; `tierreport.py` — the tier sizing/speed report; and `kvvalidate.py` — the live-load validator that names your regime and reports cache performance with confidence markers. All three are meant to be run for their numbers, on your own traffic.; and `kvtable.py` -- the tier table in the README, printed live from /metrics. |
-
-Deliberately excluded: `baselines/`, all bench-history, and every result file.
-Single-machine numbers, some known polluted — ship the method, not the numbers.
-
-## Reading the documents
-
-The docs were written against the author's flat working tree and the release is
-nested, so paths inside them do not always match paths here:
-
-| In the documents | In this release |
+| Path | What it is |
 |---|---|
-| `<repo>` | the author's working tree — a placeholder, not a path you have |
-| `<repo>/kv-cache/patch_*.py` | `kv-cache/patches/` |
-| `<repo>/kv-cache/*.md` | `kv-cache/docs/` |
-| `<repo>/kvcache-reap.*` | `kv-cache/ops/` |
-| `<repo>/kv-cache/*bench*.py`, `phase*-read.sh` | `kv-cache/bench/` |
-| `<repo>/kv-cache/tierreport.py`, `tier_report_*.py` | `kv-cache/tools/` |
-| `<repo>/kv-cache/kvvalidate.py` | `kv-cache/tools/` |
-| `<repo>/ggz14-mxfp4` | ggz14's clone, `radiance-vllm-mxfp4/` beside the repo (see the root README's Quick start) |
-| `<repo>/benchmarks/`, `bench-history/` | not shipped — the working record stays in the source tree |
-| `<repo>/kv-cache/kv-cache-historical.md`, `cache-preemption-patch-plan.md`, `kv-cache-closed-decisions.md`, `status-*.md` | not shipped — the research record; this repository publishes the result, not the route to it |
+| `README.md` | **Start here.** The two options (RAM only, RAM + disk), the patch set and how it differs from ggz14. |
+| `docs/SETUP.md` | Prerequisites, sizing, the reaper, the tools and the metric traps. |
+| `patches/` | The house patches, `APPLY-ORDER.txt`, and `patches/README.md`: which build applies each, which are fatal, the env gate on each. **Check against upstream before reusing.** |
+| `ops/` | The reaper script (the launcher runs it inside the container), optional systemd units, the fstab lines. |
+| `bench/` | Harnesses, shipped for the method, including `turnbench.py`, the cached-vs-cold exactness gate. No result files. |
+| `tools/` | `kvwatch.py` and `kvtable.py` (any build), `kvvalidate.py` and `tierreport.py` (need `KVOFF_MINIMAL=0`), and the correctness tools (`lenprobe.py`, `val_resume.py`, ...). |
+| `examples/` | One real tier report and the `/metrics` snapshot it came from. |
 
-**This is a working, correct, unoptimised implementation.** Read `README.md` for what is
-measured, and `docs/SETUP.md` for what is not yet done.
+The launcher is `startup-qwen3.8-27b-mxfp4.sh` at the repository root; [KV-CACHE.md](../KV-CACHE.md) is the overview.

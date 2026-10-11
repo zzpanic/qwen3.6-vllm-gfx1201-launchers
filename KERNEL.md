@@ -22,7 +22,7 @@ Qwen3.8-27B MXFP4, with:
 | `_st` chunk-scan binding (state width as an argument) | `r4d_kernels.patch` | Lets an fp16 GDN state be read natively (fp16 is the default since 2026-10-08). | Same arithmetic |
 | Lazy-GDN materialize: no stash needed when nothing is replayed (rx17) | `r4d_kernels.patch` | Fixes garbage after an offload-tier resume whenever a prefill step spans more than one block -- what broke fp16 state and any CHUNK above one block. Enables fp16 + CHUNK=3532. | Resume through the tier bit-identical to cold at fp32 4956 and fp16 3532; decode path unchanged |
 | MXFP4 W4A8 decode band, M 9-64 | `radiance_mxfp4_fp8.patch` | o_proj/out_proj -5..-6% kernel time with two concurrent sequences | Single-stream (M <= 8) untouched, byte for byte |
-| DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (five patches + two modules) | Drafter VRAM -0.78 GiB (KV pin 11.5e9 -> 12.65e9); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
+| DFlash2-W4A16 drafter path (2026-10-11): deferred-quant load, W4A16 Triton tiles + split-K + tiled layout, split-KV drafter attention, int4 fusions, prompt-lookup draft | `kv-cache/patches/` (six patches + two modules) | Drafter VRAM -0.78 GiB (KV pin 11.5e9 -> 12.65e9); decode step 35.9 -> 33.9 ms | Same acceptance (tokens/update 4.56 vs 4.57); lookup draft is lossless by construction |
 | MXFP4 split-K reduction fence (2026-10-11) | `radiance_mxfp4_fp8.patch` | Correctness: the split-K decode reduction could read partial sums before other threads had stored them (rare, load-dependent wrong output). Same fix as SlyBase 1.1.1. | Fixes a race; the arithmetic is unchanged |
 
 **Released configuration** (2026-10-11: everything above, launcher defaults, `MAXSEQS=4`, CHUNK=3568),
@@ -139,8 +139,8 @@ therefore unproven rather than disproven, and the soak is what lazy GDN rests on
 - **Block-table prefetch clamp** (deadcode's engine): the prefill kernel's next-tile prefetch reads
   `bt[min(i, last block)]` instead of running one entry past the sequence.
 - **`_st` binding**: the chunk scan with the state width as an argument, so an fp16 GDN state is read
-  and written natively instead of being widened in Python. It is dormant, because the served state
-  is fp32 (see below).
+  and written natively instead of being widened in Python. It is active with the default fp16 state
+  (`patch_gdn_state_fp16.py`); an fp32 state takes the old path.
 
 ## The MXFP4 decode band (`radiance_mxfp4_fp8.patch`)
 
@@ -175,7 +175,7 @@ the boot stops and says so instead of compiling something stale.
 `syvai/Qwen3.8-27B-DFlash2-W4A16` is the DFlash2 drafter quantised to 4-bit weights (compressed-tensors
 W4A16). It is 1.2 GB on disk against the FP8 drafter's 2.0, frees 0.78 GiB of VRAM, and the launcher
 gives that to the KV pool (`KV_MEM` 11.5e9 -> 12.65e9: 369,614 tokens at MAXLEN 262144, 0.33 GiB spare at the
-stress peak). Five patches make it
+stress peak). Six patches make it
 load and run fast; each is inert for the FP8 drafter:
 
 | Patch | What it does | Source |
@@ -187,7 +187,7 @@ load and run fast; each is inert for the FP8 drafter:
 | `patch_w4a16_prefill.py` | Tiles for the drafter's two prefill-sized GEMMs (fc and context-KV, M up to CHUNK): BLOCK_K 32 and a GROUP_M program-id swizzle, from tcclaviger's R9700 configs. Bit-identical to stock; fc 19.7 -> 9.5 ms per 3568-token chunk, about 1% faster prefill end to end. `RADIANCE_W4A16_PREFILL=0` turns it off. | this repository |
 | `patch_lookup_draft.py` + `radiance_lookup_draft.py` | When the text being written is a verbatim copy of the prompt, propose the copy instead of the drafter's guess (entry rule 16/6/5, picked by a replay of real agent sessions). Verification is unchanged, so it is lossless. `RADIANCE_LOOKUP_DRAFT=0` turns it off. | SlyBase |
 
-Measured on one R9700, BetterBench 0.6.0 decode, 20 passes, same session:
+Measured on one R9700, BetterBench 0.6.0 decode, 20 passes, same session, before `patch_w4a16_prefill.py` existed:
 
 | | FP8 drafter | W4A16 drafter + all five |
 |---|--:|--:|
@@ -213,8 +213,8 @@ inside that band. On verbatim-copy tasks the lookup draft raises it from ~4.2 to
 compared by git blob hash against libr4d v0.5.0, libr4d main, deadcode's engine and ggz14, and every
 differing file was diffed against this build. Only the items above and the open ones in ROADMAP.md
 apply to this model on this card. The largest open one is deadcode's GDN decode rewrite (anchor
-state, conv fold, non-temporal store). It is claimed at about 14% of a decode step, but it overlaps
-lazy GDN, so the gain on top of that is unknown. It is also costly and correctness-critical to port.
+state, conv fold, non-temporal store). Its anchor state is what lazy GDN already does here; the 2026-10-11 review puts the rest (conv fold,
+gated norm + quant, non-temporal store) at about 2-3% of a step (ROADMAP.md section 2, item 2). It is also costly and correctness-critical to port.
 
 ## Non-kernel work behind the same numbers
 
@@ -259,7 +259,8 @@ The patch headers carry the full provenance; `r4d_kernels/README.md` has the tab
 - Crssz/r4dx's DSPLIT is MIT; its notice ships as `r4d_kernels/LICENSE.r4dx`.
 - This repository's own changes are Apache-2.0.
 - SlyBase's README states its licence is "same as upstream vllm-radiance" (Apache-2.0) but ships no
-  LICENSE file; the five SlyBase-derived patches keep their provenance headers.
+  LICENSE file; the SlyBase-derived patches keep their provenance headers.
+- tcclaviger/vllm: the prefill tile settings in `patch_w4a16_prefill.py` (BLOCK_K 32, GROUP_M swizzle).
 - libr4d v0.5.0 (StillDeadcode), ggz14's radiance extras and MXFP4 kernel, J-Nova's rx12 rebase, and
   SlyBase's decode table publish **no licence**. They are redistributed here with attribution and
   without a grant. If you are one of those authors and want something changed or removed, open an

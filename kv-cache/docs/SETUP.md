@@ -4,7 +4,7 @@ Every command here runs from the repository root. Each change says how to verify
 and how to undo it.
 
 There are two options (see the README), called builds in the launcher and the patch notes:
-**option 1** — GPU → RAM with six patches (`KVCACHE_DISK_TIER=0`) — and **option 2, the disk
+**option 1** — GPU → RAM with the 13 default patches (`KVCACHE_DISK_TIER=0`) — and **option 2, the disk
 build** — the default, which adds the disk tier and its three fixes. `KVOFF_MINIMAL=0` adds the
 instrumentation to either. Everything not marked *disk build* applies to both.
 
@@ -64,7 +64,7 @@ systemctl is-enabled kvcache-reap.timer          # want: enabled
 ```
 
 It is capacity-governed with an absolute minimum-age floor, so it will not delete a block that a
-running request still needs. Mask it during correctness runs — it will otherwise delete blocks
+running request still needs. Turn it off during correctness runs (`KVCACHE_REAPER=0`, or mask the timer) — it will otherwise delete blocks
 mid-test and produce a failure that is not real.
 
 ## Running
@@ -79,7 +79,7 @@ KVCACHE_DISK_TIER=0 ./startup-qwen3.8-27b-mxfp4.sh               # serve, RAM ti
 |---|---|
 | `KVCACHE_DISK_TIER` | `1` (default) GPU → RAM → disk; `0` GPU → RAM only |
 | `KVOFF_MINIMAL` | `1` (default); `0` adds the instrumentation patches (`kvvalidate.py`, `tierreport.py`) |
-| `KVCACHE_TIER_GIB` | RAM tier, GiB. `auto` (default) applies the sizing rule above |
+| `KVCACHE_TIER_GIB` | RAM tier, GiB: `16` (default); `auto` applies the older rule above |
 | `KVCACHE_DISK` | disk tier path, default `/kvcache`. If it does not exist the launcher refuses to start and says how to fix it |
 
 Confirm it came up — the `[kvcache]` lines name the build and the tier size:
@@ -101,12 +101,11 @@ watch -n 5 python3 kv-cache/tools/kvwatch.py
 ```
 
 GPU and offload-tier hit rates (lifetime and since the last refresh — read the second), load/store
-bytes, and the last few requests with how much of each was cached. It reads the `qwen3.8-27b-kvcache`
-entry through llama-swap on `:1234`; point it elsewhere with
-`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics`. The per-request table needs llama-swap and is
+bytes, and the last few requests with how much of each was cached. Point it at your engine with
+`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` (its default is the author's llama-swap entry). The per-request table needs llama-swap and is
 skipped without it. The first refresh shows no rates — it has nothing to difference against yet.
 
-**`tools/kvvalidate.py`** — *disk build.* Read-only, stdlib-only, no GPU, one HTTP read.
+**`tools/kvvalidate.py`** — *disk build with `KVOFF_MINIMAL=0`.* Read-only, stdlib-only, no GPU, one HTTP read.
 Against a live busy endpoint it re-establishes five invariants, **names the regime you are in
 before you draw a conclusion**, and marks every performance figure `SOLID`, `REGIME` or
 `UNRESOLVED`. **Do not run it against the default build:** the counters it compares are not
@@ -129,7 +128,7 @@ those buckets is then a lower bound rather than a measurement. A negative drift 
 was counted twice, which makes the accounting unusable. Either way the number to chase is the
 exit, not the counter.
 
-**`tools/tierreport.py`** — *disk build.* Tier sizing and read rates from the live counters.
+**`tools/tierreport.py`** — *`KVOFF_MINIMAL=0`.* Tier sizing and read rates from the live counters.
 
 **`bench/correctbench.py`** — *disk build*, since it serves from the disk tier. The
 correctness gates. CT5 is a negative control and gates the rest; nothing else runs unless a

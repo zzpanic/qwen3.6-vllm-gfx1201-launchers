@@ -10,12 +10,12 @@ than recomputed.
 
 ## Where it comes from
 
-- **Built on ggz14's [radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)** (GitHub
-  mirror [GGZ14/vllm-mxfp4](https://github.com/GGZ14/vllm-mxfp4)) and the
+- **Built on ggz14's [radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)** and the
   `stilldeadcode/vllm-radiance:0.9.3` image. Those provide the MXFP4 GEMM, the R4D attention path and
   the DFlash2 integration.
 - **Kernel changes are pulled from several forks**: deadcode's radiance engine, Crssz/r4dx, J-Nova,
-  SlyBase and vllm-radiance pull requests. They are gathered in [`r4d_kernels/`](r4d_kernels/);
+  SlyBase, tcclaviger and vllm-radiance pull requests. They are gathered in [`r4d_kernels/`](r4d_kernels/)
+  and [`kv-cache/patches/`](kv-cache/patches/);
   [KERNEL.md](KERNEL.md) explains each one and its licence.
 - **The startup cache ([`startup-cache/`](startup-cache/)) and the KV-cache offload
   ([`kv-cache/`](kv-cache/), [KV-CACHE.md](KV-CACHE.md)) are this repository's own work.**
@@ -34,17 +34,19 @@ The rest of the documentation:
 | Container runtime | Podman or Docker |
 | Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
-| Disk tier | **96 GB of cache**, held there by the launcher's built-in reaper (`KVCACHE_MAX_GB`): a folder on any fast disk, or a filesystem or image file of its own (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
+| Disk tier | **About 96 GB of cache**, held there by the launcher's built-in reaper: a folder on any fast disk with a size limit (`KVCACHE_MAX_GB`), or a 128 GiB filesystem or image file of its own (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
 | Downloads | About 40 GiB for the checkpoints |
 
 ## Setup
 
-**1. Clone the repositories.** ggz14's tree goes next to the launcher, under exactly this name.
+**1. Clone the repositories.** ggz14's tree goes next to the launcher, under exactly this name, at the
+commit everything here was measured on (the GitHub mirror does not carry it).
 
 ```bash
 git clone https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers
 cd qwen3.6-vllm-gfx1201-launchers
-git clone https://github.com/GGZ14/vllm-mxfp4 radiance-vllm-mxfp4
+git clone https://codeberg.org/ggz14/radiance-vllm-mxfp4
+git -C radiance-vllm-mxfp4 checkout 980f891
 ```
 
 **2. Download the models into `~/models`.** ggz14's `setup-mxfp4.sh` fetches AMD's MXFP4 checkpoint,
@@ -146,7 +148,7 @@ python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # hits
 ```
 
 `logs/bootlog-first.txt` and `logs/bootlog-second.txt` show what a first (cold) boot and a second
-(warm) boot print. About 20 seconds after `/health` answers, the log shows one `[radiance] jit warm-up` line:
+(warm) boot print. About 20-30 seconds after `/health` answers, the log shows one `[radiance] jit warm-up` line:
 a few tiny requests that compile or load the remaining Triton kernels before real traffic (`JIT_WARMUP=0` turns
 it off).
 

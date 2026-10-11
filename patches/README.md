@@ -1,10 +1,10 @@
 # gfx1201 W4A16 Triton tile tuning
 
-> **Scope: int4 W4A16 only** — that is, `startup-qwen3.8-27b-int4.sh` and the two 3.6
-> scripts. The MXFP4 path (`startup-qwen3.8-27b-mxfp4.sh`) has **no W4A16 GEMM at all**;
+> **Scope: int4 W4A16 only** — that is, `old_work/startup-qwen3.8-27b-int4.sh` and the two 3.6
+> scripts there. The MXFP4 path (`startup-qwen3.8-27b-mxfp4.sh`) has **no W4A16 GEMM at all**;
 > its dense Linears go through radiance's MXFP4 kernels, so nothing in this directory is
-> reachable from it and none of these numbers apply to it. The `dflash2/` subdirectory is
-> the exception — those patches are about the draft head and are used by both.
+> reachable from it and none of these numbers apply to it. That includes `dflash2/`, a DFlash2
+> back-port for vLLM 0.26.0; the MXFP4 launcher's image (vLLM 0.27.1) has DFlash2 built in.
 >
 > Since 2026-10-11 the MXFP4 launcher's default drafter is W4A16 (`syvai/Qwen3.8-27B-DFlash2-W4A16`). Its
 > GEMMs are tuned by `kv-cache/patches/patch_w4a16_tiles.py` (a measured gfx1201 table for the drafter's own

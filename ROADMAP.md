@@ -104,7 +104,7 @@ All eight kernels that used to compile during the first requests now compile dur
 | 10 | **Drafter down projection at four streams.** At M=32 one drafter GEMM a layer (most likely down_proj) has a tile-table row but no split-K row, and runs at ~330 GB/s | kernel review 2026-10-11 | 1.85% of a four-stream step: about 0.6%. Nothing at one stream | Low: the same sweep as the prefill tiles; drafter only, so acceptance is the only risk | Not started |
 | 11 | **Decode-attention extras**: vectorised split-KV merge (bit-identical), attention output gate and fp8 quantisation fused into the merge epilogue, K prefetch 2 instead of 4 | deadcode engine | Under 2% of a step | Medium: the fusion needs the vLLM output path changed | Not started |
 | 12 | **Full exact-wide prefill**: 12 warps, 96-key tiles | Crssz/r4dx | Their 2.0-2.6x on 64-token chunks against our 1.26-1.42x. Only affects final prefill chunks of 256 tokens or fewer. | Medium: the QK8 raw-byte K staging assumes a one-pass wide K fetch, and fewer warps or wider tiles make it multi-pass | DSPLIT-only part shipped |
-| 13 | **Drafter W4A16 GEMMs at prefill-sized M**: the drafter's fc and context-KV projections (M = CHUNK) fell through to the stock `_triton_w4a16_skinny_fmt_kernel` heuristic (fc ~30 TFLOP/s) | kernel audit 2026-10-11 | `patch_w4a16_prefill.py`: tcclaviger's BLOCK_K 32 + GROUP_M swizzle, bit-identical; fc x2.08 at M 3568, cold prefill +1.0-1.4% (4.7k-46k tokens). A bf16 dequant + hipBLASLt route is still ~19% faster on fc at M >= 2048, at a ~5e-3 drafter error and a scratch buffer | None: same kernel, same K loop | Done 2026-10-11 |
+| 13 | **Drafter W4A16 GEMMs at prefill-sized M**: the drafter's fc and context-KV projections (M = CHUNK) fell through to the stock `_triton_w4a16_skinny_fmt_kernel` heuristic (fc ~30 TFLOP/s) | kernel audit 2026-10-11 | `patch_w4a16_prefill.py`: tcclaviger's BLOCK_K 32 + GROUP_M swizzle, bit-identical; fc x2.08 at M 3568, cold prefill +0.9-1.1% (4.7k-46k tokens). A bf16 dequant + hipBLASLt route is still ~19% faster on fc at M >= 2048, at a ~5e-3 drafter error and a scratch buffer | None: same kernel, same K loop | Done 2026-10-11 |
 | 14 | **MXFP4 skinny GEMM launch sweep** (`gemm_mxfp4a8_nt_m64`) | libr4d main | Measured -7.4% decode at the default config. A sweep of `_r4d_cfg` is untried. | Low cost, low odds: radiance's own decode kernel is at the bandwidth roof | Rejected as shipped |
 | 15 | **Split-KV prefill** (not exact) | Crssz/r4dx | Larger short-chunk gains than DSPLIT | Changes fp32 summation order, so a resumed final chunk is no longer bit-identical to a cold run. Only worth it with an explicit exactness policy. | Not adopted |
 | 16 | **M1/M8 route alignment**: serial decode vs speculative verify | vllm-radiance #11 | Reproducibility, not quality: spec on/off agreement is 99.13% today, with flips only at near-ties | About 33k lines | Not adopted |
@@ -121,8 +121,8 @@ one used for DSPLIT.
   prompt-lookup drafting (verbatim copies ~4.2 -> ~7.6 tokens per update), both ported from SlyBase with the
   W4A16 drafter (KERNEL.md).
 - **Load-adaptive draft depth on the V2 runner.** The old dynamic drafter (`RADIANCE_DYNAMIC_DRAFT`) hooks
-  the V1 runner and does nothing on V2. With two concurrent agents, per-stream decode drops from 144.8 to
-  138.0 t/s, which is small, so this is low priority unless concurrency goes up.
+  the V1 runner and does nothing on V2. Per-request decode falls from 161 t/s alone to 145 with two clients and 116 with four
+  (BETTERBENCH-20261011.md); how much of that a shallower draft would recover is unmeasured.
 - **Done 2026-10-11: `MAXSEQS=4` is the default.** At temperature 0.7, 1 / 2 / 3 / 4 clients give 124.7 /
   218.1 / 273.5 / 333.7 t/s aggregate, 161 / 145 / 122 / 116 t/s per request (BETTERBENCH-20261011.md).
 
@@ -147,7 +147,9 @@ one used for DSPLIT.
 
 - **The public launcher's own gates.** On 2026-10-11 it was booted cold and warm, benched (BETTERBENCH-20261011.md)
   and VRAM-stressed. The exactness gates (`turnbench.py`, `val_resume.py --evict`, `lenprobe.py`) ran on
-  the production twin of this launcher, with the same patches, not on this script itself.
+  the production twin of this launcher, with the same patches, not on this script itself. Still to run on
+  it: those gates, a raw read-rate check of the disk tier (the docs quote both ~1 GB/s and 228 MB/s), a real
+  boot with the built-in reaper active, and a BetterBench pass that includes `patch_w4a16_prefill.py`.
 - **Full-length context is untested.** The default is 262,144 tokens. The stress test held three ~110k
   prefills at once and BetterBench prefilled 132k; a single 262k prefill and resume (GPU pool and the
   16 GiB RAM tier) has not been run.

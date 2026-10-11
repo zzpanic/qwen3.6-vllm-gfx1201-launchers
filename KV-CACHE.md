@@ -51,7 +51,7 @@ This table was measured on ggz14's single-GPU build (fp16 GDN state, `MAXSEQS=3`
 
 ### Where hits came from, lifetime of one boot
 
-Sample `kv-cache/tools/kvtable.py` output. It was taken under light traffic, so the disk column is one
+Sample `kv-cache/tools/kvtable.py` output from 2026-09-19, before checkpoint retention. It was taken under light traffic, so the disk column is one
 block's worth of evidence.
 
 |  | L0 GPU | L1 RAM | L2 disk | recompute |
@@ -149,7 +149,7 @@ the line on your box prints it for your sizes.
 
 ### The disk tier and the reaper
 
-- **Size.** 96 GB of cache holds ~2.2M tokens of finished conversations. `./setup-kvcache.sh` sets it
+- **Size.** 96 GB of cache holds about 2M tokens of finished conversations. `./setup-kvcache.sh` sets it
   up: it measures the disk, makes a filesystem or an image file if you want one, and sets the size
   limit (`KVCACHE_MAX_GB`) the reaper enforces on the folder itself. Without a limit the reaper keeps
   the whole volume at 75%, so the tier then wants a filesystem of its own (128 GiB). The tier writes
@@ -162,7 +162,7 @@ the line on your box prints it for your sizes.
 - **Why a reaper at all.** vLLM's filesystem tier has no capacity limit and never deletes.
   Without one (`KVCACHE_REAPER=0` and no timer), the volume fills until writes
   fail. It keeps the volume at or below `KVCACHE_TARGET_PCT` (75), oldest blocks first, and the
-  launcher warns at boot if `kvcache-reap.timer` is not enabled.
+  launcher warns at boot if the disk tier has no reaper.
 - **Why it also keeps 24 GB free.** `KVCACHE_MIN_FREE_GB=24` is the peak measured write rate
   (225 MB/s) x 80 s x 1.25, so the disk cannot fill between reaps whatever the percentage says.
 - **Hash seed.** Block filenames are content hashes, and the launcher pins `PYTHONHASHSEED` so a
@@ -196,7 +196,7 @@ Every behaviour change sits behind an environment gate whose unset state is stoc
 
 ```bash
 python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # per-tier hits, capacity, speed
-python3 kv-cache/tools/kvwatch.py                                          # live
+KVWATCH_METRICS=http://127.0.0.1:<port>/metrics python3 kv-cache/tools/kvwatch.py   # live
 ```
 
 With `KVOFF_MINIMAL=0` (the instrumentation), `kvvalidate.py` and `tierreport.py` also explain why a

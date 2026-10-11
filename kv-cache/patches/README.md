@@ -13,8 +13,8 @@ These are **not standalone scripts.** Read this before you try to run one.
  guard plus the behavioural fixes: the draft-group annotation this model needs, the
  recurrent-state store stride that makes the RAM tier hold enough, reconcile re-ask (stop
  recomputing prefixes the tier holds), the swa-align/touch-all eviction fix, and the
- last-block align and canonical chunks (cached == cold), and which checkpoints each tier keeps. Everything else here is instrumentation or fs-tier-only
- and is applied only by the **disk** build (`KVCACHE_DISK_TIER=1`).
+ last-block align and canonical chunks (cached == cold), and which checkpoints each tier keeps. The disk tier (`KVCACHE_DISK_TIER=1`, the default) adds its
+ three fixes (10, 13, 14); `KVOFF_MINIMAL=0` adds the six instrumentation patches (2, 3, 9, 11, 12, 15).
  `APPLY-ORDER.txt` marks them `[default]`. The drafter and correctness patches further down (`patch_w4a16_*`,
  `patch_short_prefill.py`, ...) are applied by every build; APPLY-ORDER.txt says which ones.
 
@@ -27,7 +27,7 @@ factor: if the anchor is not found byte-for-byte, the script raises.
 
 That makes them precise and makes them brittle in exactly the same way. They are
 written against **vLLM 0.27.1 + radiance 0.9.3**, the versions pinned by the
-image in `launcher/`. Against any other tree, expect them to fail loudly — which
+launcher's `IMAGE`. Against any other tree, expect them to fail loudly — which
 is the intended failure mode, not a bug.
 
 ## They need `_patchlib`
@@ -73,11 +73,11 @@ root the script expects. The launcher does all three for you; nothing else does.
  (2), `fs_fanout` (10) and `tier_report` (11) — and the 2/10/11 trio is order-independent
  because they anchor at different sites in it, not because any one is the sole editor.
 
-## Two of them are fatal; the rest only warn
+## Which are fatal
 
- The container block runs under `set -e`. Patches 1 and 2 have **no `|| echo`
- fallback**, so a failure there is a hard boot failure, not a warning. The default
- build applies only 1 of the two (2 is disk-build only):
+ The container block runs under `set -e`. Patches 1, 2 and 8a-8f have **no `|| echo`
+ fallback**, so a failure there is a hard boot failure, not a warning (2 is applied only
+ with `KVOFF_MINIMAL=0`):
  
  | # | Patch | On failure |
  |---|---|---|
@@ -151,7 +151,7 @@ patch's metric series actually exists in `/metrics` before you believe a result;
 Check each against current vLLM/radiance HEAD and delete it in favour of the
 upstream implementation wherever one now exists. Two already measure as directly
 applicable to this tree — PR #54327 (`tiering/fs/manager.py`, 100%) would retire
-the external reaper entirely, and PR #54743 supplies the filtered-group primitive
+the reaper entirely, and PR #54743 supplies the filtered-group primitive
 patch 4 reinvents by hand.
 
 A house patch that duplicates merged upstream work is a liability, not an asset.

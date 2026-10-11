@@ -5,7 +5,7 @@ is a single Radeon AI PRO R9700 (gfx1201, 32 GiB), TP=1, vLLM 0.27.1 on the radi
 Qwen3.8-27B with a DFlash2 draft head.
 
 **Folders are named for the quantisation, because there are now two stacks.** `int4-*` is
-`startup-qwen3.8-27b-int4.sh` (int4 W4A16); `mxfp4-*` and `deep-prefill-*` are
+`old_work/startup-qwen3.8-27b-int4.sh` (int4 W4A16); `mxfp4-*` and `deep-prefill-*` are
 `startup-qwen3.8-27b-mxfp4.sh` (native MXFP4 W4A8). Do **not** match them up by llama-swap
 entry name: the name `qwen3.8-27b-vllm` served int4 in August and serves MXFP4 now. Each
 folder's README states which stack it is and what it can honestly be compared against.
@@ -40,6 +40,7 @@ Two things worth reading before you compare any of it:
 | --- | --- |
 | `betterbench-20261011/` | **MXFP4 W4A8, current release.** BetterBench 0.6.0 at its default sampling (temperature 0.7), launcher defaults: decode, concurrency 1-4, prefill to 132k real tokens. Report: BETTERBENCH-20261011.md |
 | `betterbench-20261006/` | **MXFP4 W4A8.** BetterBench 0.4.0 at temperature 1.0, the 2026-10-06 configuration (BETTERBENCH-20261006.md) |
+| `betterbench-full-20260908/` | **MXFP4 W4A8.** BetterBench 0.4.0 full run (decode, concurrency 1/2/4, prefill to 200k) of the 2026-09-08 production entry with the FP8 drafter |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |
 | `deep-prefill-20260905/bfcl-mxfp4/` | **MXFP4 W4A8.** BFCL v4 tool calling, 8 single-turn categories / 1354 problems, matched per-category against the August int4 run — and why this harness's "Overall Acc" must not be quoted for a subset |
 | `deep-prefill-20260905/` | **MXFP4 W4A8.** The near-full-context sweep: BetterBench prefill and bench-live generation at 8 depths up to a real 200k tokens, plus the ladder-misalignment warning that applies to any comparison between the two harnesses |
@@ -61,8 +62,7 @@ each run, not from the benchmark client. Under greedy sampling they are exact ra
 sampled — the control arm of the SPECTOK sweep reproduced them bit-for-bit.
 
 **These are single-card numbers.** Depth and draft-head advice in particular does not
-transfer across card count; the upstream recommendation of speculation depth 7 is sound on
-2×R9700 and loses here.
+transfer across card count or corpus.
 
 **Isolated-kernel wins are not end-to-end wins.** The tile sweep here reports per-GEMM
 speedups of tens of percent on shapes that are a fraction of a percent of total work. Those

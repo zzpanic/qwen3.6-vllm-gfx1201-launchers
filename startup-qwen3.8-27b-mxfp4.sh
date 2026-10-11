@@ -1,11 +1,11 @@
 #!/bin/bash
-# startup-qwen3.8-27b-mxfp4.sh -- Qwen3.8-27B in native MXFP4 (W4A8) with the FP8 DFlash2 drafter on one
+# startup-qwen3.8-27b-mxfp4.sh -- Qwen3.8-27B in native MXFP4 (W4A8) with the 4-bit DFlash2 drafter on one
 # AMD Radeon AI PRO R9700 (gfx1201 / RDNA4, 32 GB), the way it is served: one launcher carrying all of
 # this repository's work.
 #
 #   kv-cache/      prefix-cache offload GPU -> RAM (/dev/shm) -> disk, and the house vLLM patches
 #                  (kv-cache/patches, mounted at /house). KV-CACHE.md explains the benefit.
-#   startup-cache/ keyed build caches and the verified boot overlay (cold boot 527 s -> ~160-200 s).
+#   startup-cache/ keyed build caches and the verified boot overlay (cold boot 447 s, cached 133-142 s).
 #   r4d_kernels/   the libr4d build (exact GDN scan, exact-wide prefill, lazy-GDN invalidation) and the
 #                  MXFP4 decode-band re-tune, both on by default (R4D_RX13=1). KERNEL.md explains them.
 #   patches/       the radiance-0.9.3 overlay copies used by the int4 path (old_work/); not needed here.
@@ -14,17 +14,17 @@
 #   ./startup-qwen3.8-27b-mxfp4.sh -h           every knob, its default and what it does
 #   DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh    print the container command, run nothing
 #
-# DEFAULTS = THE SERVED CONFIGURATION (2026-10-08), on one R9700 with 40 GiB host RAM:
+# DEFAULTS = THE SERVED CONFIGURATION (2026-10-11), on one R9700 with 32 GiB host RAM:
 #   262,144-token context (Qwen3.8's maximum), MAXSEQS=4, CHUNK=auto (3568: four 880-token fp16 blocks per
-#   prefill step plus room for the other sequences' drafts), canonical prefill chunks (cached == uncached), KV pinned at 11.5e9 bytes (~331,000 tokens of fp8 KV with the input embedding in
+#   prefill step plus room for the other sequences' drafts), canonical prefill chunks (cached == uncached), KV pinned at 12.65e9 bytes (369,614 tokens of fp8 KV with the W4A16 drafter and the input embedding in
 #   host RAM, EMBED_HOST=1), fp16 GDN state + lazy GDN (libr4d rx17, r4d_kernels.patch), DFlash2 x7 probabilistic drafting with the int2 draft head and the global top-256 verify
 #   head, R4D attention with 8-bit prefill legs, checkpoint retention, a 16 GiB RAM tier (KVCACHE_TIER_GIB),
 #   disk tier at /kvcache (KVCACHE_DISK_TIER=1; a 128 GiB volume with the reaper keeping it at 75% is
-#   recommended, and the reaper in kv-cache/ops is REQUIRED with it).
+#   recommended; the built-in reaper holds it there, KVCACHE_REAPER).
 #
 # Lineage: ggz14's serve-mxfp4.sh (codeberg.org/ggz14/radiance-vllm-mxfp4, image
 # stilldeadcode/vllm-radiance:0.9.3), which owns the MXFP4 GEMM, the R4D attention path and the DFlash2
-# integration -- clone it beside this file as radiance-vllm-mxfp4 (README.md, Quick start). This file is
+# integration -- clone it beside this file as radiance-vllm-mxfp4 (README.md, Setup). This file is
 # that script plus the llama-swap edits, the offload delta (kv-cache/launcher history in old_work/) and
 # the house patches. The pre-merge launchers are kept in old_work/ for reference.
 #
@@ -32,7 +32,7 @@
 #   * takes --port <N>; the container uses --network=host and binds 0.0.0.0:<N> directly
 #   * NAME defaults to qwen38-27b-mxfp4; SERVED (new knob) defaults to qwen3.8-27b-mxfp4 and is the
 #     single --served-model-name
-#   * MODELS defaults to $HOME/models-mxfp4
+#   * MODELS defaults to $HOME/models
 #   * adds --rm, so a killed launcher cannot orphan its container
 #   * REPO (new knob, defaults to radiance-vllm-mxfp4 beside this file) locates the upstream tree
 #     (gpu-detect.sh, the chat template, the /patches mount)
@@ -58,7 +58,7 @@ Everything is an environment variable; these are the ones worth knowing.
   PORT=<--port value>       listen port; the --port argument (llama-swap) wins over this
   IMAGE=...:0.9.3           container image (CACHE is keyed to it -- move both together)
   RUNTIME=podman|docker     container runtime (auto-detected)
-  CHAT_TEMPLATE=./qwen-fixed-v22.3.jinja
+  CHAT_TEMPLATE=$REPO/qwen-fixed-v22.3.jinja
                             chat template; must be readable on the host
 
   SPEC_METHOD=dflash        speculative drafter: dflash (fastest, needs the DFlash2 checkpoint)
@@ -132,7 +132,7 @@ if [ -f "$SCRIPT_DIR/kvcache.env" ]; then . "$SCRIPT_DIR/kvcache.env"; fi
 # ROLLBACK is one knob: REPO=<repo>/ggz14-mxfp4, which is still on disk untouched.
 # Deliberately NOT adopted with it: the tree's single-GPU profile (MAXLEN 65536, fp16 ssm cache,
 # libr4d rx9/rx10, CHUNK 4096) lives in THEIR serve-mxfp4.sh, which this launcher does not use --
-# it would trade our 204800 context and halve the 1648-token block every KV number derives from.
+# (fp16 ssm state was adopted separately on 2026-10-08, with canonical chunks; kv-cache/README.md compares the two.)
 REPO="$(realpath -m "${REPO:-$(cd "$(dirname "$(realpath -m "${BASH_SOURCE[0]}")")" && pwd)/radiance-vllm-mxfp4}")"
 # HOUSE is our own code that runs against ggz14's tree but is NOT part of it: the offload
 # boundary patch and the KV tier bench. It used to live loose inside $REPO, which is an
@@ -1504,7 +1504,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# KVCACHE_TIER_GIB=auto (default): the RAM tier holds one full max-context prefill -- MAXLEN tokens --
+# KVCACHE_TIER_GIB=auto: the RAM tier holds one full max-context prefill -- MAXLEN tokens --
 # so a conversation at the full context length survives eviction from the GPU and resumes from RAM.
 #
 # Offloaded bytes per token: every 1,648-token chunk stores 2 attention groups + 1 drafter group,

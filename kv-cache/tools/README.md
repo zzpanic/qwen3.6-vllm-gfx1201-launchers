@@ -9,13 +9,12 @@ One screen, refreshed every 5 s: GPU and offload-tier prefix-cache hit rates
 and stored, and the last few requests with how much of each was cached. Read-only.
 
 It reads only metrics upstream vLLM exports, so it is the one tool here that works
-on the **default** build. It reads the `qwen3.8-27b-kvcache` entry through llama-swap
-on `:1234`; set `KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` to read vLLM
-directly (the per-request table needs llama-swap and is skipped without it). The
+on the **default** build. Its default is the author's llama-swap entry; set
+`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` to read your engine (the per-request table needs llama-swap and is skipped without it). The
 first refresh prints no rates -- it has nothing to difference against yet.
 
-The two tools below need the **disk** build (`KVCACHE_DISK_TIER=1`):
-the counters they read are added by its instrumentation patches. Do not run
+The two tools below need the instrumentation (`KVOFF_MINIMAL=0`; `kvvalidate.py`
+also needs the disk tier): the counters they read are added by those patches. Do not run
 `kvvalidate.py` against the default build -- it still runs, but reads the missing
 counters as zero and reports FAILs (`cpu_equals_external`, `disk_vs_engine`) that
 are not real.
@@ -33,7 +32,7 @@ style, plus a table on stdout. It answers three questions in plain language:
 2. Is my disk too slow -- should I buy NVMe?
 3. Is turning this layered cache on adding value at all?
 
-## It needs patch 2
+## It needs the tier-report patch
 
 `patches/patch_offload_tier_report.py` (patch 11) adds the 19 `tier`-labelled series the
 report reads. Without it the tool still runs, still reports the prompt-token

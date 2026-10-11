@@ -55,13 +55,13 @@ R3.15 bug was found. The script reads the RUNNING engine's files through
 `/proc/<pid>/root`, not the copies on the host, because those are the ones that
 can disagree. On the default build it reports FAILs that are not real, because the
 counters it compares are not exported; there, read the boot log instead — the
-      `[kvcache]` lines name the build, and each of the five non-fatal default patches
-      (eagle-group, mamba-stride, reconcile re-ask, swa-align/touch-all, last-block
-      align) prints a `[radiance] WARNING` if it did not apply (the sixth, mixed-hit,
-      stops the boot).
+      `[kvcache]` lines name the build, and each non-fatal default patch (eagle-group,
+      mamba-stride, reconcile re-ask, swa-align/touch-all, last-block align, warm history)
+      prints a `[radiance] WARNING` if it did not apply; the fatal ones (mixed-hit, canonical
+      chunks, retention, canon wait) stop the boot.
 
 ## The mounts
 
 `etc-fstab-snippets/` holds the `/dev/shm` and cache-filesystem lines. The sizing
-rule is in `docs/SETUP.md` → Sizing; only the `/dev/shm` line is needed by the
-default build.
+rule is in `docs/SETUP.md` → Sizing; only the `/dev/shm` line is needed for RAM-only
+(`KVCACHE_DISK_TIER=0`) or a disk tier in a folder on an existing filesystem.

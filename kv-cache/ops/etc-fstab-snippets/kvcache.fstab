@@ -9,7 +9,7 @@
 #      python3 -c "import os;s=os.statvfs('/dev/shm');print(s.f_blocks*s.f_frsize/2**30)"
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=20G 0 0
 
-# 2. EXPERIMENTAL BUILD ONLY: a dedicated filesystem for the disk tier.
+# 2. DISK TIER on a filesystem of its own (optional; a folder with KVCACHE_MAX_GB also works).
 #    BY LABEL, NOT BY DEVICE: attaching a second virtual disk can rename the root disk
 #    (vda -> vdb here on 2026-09-07), and a /dev/vdX line would then be an unbootable box.
 #    noatime: the reaper keys on mtime, so atime buys nothing and costs a write per read.

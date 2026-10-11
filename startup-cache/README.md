@@ -89,7 +89,7 @@ Measured 2026-10-11 on one R9700 (gfx1201): radiance 0.9.3, Qwen3.8-27B MXFP4 wi
 `~/.cache/radiance-libr4d` and `~/.cache/startup-cache` deleted first, page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`; `/health` and the first reply landed within a second of each other.
 The previous figures, 527 / 196 / 161 s, were taken on 2026-10-06 with an older patch set. Since these were
-taken, the launcher runs a JIT warm-up of about 20 s in the background right after `/health`; a request that
+taken, the launcher runs a JIT warm-up of about 20-30 s in the background right after `/health`; a request that
 arrives during it is served alongside, not refused.)
 
 The gap between the last two rows is reading 20 GiB of weights from disk, which no cache here helps
@@ -119,15 +119,15 @@ and loading the compiled graphs (~15 s).
 
 Every new image, card or flag combination gets a new keyed tree, and the old ones stay behind:
 on the box this was written on, nine stale trees held 17 GiB. `startup_cache_reap <dir> <prefix>`
-runs `cache-reap.sh` over the siblings `<prefix>*` before each boot. The launchers pass
-`$HOME/.radiance-cache-w4a8-` or `./vllm-cache/`, so trees left by an old image are covered too.
+runs `cache-reap.sh` over the siblings `<prefix>*` before each boot. The launcher passes
+`$HOME/.radiance-cache-w4a8-`, so trees left by an old image are covered too.
 
 The rule, in order:
 
 1. Nothing happens below **65% disk use**. The trigger is space, not age.
 2. The live tree is never touched, and neither is a tree with the same flag suffix.
 3. A tree with a **stamp** (`.last-boot-ok`) from the last 24 h is kept. Every launch stamps its
-   tree, and the kvcache launcher's container stamps it again once the server answers.
+   tree, and the launcher's container stamps it again once the server answers.
 4. Otherwise a tree goes only if **no file in it was read in the last 24 h**. The stamp file is
    left out of that check: reading the stamp refreshes its own access time, and counting it once
    made every tree look in use, so the pruner removed nothing for weeks without saying so.
@@ -186,5 +186,5 @@ can be produced by a no-op needs a check of the artifact itself, or a documented
 dir. The overlay builder's warning refusal is one such check.
 
 Only the launcher cache trees are pruned (see "Pruning stale trees"). The libr4d builds under
-`~/.cache/radiance-libr4d/` are keyed per image too and are not, so clear old ones by hand when you
-rotate images. Boot overlays are replaced in place and do not pile up.
+`~/.cache/radiance-libr4d/` are keyed per image too and are not, so clear old ones with `./clear-cache.sh`
+when you rotate images. Boot overlays are replaced in place and do not pile up.

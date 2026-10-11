@@ -9,7 +9,7 @@ and asks whether a pure external hit gives the same answer as a recompute.
 `mixedbench.py` deliberately leaves the head of the prompt in the GPU cache and
 evicts only its tail, so the request hits BOTH tiers at once — the case where
 vLLM reports a per-group prefix hit that diverges across KV groups, and the case
-that produced a fatal assertion before the fix in `docs/` R3.15. A run that
+that produced a fatal assertion before the mixed-hit fix (`patches/patch_offload_mixed_hit.py`). A run that
 never reaches the `MIXED` phase has tested nothing, and says so in its verdict.
 
 `correctbench.py` is the suite that drives the three of them together and reaches a
@@ -35,7 +35,7 @@ re-read phases returned the same ~78 s.
 vLLM matches the prefix cache by block **content**, not by chained prefix. A
 harness that makes a run "cold" by varying a nonce in **block 0 only** does not
 get a cold run — the body self-caches from the previous iteration. This is what
-invalidated the BetterBench numbers for this stack. **Vary the whole body, or
+invalidated an early BetterBench run on this stack (the reports here use per-run salted prompts). **Vary the whole body, or
 you are measuring the cache against itself.**
 
 Two more, both learned the expensive way:
