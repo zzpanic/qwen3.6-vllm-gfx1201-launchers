@@ -57,8 +57,29 @@ unaffected. Switching `MAMBA_SSM_FP16` changes the disk tier's geometry (README.
 
 ## 2. Kernel work
 
+**Kernel audit, 2026-10-11** (torch-profiler traces of the shipped launcher, `PROFILE_DIR=1`: one stream of
+decode, four streams of decode, and a 32k-token prefill). GPU time by kernel:
+
+| Scenario | Top kernels (share of GPU time) |
+|---|---|
+| Decode, 1 stream | MXFP4 decode GEMM 75.4%, drafter W4A16 split-K 6.3%, int2 draft head 4.5%, GDN lazy update 2.8%, fused add+RMS+quant 1.5%, GDN conv 1.4%, `torch.topk` 1.5% |
+| Decode, 4 streams | MXFP4 decode GEMM 67.9%, GDN lazy update 5.7%, drafter split-K 5.7%, int2 draft head 5.3%, drafter W4A16 (stock kernel) 1.9%, `torch.topk` 2.3% |
+| Prefill, 32k | MXFP4 tiled GEMM 58.8%, attention prefill 12.9%, MXFP4 folded GEMM 7.6%, fused SiLU+quant 5.1%, GDN chunk scan 2.8%, drafter W4A16 (stock kernel) 2.1%, offload-tier copy 1.6% |
+
+The kernels that dominate are at their hardware limit:
+- **Decode GEMM:** about 83% of DRAM bandwidth (about 23.8 ms per verify step over about 12.6 GB of layer weights).
+- **Prefill GEMM:** roughly 70% of the fp8 matrix-multiply peak.
+- **Int2 draft head:** about 430 GB/s, at its tuned geometry.
+
+Every Triton kernel on the decode path has measured gfx1201 tiles: the drafter split-K table, the draft head's
+per-M warps, and inductor's autotuned fusions. The one untuned path is below. No quick win above 1% was found.
+All eight kernels that used to compile during the first requests now compile during the boot warm-up (`JIT_WARMUP`).
+
 | Item | Source | Expected value | Cost / risk | Status |
 |---|---|---|---|---|
+| **Drafter W4A16 GEMMs at prefill-sized M**: the drafter's fc and context-KV projections (M = CHUNK) fall through to the stock `_triton_w4a16_skinny_fmt_kernel` heuristic, at about 70 TFLOP/s (9.4 ms a call) | kernel audit 2026-10-11 | Up to about 1% of prefill: either a tile sweep at M = CHUNK, or a one-off bf16 dequant of those two weights for hipBLASLt | Low risk. The bf16 route costs VRAM (about 0.3 GiB) | Not started |
+| **`torch.topk` in decode** (1.5-2.3% of a step) | kernel audit 2026-10-11 | Under 2%: a fused top-k for the sampler and drafter selection | Medium: it touches the sampler | Not started |
+| **Int2 draft head retune at TP=1**: tuned on a two-GPU vocab shard (124,160 rows). It runs the full 248,320 rows here at about 68% of DRAM bandwidth | kernel audit 2026-10-11 | 4.5-5.3% of a step today, so up to about 1.5% from a wider BLOCK_N or a split | Low | Not started |
 | **GDN decode rewrite**: anchor state (one state per sequence plus the replayed accepted prefix, single-write, with a shift marker that survives vLLM's page migration), the decode conv folded into the update, a non-temporal state store chosen per launch | deadcode radiance engine 1.0.x | Claimed about 14% of a decode step. It overlaps lazy GDN, which already gave about +7%, so the gain on top of that is unknown. | High: correctness-critical state handling, and it needs matching `radiance_gdn.py` integration | Not started |
 | **Full exact-wide prefill**: 12 warps, 96-key tiles | Crssz/r4dx | Their 2.0-2.6x on 64-token chunks against our 1.26-1.42x. Only affects final prefill chunks of 256 tokens or fewer. | Medium: the QK8 raw-byte K staging assumes a one-pass wide K fetch, and fewer warps or wider tiles make it multi-pass | DSPLIT-only part shipped |
 | **Decode-attention extras**: vectorised split-KV merge (bit-identical), attention output gate and fp8 quantisation fused into the merge epilogue, K prefetch 2 instead of 4 | deadcode engine | Under 2% of a step | Medium: the fusion needs the vLLM output path changed | Not started |
