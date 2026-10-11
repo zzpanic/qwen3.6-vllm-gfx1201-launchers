@@ -579,6 +579,7 @@ GPU_UTIL=${GPU_UTIL:-0.97}
 # concurrent ~110k prefills + a 2048x2048 image in the fourth slot): 31.53 of 31.86 GiB, 0.33 GiB spare; the
 # transient over idle is +0.23 GiB at both 12.25e9 and 12.65e9.
 KV_MEM=${KV_MEM:-}
+KV_MEM_SET=${KV_MEM:+1}   # set by the user (the start line says explicit), else the drafter default below
 # Which drafter to speculate with.
 #   mtp    -- the multi-token-prediction head inside the target checkpoint. One draft forward per
 #             speculative position, so RADIANCE_DYNAMIC_DRAFT can stop the loop early.
@@ -2055,7 +2056,7 @@ AR_MAX_KB=$(( (CHUNK * 5120 * 2) / 1024 + 4096 ))
 # not valid at another. It is consulted only at the throughput GPU_UTIL, because the ppl.py
 # prompt_logprobs transient is exactly what a pinned KV eats: with KV pinned, GPU_UTIL=0.75
 # would no longer buy the headroom it exists to buy.
-KV_SRC=explicit
+KV_SRC=explicit; [ -n "$KV_MEM_SET" ] || KV_SRC=default
 if [ "$KV_MEM" = auto ]; then
   KV_MEM=""; KV_SRC=profiled
   if [ "$GPU_UTIL" = "0.98" ]; then
