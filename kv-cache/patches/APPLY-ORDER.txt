@@ -49,6 +49,7 @@
  24  patch_w4a16_fuse.py                              FATAL, needs 22 (SlyBase, re-anchored)
  24a patch_w4a16_prefill.py                           FATAL, needs 22; prefill-M tiles for fc + context-KV
                                                    (house, 2026-10-11; RADIANCE_W4A16_PREFILL=0 = off)
+ 24b patch_gdn_norm_quant_tiled.py                   non-fatal; GDN out_proj takes the tiled activation (needs radiance_mxfp4_fp8.patch; RADIANCE_GDN_NORM_QUANT_TILED=0 = off)
  25  patch_lookup_draft.py (+ radiance_lookup_draft.py)  non-fatal (SlyBase)
  20  patch_short_prefill.py                           always applied, FATAL on failure. Correctness fix
                                                    (SlyBase): a 1-token prefill took the GDN recurrent

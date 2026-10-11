@@ -26,6 +26,14 @@
 # threads had not drained yet (rare, load-dependent wrong output). Now every thread fences, the counter bump is
 # an agent-scope acq_rel atomic, and the reducing block fences (acquire) before it reads the partials.
 #
+#
+# GDN OUT_PROJ TILED ACTIVATION (2026-10-11; this repository, same pattern as radiance_silu_mul_quant): the
+# gated-norm + per-token quant that feeds out_proj (radiance_gdn_norm_quant) can write its fp8 output in WMMA
+# fragment-tiled order like silu_mul_quant and add_rms_quant, so out_proj takes the A-direct prefill GEMM instead
+# of the folded one (K 6144: ~245 against ~175 TF/s, measured). The bytes are the same fp8 values in another order,
+# so the GEMM result is unchanged. launch_gdn_norm_quant gains a trailing `tiled` argument (default 0, so callers
+# that do not pass it are untouched); kv-cache/patches/patch_gdn_norm_quant_tiled.py is the Python side.
+# RADIANCE_GDN_NORM_QUANT_TILED=0 turns it off.
 --- a/radiance_mxfp4_fp8.hip
 +++ b/radiance_mxfp4_fp8.hip
 @@ -988,14 +988,19 @@
@@ -90,3 +98,64 @@
      } else {
        dks = split_k_for(dec_nblk, M);
        bkx = 0;   // resolved below from decode_bk64, exactly as shipped
+@@ -1542,14 +1571,16 @@
+ // multiple of 16 and N a multiple of 128, every 16-lane segment is either fully active or fully
+ // idle in each pass. x: [M, N] contiguous bf16; z: [M, N] bf16 with row stride zs (a column
+ // slice of the fused qkvz projection, no copy); w: [128] bf16 shared by all heads.
+-template <int ART>
++template <int ART, bool TILED = false>
+ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
+     const __bf16 *__restrict__ x, const __bf16 *__restrict__ z, long zs,
+     const __bf16 *__restrict__ w, unsigned char *__restrict__ q, float *__restrict__ scale,
+     int N, float eps) {
+   const int row = blockIdx.x;
+   const int tid = threadIdx.x;
+-  x += (long)row * N; z += (long)row * zs; q += (long)row * N;
++  x += (long)row * N; z += (long)row * zs;
++  if (!TILED) q += (long)row * N;
++  const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in silu_mul_quant
+   constexpr int MAXG = 5;                       // N <= ART*8*5 = 10240 (3072 in this model)
+   const int NV = N >> 3;                        // 8-element groups; 16 per head
+   float sv[MAXG][8];
+@@ -1606,18 +1637,25 @@
+       float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
+       hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
+     }
+-    ((uint2 *)q)[g] = make_uint2(lo, hi);
++    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
++    else ((uint2 *)q)[g] = make_uint2(lo, hi);
+   }
+ }
+ 
+ static void launch_gdn_norm_quant(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
+-                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream) {
++                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream,
++                                  int tiled) {
+   if (N > 40 * ARNQ_T || (N & 127))
+     throw std::runtime_error("radiance_gdn_norm_quant: N must be a multiple of 128 and <= 10240");
+   if (zs & 7) throw std::runtime_error("radiance_gdn_norm_quant: z row stride must be 8-aligned");
+-  hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
+-                     (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
+-                     (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
++  if (tiled)   // fragment-tiled output for the A-direct prefill GEMM (see silu_mul_quant); N % 128 == 0 covers % 16
++    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T, true>), dim3(M), dim3(ARNQ_T), 0,
++                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
++                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
++  else
++    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
++                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
++                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+ }
+ 
+ static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintptr_t q,
+@@ -1707,7 +1745,9 @@
+         py::arg("gu"), py::arg("q"), py::arg("scale"), py::arg("M"), py::arg("N"),
+         py::arg("stream"), py::arg("tiled") = 0);
+   m.def("launch_gdn_norm_quant", &launch_gdn_norm_quant,
+-        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)");
++        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)",
++        py::arg("x"), py::arg("z"), py::arg("zs"), py::arg("w"), py::arg("q"), py::arg("scale"),
++        py::arg("M"), py::arg("N"), py::arg("eps"), py::arg("stream"), py::arg("tiled") = 0);
+   m.def("launch_add_rms_quant", &launch_add_rms_quant,
+         "fused residual-add + Gemma rmsnorm + per-token e4m3 quant, one WG per row",
+         py::arg("y"), py::arg("res"), py::arg("w"), py::arg("q"), py::arg("scale"),
