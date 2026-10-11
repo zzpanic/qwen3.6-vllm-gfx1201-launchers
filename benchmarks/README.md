@@ -39,6 +39,7 @@ Two things worth reading before you compare any of it:
 | folder | what it measures |
 | --- | --- |
 | `betterbench-20261011/` | **MXFP4 W4A8, current release.** BetterBench 0.6.0 at its default sampling (temperature 0.7), launcher defaults: decode, concurrency 1-4, prefill to 132k real tokens. Report: BETTERBENCH-20261011.md |
+| `betterbench-20261011-prefill-patch/` | **MXFP4 W4A8.** The same BetterBench config re-run through the llama-swap entry after `patch_w4a16_prefill.py`. Report: BETTERBENCH-20261011-prefill-patch.md |
 | `betterbench-20261006/` | **MXFP4 W4A8.** BetterBench 0.4.0 at temperature 1.0, the 2026-10-06 configuration (BETTERBENCH-20261006.md) |
 | `betterbench-full-20260908/` | **MXFP4 W4A8.** BetterBench 0.4.0 full run (decode, concurrency 1/2/4, prefill to 200k) of the 2026-09-08 production entry with the FP8 drafter |
 | `spectok-sweep-20260829/` | **int4 W4A16.** Speculative-decode depth K ∈ {4,5,6,7} — throughput by category, acceptance, and KV cost per K |

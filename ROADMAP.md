@@ -154,7 +154,8 @@ one used for DSPLIT.
   left the GPU (the 369,614-token pool outgrew its workload), so it did not exercise the tier. The disk tier's raw read rate on `/kvcache` measured 695 then 531 MB/s
   (`tierreport.py --calibrate`, 80 block files, O_DIRECT; the spread is the virtual disk). Still open: the same gates
   through the llama-swap entry. A BetterBench
-  re-run through the llama-swap entry with `patch_w4a16_prefill.py` is in BETTERBENCH-20261011.md.
+  re-run through the llama-swap entry with `patch_w4a16_prefill.py`: BETTERBENCH-20261011-prefill-patch.md (prefill 0.8-1.1%
+  faster than BETTERBENCH-20261011.md from 6k up; decode and concurrency within run-to-run noise).
 - **Full-length context is untested.** The default is 262,144 tokens. The stress test held three ~110k
   prefills at once and BetterBench prefilled 132k; a single 262k prefill and resume (GPU pool and the
   16 GiB RAM tier) has not been run.
