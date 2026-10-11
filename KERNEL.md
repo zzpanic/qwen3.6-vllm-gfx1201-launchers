@@ -223,7 +223,7 @@ They are not kernels, but the benchmark numbers above depend on them.
 
 - **Uniform-decode guard.** vLLM 0.27.1's V2 runner replayed the speculative-decode CUDA graph over
   any prefill chunk of exactly 1 + num_speculative_tokens tokens. That produced an empty reply for
-  about 1 prompt in 1,648. The guard is fatal if it fails to apply. Regression test:
+  about 1 prompt in one block size (1,648 tokens when it was found, 880 now). The guard is fatal if it fails to apply. Regression test:
   `kv-cache/tools/lenprobe.py`.
 - **DFlash2 sampling RNG** (vllm-radiance PR #8 / vLLM #54282): the drafter's selector gets its own
   RNG stream. Shared noise biased rejection sampling by up to ~2% per position.

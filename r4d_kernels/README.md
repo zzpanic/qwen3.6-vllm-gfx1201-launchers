@@ -89,7 +89,7 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
   through the tier (ROADMAP.md section 1).
 - **Not a kernel bug, found by this validation:** vLLM 0.27.1's V2 runner replayed the
   speculative-decode CUDA graph over any prefill chunk of exactly `1 + num_speculative_tokens`
-  tokens -- an empty reply for roughly 1 prompt in 1,648. The launcher applies
+  tokens -- an empty reply for roughly 1 prompt in one block size (1,648 tokens when it was found, 880 now). The launcher applies
   `kv-cache/patches/patch_uniform_decode_guard.py`;
   `kv-cache/tools/lenprobe.py` is the regression test.
 

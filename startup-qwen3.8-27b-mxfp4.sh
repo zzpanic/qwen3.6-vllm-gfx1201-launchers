@@ -1507,10 +1507,10 @@ EOF
 # KVCACHE_TIER_GIB=auto: the RAM tier holds one full max-context prefill -- MAXLEN tokens --
 # so a conversation at the full context length survives eviction from the GPU and resumes from RAM.
 #
-# Offloaded bytes per token: every 1,648-token chunk stores 2 attention groups + 1 drafter group,
-# and the 6 GDN groups every KVOFF_MAMBA_STRIDE-th chunk; each group is 27,000,832 B per chunk =
-# 16,384 B/token. At stride 4: 16,384 x (3 + 6/4) = 73,728 B/token (checked against the engine:
-# a 16 GiB tier = 636 slots = ~233k tokens). These counts are Qwen3.8-27B's; override
+# Offloaded bytes per token (dense, before checkpoint retention): every chunk stores 2 attention groups + 1 drafter
+# group, and the 6 GDN groups every KVOFF_MAMBA_STRIDE-th chunk; each group is 16,384 B/token (14.4 MB per
+# 880-token chunk at fp16 state; 27.0 MB per 1,648-token chunk at fp32). At stride 4: 16,384 x (3 + 6/4) =
+# 73,728 B/token (fp32 era, checked against the engine: a 16 GiB tier = 636 slots = ~233k tokens). These counts are Qwen3.8-27B's; override
 # KVCACHE_OFFLOAD_BPT for another model (kv-cache/docs/SETUP.md shows the derivation).
 #
 # auto = MAXLEN x 73,728 B + 2% for chunk rounding, rounded up to a whole GiB: 19 GiB at 262,144.
