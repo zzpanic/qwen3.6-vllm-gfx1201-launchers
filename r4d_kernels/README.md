@@ -83,8 +83,10 @@ independently measured the same kind of exact-decay fix as prefill-speed neutral
   It is still opt-in: ggz14's original multi-turn corruption was never reproduced, so the fix for
   it is unproven, not disproven. With fp32 state it adds +13.2% KV (228,737 -> 259,011 tokens) and
   measured +7% decode for 1-3% prefill.
-- **fp16 ssm state (`MAMBA_SSM_FP16=1`): do not use with the KV offload tier.** A resume restored
-  from the CPU/disk tier answers garbage; see the knob's block in the kvcache launcher.
+- **fp16 ssm state (`MAMBA_SSM_FP16=1`, the default since 2026-10-08):** found here as a garbage reply
+  after a CPU/disk-tier resume. The cause was lazy GDN's materialize skipping the state migration on a
+  multi-block prefill step (fp32 failed the same way); rx17 fixes it. fp16 and fp32 are both bit exact
+  through the tier (ROADMAP.md section 1).
 - **Not a kernel bug, found by this validation:** vLLM 0.27.1's V2 runner replayed the
   speculative-decode CUDA graph over any prefill chunk of exactly `1 + num_speculative_tokens`
   tokens -- an empty reply for roughly 1 prompt in 1,648. All three 0.9.3 launchers now apply

@@ -448,30 +448,20 @@ elif [ "$R4D_RX9" = 1 ]; then CACHE_SUF="$CACHE_SUF-rx9"; fi
 # stop a 16-bit ssm cache declining to the FLA fallback, and this script FAILS below if it is set
 # without rx9 rather than serving a silent slow path.
 #
-# *** THIS IS A PRECISION CHANGE TO A RECURRENT STATE, NOT A LAYOUT CHANGE. *** GDN temporal state
-# accumulates along the sequence, so error compounds with context rather than staying local. It is
-# the same class of change as lazy GDN, which passed reaskbench SEVEN times bit-identical while
-# corrupting chat from turn 5. reaskbench is single-turn and CANNOT clear this on its own.
+# Both widths are bit exact through the offload tier: a resume restored from the CPU/disk tier matches a
+# cold run token for token, fp16 and fp32 alike (val_resume --evict, ROADMAP.md section 1). What makes
+# that hold is the canonical prefill chunks (KV-CACHE.md), not the state width.
 #
-# *** IT ALSO RE-BASES THE KV GEOMETRY. *** Halving the mamba page lets vLLM pick a smaller
-# attention block, and our offload chunk IS the attention block: upstream's figure is 1648 -> ~880,
-# which would take the store grid 6592 -> ~3520 and the dead zone 13184 -> ~7040. Halving the dead
-# zone is a Phase 1 win (short prefixes become cacheable) but halving the chunk is a Phase 2 LOSS:
-# the CPU tier is ROW-bound, not byte-bound, so half-size rows cover half the tokens in the same
-# 22 GiB. pat 2026-09-18: *"I think I'd like to keep the store grid the same size - to maximise the
-# cpu memory kv cache store."* If the block does halve, the lever is KVOFF_BLOCKS_PER_CHUNK=2 (on
-# its own KVOFF_DISK_SUBDIR -- the on-disk config.json is not rewritten when geometry changes),
-# which also finally answers R3.12.5. READ THE BOOT LOG before assuming it halved: upstream's 880
-# is their shape, not a measurement of ours.
+# The 16-bit state re-bases the KV geometry: the halved mamba page lets vLLM pick an 880-token attention
+# block instead of 1648, and the offload chunk is that block. CHUNK=auto follows it (store grid 3520 vs
+# 3296, below), and each width keeps its own disk tree (below).
 #
-# *** 2026-10-05 "BROKEN THROUGH THE OFFLOAD TIER" -- RESOLVED 2026-10-08, NOW THE DEFAULT. *** The garbage
-# after an offload-tier resume was not an fp16 problem: it was lazy GDN's materialize kernel skipping the
-# state migration on a prefill step spanning more than one block (fp16's 880-token block made CHUNK=2048
-# two blocks per step). libr4d rx17 (r4d_kernels.patch) fixes it; fp32 at CHUNK=4956 failed the same way.
-# With rx17: val_resume --evict bit-exact at fp16 CHUNK=3532; concurrent deep multi-turn gate 48/48.
-# Drift vs fp32 (cold, greedy, same prompts): top-1 agreement 99.75% at ~25k, 100% at ~70k, 99.91% at
+# History: on 2026-10-05 an fp16 resume answered garbage; resolved 2026-10-08, it was not an fp16
+# problem. Lazy GDN's materialize kernel skipped the state migration on a prefill step spanning more than
+# one block (fp32 at CHUNK=4956 failed the same way); libr4d rx17 (r4d_kernels.patch) fixes it.
+# Drift fp16 vs fp32 (cold, greedy, same prompts): top-1 agreement 99.75% at ~25k, 100% at ~70k, 99.91% at
 # ~141k (spec on/off noise floor 99.13%); it does not grow with depth. +0.6-1.7% decode steps/s.
-# MAMBA_SSM_FP16=0 restores fp32 state: then use CHUNK=2048/3308/4956 and KV_MEM=11.8e9 (re-measure).
+# MAMBA_SSM_FP16=0 restores fp32 state: CHUNK=auto follows it; re-measure KV_MEM (fp32 was pinned at 11.8e9).
 # SWITCHING IT INVALIDATES THE DISK TIER: the block geometry changes (1648 <-> 880 tokens) and the tier's
 # on-disk config.json is written once. By default each width gets its own tree (blocks/<model>-f16ssm vs
 # blocks/<model>, see KVOFF_DISK_SUBDIR), so the other width's tree is simply never read again -- wipe it
@@ -960,7 +950,7 @@ QUIET_ARGS=""; [ "$ACCESS_LOG" = 1 ] || QUIET_ARGS="--disable-uvicorn-access-log
 JIT_WARMUP=${JIT_WARMUP:-1}
 # Prefetch the checkpoint into page cache in parallel before loading (served configuration).
 case " $EXTRA " in *--safetensors-load-strategy*) ;; *) EXTRA="$EXTRA --safetensors-load-strategy prefetch" ;; esac
-# MAMBA_SSM_FP16 -- see the knob's block above for the risk and the geometry consequence.
+# MAMBA_SSM_FP16 -- see the knob's block above (exactness and the geometry consequence).
 if [ "$MAMBA_SSM_FP16" = 1 ]; then
   if [ "$R4D_RX9" != 1 ]; then
     echo "[radiance] FATAL: MAMBA_SSM_FP16=1 needs R4D_RX9=1." >&2
