@@ -184,6 +184,7 @@ load and run fast; each is inert for the FP8 drafter:
 | `patch_w4a16_tiles.py` | Per-shape Triton tile table, split-K and a tiled weight layout for the drafter GEMMs: 3.29 -> 1.74 ms per decode step. | SlyBase |
 | `patch_attn_drafter.py` + `radiance_attn_drafter.py` | Split-KV launch for the drafter's sliding-window attention: 1.37 -> 0.21 ms per step at ~119k context. | SlyBase |
 | `patch_w4a16_fuse.py` | gate_up + SiLU fused, context-KV and conv projection on the int4 rows (no bf16 copies). | SlyBase, re-anchored here |
+| `patch_w4a16_prefill.py` | Tiles for the drafter's two prefill-sized GEMMs (fc and context-KV, M up to CHUNK): BLOCK_K 32 and a GROUP_M program-id swizzle, from tcclaviger's R9700 configs. Bit-identical to stock; fc 19.7 -> 9.5 ms per 3568-token chunk, about 1% faster prefill end to end. `RADIANCE_W4A16_PREFILL=0` turns it off. | this repository |
 | `patch_lookup_draft.py` + `radiance_lookup_draft.py` | When the text being written is a verbatim copy of the prompt, propose the copy instead of the drafter's guess (entry rule 16/6/5, picked by a replay of real agent sessions). Verification is unchanged, so it is lossless. `RADIANCE_LOOKUP_DRAFT=0` turns it off. | SlyBase |
 
 Measured on one R9700, BetterBench 0.6.0 decode, 20 passes, same session:

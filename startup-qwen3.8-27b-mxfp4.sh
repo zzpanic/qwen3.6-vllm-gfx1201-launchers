@@ -548,7 +548,7 @@ if [ -n "${HSA_ENABLE_MWAITX:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_MWAITX=$HSA_E
 if [ -n "${HSA_ENABLE_INTERRUPT:-}" ]; then ROCM_ENV+=(-e "HSA_ENABLE_INTERRUPT=$HSA_ENABLE_INTERRUPT"); fi
 # DFlash2 W4A16 drafter knobs (each defaults to on inside its module; set to 0 for an A/B) and the
 # prompt-lookup draft knobs (RADIANCE_LOOKUP_DRAFT=0 turns it off). Passed only when set.
-for _v in RADIANCE_W4A16_TILES RADIANCE_W4A16_SPLITK RADIANCE_W4A16_TILED RADIANCE_W4A16_SILU \
+for _v in RADIANCE_W4A16_TILES RADIANCE_W4A16_SPLITK RADIANCE_W4A16_TILED RADIANCE_W4A16_SILU RADIANCE_W4A16_PREFILL \
           RADIANCE_DFLASH_KV_W4 RADIANCE_DFLASH_CONV_W4 RADIANCE_ATTN_DRAFTER_TUNE \
           RADIANCE_LOOKUP_DRAFT RADIANCE_LOOKUP_ENTER RADIANCE_LOOKUP_STAY RADIANCE_LOOKUP_HOT \
           RADIANCE_LOOKUP_MIN_DIST RADIANCE_LOOKUP_STATS; do
@@ -2528,6 +2528,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     hp /house/patch_attn_drafter.py \
       || echo "[radiance] WARNING: drafter attention patch did not apply"
     hp /house/patch_w4a16_fuse.py
+    # House patch 2026-10-11: prefill-M tiles for the drafter fc and context-KV GEMMs (BLOCK_K 32 from tcclaviger
+    # + GROUP_M swizzle on the stock kernel; bit-identical output). RADIANCE_W4A16_PREFILL=0 turns it off. FATAL.
+    hp /house/patch_w4a16_prefill.py
     hp /house/patch_lookup_draft.py \
       || echo "[radiance] WARNING: lookup draft patch did not apply"
     # House patches 2026-10-06, from SlyBase (vLLM 0.29 originals, anchors identical in 0.27.1), non-fatal:
