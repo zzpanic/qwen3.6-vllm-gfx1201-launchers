@@ -1693,7 +1693,17 @@ fi
 # stays for capture experiments; the default stays stock. SPEC=8 + dynamic width was measured in
 # the same session: single-stream 184.9 (even), conc-8 405-427 vs 444-461 (LOSES -- cold-start
 # batches run full width into the M=72>64 kernel cliff before the EMAs settle). 7 stays.
-CAPTURE_SIZES=${CAPTURE_SIZES:-[1,2,4,8,16]}
+# 2026-10-11: auto (default) = 1, 2, 4, 8, then every multiple of 8 up to MAXSEQS x (SPEC + 1), the
+# largest verify batch: [1,2,4,8,16] at MAXSEQS 2, [1,2,4,8,16,24,32] at MAXSEQS 4 (the production set,
+# with which the KV pin was measured). A fixed [1,2,4,8,16] left 3-4 concurrent DFlash sequences (24-32
+# rows) without a CUDA graph: per-request decode halved (BetterBench c3/c4 159/198 vs 263/327 t/s).
+CAPTURE_SIZES=${CAPTURE_SIZES:-auto}
+if [ "$CAPTURE_SIZES" = auto ]; then
+  _cap_max=$(( ${MAXSEQS:-8} * (SPEC + 1) )); _cap="1,2,4,8"; _c=16
+  while [ "$_c" -le "$_cap_max" ]; do _cap="$_cap,$_c"; _c=$((_c + 8)); done
+  [ $(( _cap_max % 8 )) -eq 0 ] || [ "$_cap_max" -le 8 ] || _cap="$_cap,$_cap_max"
+  CAPTURE_SIZES="[$_cap]"
+fi
 # Compilation-config entries accumulate into ONE flag: two --compilation-config instances would
 # not merge (argparse keeps the last).
 CC_ITEMS=""
