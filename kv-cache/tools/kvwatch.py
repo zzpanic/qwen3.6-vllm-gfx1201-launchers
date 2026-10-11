@@ -7,9 +7,9 @@ Read-only: two GETs per refresh (the engine /metrics, and llama-swap per-request
 activity). It never writes to the engine and names no state change.
 
 WHERE IT READS FROM (environment overrides)
-  KVWATCH_METRICS   engine /metrics. Default: the qwen3.8-27b-kvcache entry through
-                    llama-swap on :1234, falling back to the launcher run standalone
-                    at http://127.0.0.1:$PORT/metrics (PORT default 8080).
+  KVWATCH_METRICS   engine /metrics. Default: the launcher run standalone at
+                    http://127.0.0.1:$PORT/metrics (PORT default 8080). Behind llama-swap, use
+                    http://127.0.0.1:1234/upstream/<your entry>/metrics.
   KVWATCH_ACTIVITY  llama-swap's per-request activity feed. Optional: without
                     llama-swap the RECENT REQUESTS table is simply not printed.
   KVWATCH_REQUESTS  how many recent requests to list (default 8).
@@ -34,12 +34,12 @@ TWO TRAPS BUILT INTO THE DISPLAY
 import os
 import json, os, re, sys, time, urllib.request
 
+# Default: the launcher run standalone (PORT, as passed to --port). KVWATCH_METRICS points anywhere else,
+# e.g. a llama-swap entry: http://127.0.0.1:1234/upstream/<entry>/metrics
 METRICS = os.environ.get(
     "KVWATCH_METRICS",
-    "http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache/metrics")
-# Without an explicit KVWATCH_METRICS, a standalone launch (no llama-swap) is the fallback.
-FALLBACKS = [] if "KVWATCH_METRICS" in os.environ else [
-    "http://127.0.0.1:%s/metrics" % os.environ.get("PORT", "8080")]
+    "http://127.0.0.1:%s/metrics" % os.environ.get("PORT", "8080"))
+FALLBACKS = []
 ACTIVITY = os.environ.get("KVWATCH_ACTIVITY",
                           "http://127.0.0.1:1234/api/metrics/activity")
 STATE = os.environ.get("KVWATCH_STATE", "/tmp/kvwatch-%d.json" % os.getuid())

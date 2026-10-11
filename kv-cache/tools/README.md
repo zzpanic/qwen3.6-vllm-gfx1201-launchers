@@ -9,8 +9,8 @@ One screen, refreshed every 5 s: GPU and offload-tier prefix-cache hit rates
 and stored, and the last few requests with how much of each was cached. Read-only.
 
 It reads only metrics upstream vLLM exports, so it is the one tool here that works
-on the **default** build. Its default is the author's llama-swap entry; set
-`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` to read your engine (the per-request table needs llama-swap and is skipped without it). The
+on the **default** build. It reads `http://127.0.0.1:$PORT/metrics` (default 8080); behind llama-swap set
+`KVWATCH_METRICS=http://127.0.0.1:1234/upstream/<entry>/metrics` (the per-request table needs llama-swap and is skipped without it). The
 first refresh prints no rates -- it has nothing to difference against yet.
 
 The two tools below need the instrumentation (`KVOFF_MINIMAL=0`; `kvvalidate.py`

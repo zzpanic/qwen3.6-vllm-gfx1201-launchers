@@ -196,7 +196,7 @@ Every behaviour change sits behind an environment gate whose unset state is stoc
 
 ```bash
 python3 kv-cache/tools/kvtable.py --url http://127.0.0.1:<port>/metrics   # per-tier hits, capacity, speed
-KVWATCH_METRICS=http://127.0.0.1:<port>/metrics python3 kv-cache/tools/kvwatch.py   # live
+PORT=<port> python3 kv-cache/tools/kvwatch.py                              # live
 ```
 
 With `KVOFF_MINIMAL=0` (the instrumentation), `kvvalidate.py` and `tierreport.py` also explain why a

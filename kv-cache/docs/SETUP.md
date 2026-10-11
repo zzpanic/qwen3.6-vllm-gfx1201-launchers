@@ -101,8 +101,8 @@ watch -n 5 python3 kv-cache/tools/kvwatch.py
 ```
 
 GPU and offload-tier hit rates (lifetime and since the last refresh — read the second), load/store
-bytes, and the last few requests with how much of each was cached. Point it at your engine with
-`KVWATCH_METRICS=http://127.0.0.1:<port>/metrics` (its default is the author's llama-swap entry). The per-request table needs llama-swap and is
+bytes, and the last few requests with how much of each was cached. It reads the launcher's own port (`PORT`, default 8080); behind llama-swap, point it at the entry with
+`KVWATCH_METRICS=http://127.0.0.1:1234/upstream/<entry>/metrics`. The per-request table needs llama-swap and is
 skipped without it. The first refresh shows no rates — it has nothing to difference against yet.
 
 **`tools/kvvalidate.py`** — *disk build with `KVOFF_MINIMAL=0`.* Read-only, stdlib-only, no GPU, one HTTP read.
