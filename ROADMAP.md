@@ -60,34 +60,54 @@ unaffected. Switching `MAMBA_SSM_FP16` changes the disk tier's geometry (README.
 ## 2. Kernel work
 
 **Kernel audit, 2026-10-11** (torch-profiler traces of the shipped launcher, `PROFILE_DIR=1`: one stream of
-decode, four streams of decode, and a 32k-token prefill). GPU time by kernel:
+decode, four streams of decode, and a 31.5k-token prefill). GPU time by kernel:
 
 | Scenario | Top kernels (share of GPU time) |
 |---|---|
 | Decode, 1 stream | MXFP4 decode GEMM 75.4%, drafter W4A16 split-K 6.3%, int2 draft head 4.5%, GDN lazy update 2.8%, fused add+RMS+quant 1.5%, GDN conv 1.4%, `torch.topk` 1.5% |
-| Decode, 4 streams | MXFP4 decode GEMM 67.9%, GDN lazy update 5.7%, drafter split-K 5.7%, int2 draft head 5.3%, drafter W4A16 (stock kernel) 1.9%, `torch.topk` 2.3% |
-| Prefill, 32k | MXFP4 tiled GEMM 58.8%, attention prefill 12.9%, MXFP4 folded GEMM 7.6%, fused SiLU+quant 5.1%, GDN chunk scan 2.8%, drafter W4A16 (stock kernel) 2.1%, offload-tier copy 1.6% |
+| Decode, 4 streams | MXFP4 decode GEMM 67.9%, GDN lazy update 5.7%, drafter split-K 5.7%, int2 draft head 5.3%, drafter W4A16 (tile table, no split-K) 1.9%, `torch.topk` 2.3% |
+| Prefill, 31.5k | MXFP4 tiled GEMM 58.8%, attention prefill 12.9%, MXFP4 folded GEMM 7.6%, fused SiLU+quant 5.1%, GDN chunk scan 2.8%, drafter W4A16 (stock kernel, since fixed) 2.1%, offload-tier copy 1.6% |
 
-The kernels that dominate are at their hardware limit:
-- **Decode GEMM:** about 83% of DRAM bandwidth (about 23.8 ms per verify step over about 12.6 GB of layer weights).
-- **Prefill GEMM:** roughly 70% of the fp8 matrix-multiply peak.
-- **Int2 draft head:** about 430 GB/s, at its tuned geometry.
+The same day the audit was re-checked against the traces' launch grids, the kernel sources and the current
+upstream trees (deadcode radiance engine 1.3.0, tcclaviger/vllm 29.08.10, libr4d main). Matrix peaks below are
+the radiance engine's gfx1201 measurements (f16 207, fp8 412, iu8 407 TF/s); a streaming kernel reaches about
+600-634 GB/s of the card's 640.
 
-Every Triton kernel on the decode path has measured gfx1201 tiles: the drafter split-K table, the draft head's
-per-M warps, and inductor's autotuned fusions. The one untuned path is below. No quick win above 1% was found.
-All eight kernels that used to compile during the first requests now compile during the boot warm-up (`JIT_WARMUP`).
+Where the big kernels stand:
+- **Decode GEMM:** ~544 GB/s, 12.9 GB of 4-bit layer weights in 23.8 ms per verify step, 86-91% of what a
+  streaming kernel reaches. At the roof.
+- **Prefill GEMM (tiled):** ~243 TF/s on every large projection, 59% of the fp8 peak. The out/o projections
+  (K 6144) take the folded kernel instead, at ~175 TF/s (item 5).
+- **Attention prefill:** f16 matrix ops for both products, ~153 TF/s, 74% of the f16 peak. Closed (below).
+- **Int2 draft head:** ~510 GB/s at one stream counting its per-group scale and zero point, ~80% of DRAM. At
+  four streams (M=32) it takes about 1 ms a call, bound by the f16 matrix rate rather than by memory.
+- **Drafter split-K GEMMs:** ~515 GB/s.
+- **Launches:** ~1,100 kernels per decode step. The GPU idles 15% of decode time, almost all of it in gaps under
+  50 µs (~4 µs a kernel, ~4.5 ms a step at one stream). At four streams the GDN and attention kernels run
+  outside the CUDA graph (46 of 48 GDN updates a step).
+- **Offload-tier copy:** it overlaps no compute (item 1).
 
-| Item | Source | Expected value | Cost / risk | Status |
-|---|---|---|---|---|
-| **Drafter W4A16 GEMMs at prefill-sized M**: the drafter's fc and context-KV projections (M = CHUNK) fell through to the stock `_triton_w4a16_skinny_fmt_kernel` heuristic (fc ~30 TFLOP/s) | kernel audit 2026-10-11 | `patch_w4a16_prefill.py`: tcclaviger's BLOCK_K 32 + GROUP_M swizzle, bit-identical; fc x2.08 at M 3568, cold prefill +1.0-1.4% (4.7k-46k tokens). A bf16 dequant + hipBLASLt route is still ~19% faster on fc at M >= 2048, at a ~5e-3 drafter error and a scratch buffer | None: same kernel, same K loop | Done 2026-10-11 |
-| **`torch.topk` in decode** (1.5-2.3% of a step) | kernel audit 2026-10-11 | Under 2%: a fused top-k for the sampler and drafter selection | Medium: it touches the sampler | Not started |
-| **Int2 draft head retune at TP=1**: tuned on a two-GPU vocab shard (124,160 rows). It runs the full 248,320 rows here at about 68% of DRAM bandwidth | kernel audit 2026-10-11 | 4.5-5.3% of a step today, so up to about 1.5% from a wider BLOCK_N or a split | Low | Not started |
-| **GDN decode rewrite**: anchor state (one state per sequence plus the replayed accepted prefix, single-write, with a shift marker that survives vLLM's page migration), the decode conv folded into the update, a non-temporal state store chosen per launch | deadcode radiance engine 1.0.x | Claimed about 14% of a decode step. It overlaps lazy GDN, which already gave about +7%, so the gain on top of that is unknown. | High: correctness-critical state handling, and it needs matching `radiance_gdn.py` integration | Not started |
-| **Full exact-wide prefill**: 12 warps, 96-key tiles | Crssz/r4dx | Their 2.0-2.6x on 64-token chunks against our 1.26-1.42x. Only affects final prefill chunks of 256 tokens or fewer. | Medium: the QK8 raw-byte K staging assumes a one-pass wide K fetch, and fewer warps or wider tiles make it multi-pass | DSPLIT-only part shipped |
-| **Decode-attention extras**: vectorised split-KV merge (bit-identical), attention output gate and fp8 quantisation fused into the merge epilogue, K prefetch 2 instead of 4 | deadcode engine | Under 2% of a step | Medium: the fusion needs the vLLM output path changed | Not started |
-| **MXFP4 skinny GEMM launch sweep** (`gemm_mxfp4a8_nt_m64`) | libr4d main | Measured -7.4% decode at the default config. A sweep of `_r4d_cfg` is untried. | Low cost, low odds: radiance's own decode kernel is at the bandwidth roof | Rejected as shipped |
-| **Split-KV prefill** (not exact) | Crssz/r4dx | Larger short-chunk gains than DSPLIT | Changes fp32 summation order, so a resumed final chunk is no longer bit-identical to a cold run. Only worth it with an explicit exactness policy. | Not adopted |
-| **M1/M8 route alignment**: serial decode vs speculative verify | vllm-radiance #11 | Reproducibility, not quality: spec on/off agreement is 99.13% today, with flips only at near-ties | About 33k lines | Not adopted |
+All eight kernels that used to compile during the first requests now compile during the boot warm-up
+(`JIT_WARMUP`). Several items below are worth 1-2% each; none is quick. In order of expected value:
+
+| # | Item | Source | Expected value | Cost / risk | Status |
+|---|---|---|---|---|---|
+| 1 | **Offload-tier copies serialise with compute.** The KV store copy (`hipMemcpyBatchAsync`: a blit kernel on its own stream, ~20 ms per 3520-token chunk over PCIe 3.0) overlapped no compute in the prefill trace. The likely cause is `GPU_MAX_HW_QUEUES=1`, which puts every stream on one hardware queue | kernel review 2026-10-11 | 1.5% of a cold 31.5k prefill. Tier loads probably stall other streams' decode the same way (unmeasured) | Low to medium. Try a copy-engine (SDMA) path before the queue count: two queues was a per-boot lottery here (one boot in three ran ~30% slower), so any queue or stream A/B needs three or more boots per arm | Not started |
+| 2 | **GDN decode, the parts lazy GDN does not cover.** The radiance engine's update kernel folds in the decode convolution (tap for tap, the same arithmetic) and the gated RMS norm + quantiser, and picks a non-temporal state store per launch by flood size. Its anchor state (one state per sequence plus the replayed accepted prefix, about 14% of a step there) is what lazy GDN already does here | deadcode radiance engine 1.3.0 | Today the separate conv update and gated norm + quant cost 1.4% + 0.6% of a one-stream step plus 96 of its ~1,100 launches: about 2-3% of a step. The non-temporal hint is worth about 3% of a step on the engine's fp32 anchor state; this stack writes less state per layer (fp16), so expect less | Medium to high: a correctness-critical kernel. Outputs must stay bit-identical to today's path, and the stash and tier-materialize layout of lazy GDN must survive | Not started |
+| 3 | **Draft and verify heads on the int8 matrix rate** (`r4d_gemm_w2a8_nt`, the same asymmetric group-128 2-bit format) | deadcode radiance engine 1.3.0 | The int2 head is 4.5% / 5.3% of a step (one / four streams) and compute-bound from four streams up. On iu8 it stays a weight stream to M=64: about 0.6% / 2% of a step, more at eight streams | Medium: new packing and an int8 activation quantiser. The verify head's top-256 shortlist must keep its top-20 retention (649 of 650 rows today) | Not started |
+| 4 | **Benchmark the radiance engine's MXFP4 tiled GEMM** (`r4d_gemm_mxfp4a8_tiled`) against the one shipped here | deadcode radiance engine 1.3.0 | The tiled GEMM is 59% of prefill at 59% of the fp8 peak, and the new kernel has no published rate. Modest odds, large prize: every 10% is about 6% of prefill | Low to measure: it reads the same fragment-order weight layout (`RADIANCE_MXFP4_WPERM`); one GPU window | Not started |
+| 5 | **Out/o projections on the tiled GEMM.** Their inputs come from the GDN gated norm + quant and the attention-output quant, which do not write the fragment-tiled activation layout, so they take the folded kernel (~175 against ~243 TF/s) | kernel review 2026-10-11 (ggz14's kernels) | The folded kernel is 7.6% of prefill. ggz14 measured the tiled kernel 12-16% faster at M >= 2048; at the other projections' rate this shape would take 28% less time: 0.9-2.1% of prefill | Low: add the tiled write that `add_rms_quant` and `silu_mul_quant` already have. The same fp8 bytes in a different order, so exact | Not started |
+| 6 | **Fused SiLU + quant at 342 GB/s** (one pass already, one workgroup per row) | kernel review 2026-10-11; tcclaviger/vllm `clav_silu_quant` (the same per-token e4m3 op, wired into its MoE path) | 5.1% of prefill: about 1.9% at ~550 GB/s | Medium: keep the rounding contract (silu and product rounded to bf16, amax over the rounded product) and the tiled write. His kernel can be timed in his image first | Not started |
+| 7 | **Launch count at decode**: ~1,100 kernels a step at ~4 µs each, 12-14% of decode time. At four streams the GDN and attention kernels run outside the CUDA graph; non-uniform verify widths falling back to piecewise graphs is the suspect, unverified | kernel review 2026-10-11 | The largest decode pool, drained in pieces: each 100 launches removed is about 0.4 ms a step (~1.2%) | High and spread out: fusions in the vLLM glue. Start with why four streams run eager | Not started |
+| 8 | **GDN prefill kernels.** The radiance engine has reworked the chunk scan, conv prep and kkt solve since libr4d v0.5.0 | deadcode radiance engine 1.3.0 | 5.8% of prefill with the gated norm; the gain is unmeasured | High: libr4d is a correctness pin, so the full exactness gates (`val_resume.py --evict`, `turnbench.py`) | Not started |
+| 9 | **`torch.topk` in decode.** The verify head scatters its 256 rescored logits into a 248,320-wide row of -inf, then the sampler top-k's the whole row | kernel audit + review 2026-10-11 | 1.5% / 2.3% of a step; about 0.65% / 0.9% is fixable by keeping the 256 candidates compact through the sampler, plus a row top-k (`r4d_rowtopk_bf16`, radiance engine) for the head's own selection | Medium: it touches the sampler; exact | Not started |
+| 10 | **Drafter down projection at four streams.** At M=32 one drafter GEMM a layer (most likely down_proj) has a tile-table row but no split-K row, and runs at ~330 GB/s | kernel review 2026-10-11 | 1.85% of a four-stream step: about 0.6%. Nothing at one stream | Low: the same sweep as the prefill tiles; drafter only, so acceptance is the only risk | Not started |
+| 11 | **Decode-attention extras**: vectorised split-KV merge (bit-identical), attention output gate and fp8 quantisation fused into the merge epilogue, K prefetch 2 instead of 4 | deadcode engine | Under 2% of a step | Medium: the fusion needs the vLLM output path changed | Not started |
+| 12 | **Full exact-wide prefill**: 12 warps, 96-key tiles | Crssz/r4dx | Their 2.0-2.6x on 64-token chunks against our 1.26-1.42x. Only affects final prefill chunks of 256 tokens or fewer. | Medium: the QK8 raw-byte K staging assumes a one-pass wide K fetch, and fewer warps or wider tiles make it multi-pass | DSPLIT-only part shipped |
+| 13 | **Drafter W4A16 GEMMs at prefill-sized M**: the drafter's fc and context-KV projections (M = CHUNK) fell through to the stock `_triton_w4a16_skinny_fmt_kernel` heuristic (fc ~30 TFLOP/s) | kernel audit 2026-10-11 | `patch_w4a16_prefill.py`: tcclaviger's BLOCK_K 32 + GROUP_M swizzle, bit-identical; fc x2.08 at M 3568, cold prefill +1.0-1.4% (4.7k-46k tokens). A bf16 dequant + hipBLASLt route is still ~19% faster on fc at M >= 2048, at a ~5e-3 drafter error and a scratch buffer | None: same kernel, same K loop | Done 2026-10-11 |
+| 14 | **MXFP4 skinny GEMM launch sweep** (`gemm_mxfp4a8_nt_m64`) | libr4d main | Measured -7.4% decode at the default config. A sweep of `_r4d_cfg` is untried. | Low cost, low odds: radiance's own decode kernel is at the bandwidth roof | Rejected as shipped |
+| 15 | **Split-KV prefill** (not exact) | Crssz/r4dx | Larger short-chunk gains than DSPLIT | Changes fp32 summation order, so a resumed final chunk is no longer bit-identical to a cold run. Only worth it with an explicit exactness policy. | Not adopted |
+| 16 | **M1/M8 route alignment**: serial decode vs speculative verify | vllm-radiance #11 | Reproducibility, not quality: spec on/off agreement is 99.13% today, with flips only at near-ties | About 33k lines | Not adopted |
 
 The tools that check kernel work are `lenprobe.py`, `val_resume.py`, `quality_ab.py` and `errmargin.py` /
 `klstat.py`. Exact-wide changes also need a byte-identity harness against the unsplit kernel, like the
@@ -164,3 +184,6 @@ one used for DSPLIT.
 | `RADIANCE_SKINNY_GEMM=all` | A drafter acceptance tax larger than the kernel win (ggz14's measurement) |
 | ParoQuant / MXFP6 kernels | Need different checkpoints |
 | fp16 SSM state (as of today) | See section 1 |
+| Int2 draft head retune at TP=1 | ~510 GB/s at one stream counting its per-group scale and zero point, ~80% of DRAM: about 0.2% left. The four-stream case is item 3 of section 2 |
+| MXFP4 decode GEMM | 86-91% of achievable bandwidth. The radiance engine's newest decode kernel (`r4d_gemm_mxfp4a8_decode`) uses the same design (split-K across workgroups, LDS-staged weight, non-temporal loads); unmeasured here |
+| Attention prefill | 74% of the f16 matrix peak. libr4d measured an fp8 P leg at 16% faster and 15x less accurate; tcclaviger/vllm also prefers libr4d's paged attention to its own `clav_attn` on this geometry |

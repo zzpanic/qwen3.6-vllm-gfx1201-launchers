@@ -42,10 +42,10 @@ measured the same night. The 2026-10-06 figures (BETTERBENCH-20261006.md) used B
 
 These numbers include the non-kernel work listed further down; the gains are not separable per kernel.
 
-Where decode and prefill time goes today (a torch-profiler audit, 2026-10-11) is in ROADMAP.md section 2. The
-MXFP4 GEMMs are at about 83% of DRAM bandwidth (decode) and about 70% of matrix peak (prefill), and every Triton
-kernel on the decode path has measured gfx1201 tiles. Their first calls happen during a boot warm-up
-(`JIT_WARMUP=1`), not on the first real requests.
+Where decode and prefill time goes today (a torch-profiler audit, 2026-10-11, and its review against the
+upstream trees) is in ROADMAP.md section 2. The MXFP4 decode GEMM streams at ~544 GB/s, at the bandwidth roof; the
+tiled prefill GEMM runs at ~243 TF/s, 59% of the fp8 matrix peak. Triton kernels make their first calls during a
+boot warm-up (`JIT_WARMUP=1`), not on the first real requests.
 
 ## Why libr4d at all
 
