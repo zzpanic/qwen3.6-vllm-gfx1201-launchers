@@ -1,14 +1,16 @@
 # Operations files
 
-## The reaper is MANDATORY for the disk tier
+## The reaper
 
-The default build has no disk tier and needs none of this section. With
-`KVCACHE_DISK_TIER=1` (or any `KVCACHE_DISK`), the fs tier writes and **never deletes**: `tiering/fs/manager.py` has no
-capacity, quota or TTL parameter and exposes no eviction hook. Without an
-external reaper the filesystem fills until it is full.
+With the disk tier on, the fs tier writes and **never deletes**: `tiering/fs/manager.py` has no
+capacity, quota or TTL parameter and exposes no eviction hook. Something has to reap it, or the
+filesystem fills until it is full.
 
-`../../setup-kvcache.sh` installs it with a size limit and a drop-in pointing it at your folder.
-By hand:
+**The launcher runs `kvcache-reap.sh` inside the container by default** (`KVCACHE_REAPER=1`): one pass
+at start, then one every minute at idle priority, with the limits from `kvcache.env`
+(`../../setup-kvcache.sh`) or the environment. Nothing is installed. The systemd units here are the
+alternative, for reaping independent of the server; while `kvcache-reap.timer` is enabled the launcher
+leaves reaping to it. To install them:
 
     sudo cp kvcache-reap.sh /usr/local/bin/        # or wherever, then fix the unit
     sudo cp kvcache-reap.service kvcache-reap.timer /etc/systemd/system/

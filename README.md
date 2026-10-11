@@ -34,7 +34,7 @@ The rest of the documentation:
 | Container runtime | Podman or Docker |
 | Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
-| Disk tier | **96 GB of cache**, held there by the reaper: a 128 GiB filesystem or image file of its own is simplest (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
+| Disk tier | **96 GB of cache**, held there by the launcher's built-in reaper (`KVCACHE_MAX_GB`): a folder on any fast disk, or a filesystem or image file of its own (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
 | Downloads | About 40 GiB for the checkpoints |
 
 ## Setup
@@ -64,8 +64,8 @@ hf download just1moremodel/Qwen3.8-27B-Uncensored-MXFP4-awq \
 - it measures your RAM and suggests a RAM-tier size (16 GiB by default), then resizes `/dev/shm` to match;
 - it measures your disk's direct-I/O speed, then uses an existing mount, creates an image file, or formats a
   spare disk for the disk tier;
-- it installs the reaper with a size limit you choose (96 GB recommended). The reaper is required: the
-  tier never deletes on its own.
+- it sets the size limit for the disk cache (96 GB recommended). The tier never deletes on its own; the
+  launcher runs a reaper inside the container that holds it to that limit, so nothing is installed for it.
 
 It shows every command it runs as root and asks first; `--dry-run` only prints them. Your choices go to
 `kvcache.env`, which the launcher reads. Or skip the disk tier and run RAM-only with `KVCACHE_DISK_TIER=0`.

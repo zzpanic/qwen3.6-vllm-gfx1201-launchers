@@ -30,7 +30,7 @@ DRY_RUN=1 ./startup-qwen3.8-27b-mxfp4.sh             # print the command, run no
 |---|---|---|
 | select with | `KVCACHE_DISK_TIER=0` | nothing (`KVCACHE_DISK_TIER=1`) |
 | house patches | the 13 default ones (behavioural fixes, canonical chunks, checkpoint retention; patches/README.md) | the 13 + the 3 disk-tier fixes |
-| needs | `/dev/shm` for the RAM tier | that, plus a filesystem (`KVCACHE_DISK`, default `/kvcache`) and the reaper |
+| needs | `/dev/shm` for the RAM tier | that, plus a folder on a fast disk (`KVCACHE_DISK`, default `/kvcache`); the reaper is built in |
 | tools | `kvwatch.py`, `kvtable.py` | the same |
 
 Option 2 is the served configuration (disk tier at `/kvcache`, a 128 GiB volume kept at 75%).
@@ -39,7 +39,7 @@ the 6 instrumentation patches; `kvvalidate.py` and `tierreport.py` need it (with
 counters are not exported and they report false FAILs). It is for diagnosis, not serving: it makes
 the log and `/metrics` much noisier.
 
-**Sizing.** A 16 GiB RAM tier and a 128 GiB disk kept at 75% by the reaper (the defaults). With
+**Sizing.** A 16 GiB RAM tier and 96 GB of disk cache (`./setup-kvcache.sh` sets both up). With
 checkpoint retention that holds what dense storage needed about twice the space for; see
 [KV-CACHE.md](../KV-CACHE.md) -> "Sizing" and [`docs/SETUP.md`](docs/SETUP.md). The launcher checks the
 RAM tier against `/dev/shm` and system RAM (keeping 15 GiB back); **if it does not fit, offload is

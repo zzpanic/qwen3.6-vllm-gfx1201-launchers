@@ -150,12 +150,17 @@ the line on your box prints it for your sizes.
 ### The disk tier and the reaper
 
 - **Size.** 96 GB of cache holds ~2.2M tokens of finished conversations. `./setup-kvcache.sh` sets it
-  up: it measures the disk, makes a filesystem or an image file if you want one, and gives the reaper a
-  size limit (`KVCACHE_MAX_GB`) that it enforces on the folder itself. Without a limit the reaper keeps
+  up: it measures the disk, makes a filesystem or an image file if you want one, and sets the size
+  limit (`KVCACHE_MAX_GB`) the reaper enforces on the folder itself. Without a limit the reaper keeps
   the whole volume at 75%, so the tier then wants a filesystem of its own (128 GiB). The tier writes
   with O_DIRECT, so page cache does not help it.
-- **The reaper is mandatory.** vLLM's filesystem tier has no capacity limit and never deletes.
-  Without the reaper (`kv-cache/ops/kvcache-reap.{sh,service,timer}`), the volume fills until writes
+- **The reaper is built in.** The launcher runs `kv-cache/ops/kvcache-reap.sh` inside the container: one
+  pass at start, then one a minute at idle priority, for as long as the server runs (the tier only grows
+  while it runs). Nothing to install, no root. `KVCACHE_REAPER=0` turns it off; the systemd units in
+  `kv-cache/ops/` are the alternative for reaping independent of the server, and the launcher leaves
+  reaping to them while `kvcache-reap.timer` is enabled.
+- **Why a reaper at all.** vLLM's filesystem tier has no capacity limit and never deletes.
+  Without one (`KVCACHE_REAPER=0` and no timer), the volume fills until writes
   fail. It keeps the volume at or below `KVCACHE_TARGET_PCT` (75), oldest blocks first, and the
   launcher warns at boot if `kvcache-reap.timer` is not enabled.
 - **Why it also keeps 24 GB free.** `KVCACHE_MIN_FREE_GB=24` is the peak measured write rate

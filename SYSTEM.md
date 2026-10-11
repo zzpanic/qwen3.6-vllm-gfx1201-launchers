@@ -139,7 +139,7 @@ instead.
 | Setting | Value | Why |
 |---|---|---|
 | `/dev/shm` | `tmpfs size=20G` in `/etc/fstab` | The RAM KV tier lives here. It must hold the tier (16 GiB by default; 20G is enough for that) plus a 0.25 GiB margin. |
-| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB with the reaper at 75% recommended**; this box's 94 GiB volume, reaped at 70%, is below that (KV-CACHE.md). |
+| `/kvcache` | dedicated ext4, `noatime,nodiratime,nofail` | The disk KV tier. **128 GiB recommended (96 GB of cache)**; this box's 94 GiB volume, reaped at 70%, is below that (KV-CACHE.md). |
 | `vm.swappiness` | 10 | Evict disposable page cache before swapping anonymous memory. |
 | `vm.max_map_count` | 1048576 | Large mmap counts (Ubuntu bug 2057792). |
 | Transparent huge pages | `madvise` (default) | Unchanged. |

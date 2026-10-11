@@ -91,7 +91,9 @@ Everything is an environment variable; these are the ones worth knowing.
                             dense checkpoint bytes, off if it does not fit /dev/shm and RAM; 0 = off
   KVCACHE_DISK_TIER=1       disk tier on (0 = RAM tier only)
   KVOFF_MINIMAL=1           0 adds the KV-offload instrumentation (kvvalidate.py, tierreport.py)
-  KVCACHE_DISK=/kvcache     disk tier filesystem; 128 GiB or more recommended, reaper required
+  KVCACHE_DISK=/kvcache     disk tier folder (setup-kvcache.sh sets it up)
+  KVCACHE_MAX_GB=0          disk cache size limit, enforced by the built-in reaper (0 = volume rules only)
+  KVCACHE_REAPER=1          the built-in disk-tier reaper (runs in the container); 0 = off
   MIN_M=0                   M above which the W4A8 kernel takes over from aiter (0 = always)
   AUTO_R4D=1                build the pinned libr4d on first run (cached); 0 uses the image's
   R4D_SO=<dir>              use your own libr4d checkout instead of building one
@@ -1043,25 +1045,48 @@ if [ -n "$KVOFF_DISK" ] && [ ! -d "$KVOFF_DISK" ]; then
   die "the KV-offload disk tier folder $KVOFF_DISK does not exist." \
       "The disk tier is ON by default (KVCACHE_DISK_TIER=1). Do ONE of:" \
       "  * create it: run ./setup-kvcache.sh (it makes the folder, a filesystem if you want one," \
-      "    and installs the reaper; kv-cache/docs/SETUP.md has the manual steps)," \
+      "    and sets the cache size limit; kv-cache/docs/SETUP.md has the manual steps)," \
       "  * point the launcher at another folder:  KVCACHE_DISK=/path/to/folder" \
       "  * or run RAM-only:                       KVCACHE_DISK_TIER=0"
 fi
+# Disk-tier reaper (2026-10-11). The fs tier writes and never deletes; kv-cache/ops/kvcache-reap.sh does,
+# oldest blocks first. It runs INSIDE the container: one pass at start, then every KVCACHE_REAP_INTERVAL
+# seconds at idle CPU and I/O priority, so it lives exactly as long as the server and needs no install, root,
+# systemd or cron. Its limits come from kvcache.env (setup-kvcache.sh) or the environment:
+#   KVCACHE_MAX_GB=0         ceiling on the size of <disk tier>/blocks; each pass deletes down to the ceiling
+#                            minus a headroom (min(24, ceiling/5) GB, a minute of peak writes). 0 = no ceiling:
+#                            the volume rules alone govern, which assumes the tier has its own filesystem.
+#   KVCACHE_TARGET_PCT=75    keep the filesystem at or below this % full
+#   KVCACHE_MIN_FREE_GB=24   and keep at least this much free (peak write rate x a pass interval x 1.25)
+#   KVCACHE_REAPER=1         0 = no built-in reaper (something else must reap). If the system timer from
+#                            kv-cache/ops (kvcache-reap.timer) is enabled it reaps instead, and the built-in one
+#                            stays off: never two reapers on one folder.
+KVCACHE_REAPER=${KVCACHE_REAPER:-1}
+KVCACHE_MAX_GB=${KVCACHE_MAX_GB:-0}
+KVCACHE_TARGET_PCT=${KVCACHE_TARGET_PCT:-75}
+KVCACHE_MIN_FREE_GB=${KVCACHE_MIN_FREE_GB:-24}
+KVCACHE_REAP_INTERVAL=${KVCACHE_REAP_INTERVAL:-60}
+REAPER_ON=0
+REAPER_MOUNT=()
 if [ -n "$KVOFF_DISK" ]; then
-  # 128 GiB recommended: the reaper keeps KVCACHE_MIN_FREE_GB (24) free and works on a 5-minute
-  # cadence, so a smaller volume holds little more than a couple of full 256k conversations.
+  if systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
+    echo "[kvcache] reaper: the system kvcache-reap.timer is enabled and reaps $KVOFF_DISK; the built-in reaper stays off" >&2
+  elif [ "$KVCACHE_REAPER" = 1 ]; then
+    REAPER_ON=1
+    REAPER_MOUNT=(-v "$SCRIPT_DIR/kv-cache/ops/kvcache-reap.sh:/opt/kvcache-reap.sh:ro,z")
+    if [ "$KVCACHE_MAX_GB" -gt 0 ]; then _rp_lim="the cache at most ${KVCACHE_MAX_GB} GB"
+    else _rp_lim="no size limit (KVCACHE_MAX_GB; setup-kvcache.sh sets one)"; fi
+    echo "[kvcache] reaper: built in, every ${KVCACHE_REAP_INTERVAL} s: ${_rp_lim}; the volume at most ${KVCACHE_TARGET_PCT}% full with ${KVCACHE_MIN_FREE_GB} GB free" >&2
+  else
+    echo "[kvcache] *** WARNING: the disk tier is ON with no reaper (KVCACHE_REAPER=0, no kvcache-reap.timer)." >&2
+    echo "[kvcache]     This tier NEVER deletes on its own; $KVOFF_DISK fills until the filesystem is full." >&2
+  fi
+  # the space the cache gets: the size limit when there is one, else the volume (128 GiB recommended)
   _kvc_disk_gib=$(df -P -B1G "$KVOFF_DISK" 2>/dev/null | awk 'NR==2 {print $2}')
-  _kvc_max=$(grep -hoE "KVCACHE_MAX_GB=[0-9]+" /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)
-  if [ -n "$_kvc_max" ]; then
-    # a size limit from setup-kvcache.sh: that, not the volume, is what the cache gets
-    [ "$_kvc_max" -lt 64 ] && echo "[kvcache] WARNING: the reaper limits the disk tier to ${_kvc_max} GB; 96 GB is recommended." >&2
+  if [ "$REAPER_ON" = 1 ] && [ "$KVCACHE_MAX_GB" -gt 0 ]; then
+    [ "$KVCACHE_MAX_GB" -lt 64 ] && echo "[kvcache] WARNING: the disk tier is limited to ${KVCACHE_MAX_GB} GB; 96 GB is recommended." >&2
   elif [ -n "$_kvc_disk_gib" ] && [ "$_kvc_disk_gib" -lt 128 ]; then
     echo "[kvcache] WARNING: disk tier $KVOFF_DISK is ${_kvc_disk_gib} GiB; 128 GiB or more is recommended." >&2
-  fi
-  if ! systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
-    echo "[kvcache] *** WARNING: the disk tier is ON but kvcache-reap.timer is not enabled." >&2
-    echo "[kvcache]     This tier NEVER deletes on its own; $KVOFF_DISK fills until the filesystem is" >&2
-    echo "[kvcache]     full. Install the reaper: ./setup-kvcache.sh (or by hand, kv-cache/ops/README.md)." >&2
   fi
 fi
 KVOFF_DISK_MNT=/kvcache                                   # path INSIDE the container
@@ -2139,6 +2164,10 @@ if [[ -n "$KVOFF_DISK" ]]; then
   WARM_DISK_BYTES=$(( ${_wd_size:-0} * ${_wd_pct:-75} / 100 ))
   _wd_max=$(grep -hoE "KVCACHE_MAX_GB=[0-9]+" /etc/systemd/system/kvcache-reap.service \
     /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)
+  if [ "$REAPER_ON" = 1 ]; then   # the built-in reaper: its own limits, not the system unit's
+    _wd_max=$KVCACHE_MAX_GB
+    WARM_DISK_BYTES=$(( ${_wd_size:-0} * KVCACHE_TARGET_PCT / 100 ))
+  fi
   if [ -z "${KVOFF_DISK_USABLE_PCT:-}" ] && [ "${_wd_max:-0}" -gt 0 ]; then
     _wd_head=$(( _wd_max / 5 < 24 ? _wd_max / 5 : 24 ))
     WARM_DISK_BYTES=$(( (_wd_max - _wd_head) * 1000000000 ))
@@ -2241,6 +2270,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
   ${KVOFF_DISK:+-v "$KVOFF_DISK":"$KVOFF_DISK_MNT"} \
+  ${REAPER_MOUNT[@]+"${REAPER_MOUNT[@]}"} \
   ${KVOFF_DISK:+-e PYTHONHASHSEED="$KVOFF_HASHSEED"} \
   -e RADIANCE_OFFLOAD_MIXED_HIT="$KVOFF_MIXED_HIT" \
   -e RADIANCE_RECONCILE_REASK="$KVOFF_RECONCILE_REASK" \
@@ -2263,6 +2293,9 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
   -e RADIANCE_BANNER="$RADIANCE_BANNER" \
   -e RADIANCE_LAUNCH_IMAGE="$IMAGE" \
   -e RADIANCE_JIT_WARMUP="$JIT_WARMUP" -e RADIANCE_WARMUP_MAXSEQS="${MAXSEQS:-8}" \
+  -e RADIANCE_REAPER="$REAPER_ON" -e RADIANCE_REAP_INTERVAL="$KVCACHE_REAP_INTERVAL" \
+  -e KVCACHE_ROOT="$KVOFF_DISK_MNT/blocks" -e KVCACHE_MAX_GB="$KVCACHE_MAX_GB" \
+  -e KVCACHE_TARGET_PCT="$KVCACHE_TARGET_PCT" -e KVCACHE_MIN_FREE_GB="$KVCACHE_MIN_FREE_GB" \
   ${QUIET_ENV[@]+"${QUIET_ENV[@]}"} \
   -e RADIANCE_VRAM_RETENTION="$KVOFF_VRAM_RETENTION" \
   -e RADIANCE_VRAM_KEEP_PREFIX="$KVOFF_KEEP_PREFIX" \
@@ -2573,6 +2606,15 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
         python3 /house/radiance_jit_warmup.py "${RADIANCE_HEALTH_PORT:-8080}" "${RADIANCE_WARMUP_MAXSEQS:-4}" >&3 2>&1 || true
       fi
     ) 3>&1 >/dev/null 2>&1 &
+    # Disk-tier reaper (KVCACHE_REAPER above): one pass now, then one every RADIANCE_REAP_INTERVAL seconds at
+    # idle priority. Only passes that delete something reach the log. It dies with the container.
+    if [ "${RADIANCE_REAPER:-0}" = 1 ] && [ -f /opt/kvcache-reap.sh ]; then
+      ( set +e
+        while :; do
+          nice -n 10 ionice -c 3 bash /opt/kvcache-reap.sh 2>&1 | grep -v "nothing to do" | sed "s/^/[reaper] /"
+          sleep "${RADIANCE_REAP_INTERVAL:-60}"
+        done ) &
+    fi
     if [ "${RADIANCE_BANNER:-1}" = 1 ] || [ -n "${RADIANCE_NUMA_BIND:-}" ] || [ "${RADIANCE_RUN_BWTEST:-0}" = 1 ]; then
       exec /opt/radiance_entrypoint.sh "$@"
     fi

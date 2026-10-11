@@ -45,11 +45,15 @@ that boot** and the log says what did not fit:
 `KVCACHE_TIER_GIB=<GiB>` sets another size; `auto` keeps the older rule (one full max-model-len prefill
 at dense bytes, 19 GiB at 262,144); `0` turns offload off.
 
-## The reaper — *disk build*, and then required
+## The reaper — *disk build*
 
-Nothing bounds the disk tier's growth on its own. **Install the reaper before serving the
-disk build**, or the filesystem fills. `./setup-kvcache.sh` (repository root) does everything in
-this file interactively, with a size limit for the reaper; the manual steps follow.
+Nothing bounds the disk tier's growth on its own, so **the launcher runs a reaper inside the
+container** (one pass at start, then one a minute) with the limits from `kvcache.env` or the
+environment: `KVCACHE_MAX_GB` (the cache's size limit), `KVCACHE_TARGET_PCT` and `KVCACHE_MIN_FREE_GB`
+(volume guards). `./setup-kvcache.sh` (repository root) does everything in this file interactively.
+
+To reap independently of the server instead (for example several servers sharing one folder), install
+the system timer below; while it is enabled the launcher leaves reaping to it.
 
 ```bash
 sudo cp kv-cache/ops/kvcache-reap.sh /usr/local/bin/

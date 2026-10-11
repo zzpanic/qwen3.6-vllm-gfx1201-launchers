@@ -7,8 +7,8 @@
 # What it can do, each step asking first and showing the commands it will run as root:
 #   RAM tier   measures RAM, suggests a tier size, resizes /dev/shm in /etc/fstab (backed up) and live.
 #   Disk tier  measures the filesystem's direct-I/O speed, then uses an existing mount, formats a spare
-#              disk, or creates an image file; installs the reaper (kv-cache/ops) with a drop-in that
-#              points it at the folder you chose, and enables its timer.
+#              disk, or creates an image file, and sets the cache's size limit. The reaper that enforces
+#              it is built into the launcher (it runs inside the container); nothing is installed.
 #   Wipe       runs ./clear-cache.sh (KV disk tier and startup caches, per model).
 # The choices go to kvcache.env next to the launcher, which reads it at start. Anything set in the
 # environment (llama-swap env:, the shell) still wins over kvcache.env.
@@ -17,7 +17,6 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ENVF="$HERE/kvcache.env"
-OPS="$HERE/kv-cache/ops"
 DRY=
 case "${1:-}" in
   --dry-run|-n) DRY=1 ;;
@@ -161,25 +160,20 @@ step_ram() {
 }
 
 # ---------------------------------------------------------------- disk tier
-reap_drop_in() {  # reap_drop_in DIR MAX_GB PCT MIN_FREE
-  local d=/etc/systemd/system/kvcache-reap.service.d
-  root mkdir -p "$d"
-  root_sh "printf '%s\n' '# Written by setup-kvcache.sh' '[Unit]' 'ConditionPathIsDirectory=' 'ConditionPathIsDirectory=$1/blocks' '[Service]' 'Environment=KVCACHE_ROOT=$1/blocks' 'Environment=KVCACHE_MAX_GB=$2' 'Environment=KVCACHE_TARGET_PCT=$3' 'Environment=KVCACHE_MIN_FREE_GB=$4' > $d/10-setup-kvcache.conf"
-}
 gb_size() { df -P -B1000000000 "$1" 2>/dev/null | awk 'NR==2{print $2}'; }   # filesystem size, GB
 gb_free() { df -P -B1000000000 "$1" 2>/dev/null | awk 'NR==2{print $4}'; }   # free, GB
-install_reaper() {  # install_reaper DIR DEDICATED(1|0)
+set_limits() {  # set_limits DIR DEDICATED(1|0) -- the built-in reaper's limits, into kvcache.env
   local dir=$1 dedicated=$2 vol free used max sugg pct minfree headroom
   vol=$(gb_size "$dir"); free=$(gb_free "$dir")
   used=$(du -s -B1000000000 "$dir/blocks" 2>/dev/null | cut -f1); used=${used:-0}
-  hdr "Size limit and reaper"
-  say "  The disk tier never deletes on its own. The reaper (a systemd timer, every minute) enforces a"
-  say "  maximum size for $dir/blocks: it deletes the oldest blocks down to that maximum minus a"
-  say "  headroom (a minute of peak writes), so the folder does not pass the maximum between runs."
+  hdr "Size limit"
+  say "  The disk tier never deletes on its own. The launcher runs a reaper inside the container, every"
+  say "  minute while the server runs: it deletes the oldest blocks down to the limit you set here minus a"
+  say "  headroom (a minute of peak writes), so $dir/blocks does not pass the limit. No install, no root."
   say "  The filesystem is ${vol} GB, ${free} GB free; the cache holds ${used} GB now."
-  # dedicated: 90% of the volume as the ceiling puts the after-reap level (ceiling - headroom) near 75%
+  # dedicated: 90% of the volume as the limit puts the after-reap level (limit - headroom) near 75%
   if [ "$dedicated" = 1 ]; then sugg=$(( vol * 90 / 100 )); else sugg=$(( (free + used) * 60 / 100 )); fi
-  [ "$sugg" -gt 96 ] && [ "$dedicated" = 0 ] && sugg=96          # 96 GB: the recommended cache (128 GiB volume at 75%)
+  [ "$sugg" -gt 96 ] && [ "$dedicated" = 0 ] && sugg=96          # 96 GB: the recommended cache
   while :; do
     ask max "Maximum disk cache size in GB (96 recommended, at least 32)" "$sugg"
     is_int "$max" && [ "$max" -ge 32 ] && [ "$max" -le $(( free + used )) ] && break
@@ -189,15 +183,18 @@ install_reaper() {  # install_reaper DIR DEDICATED(1|0)
   # the volume guards stay on underneath: never let the filesystem itself fill, whoever else writes to it
   pct=95; minfree=$(( vol / 10 < 24 ? vol / 10 : 24 ))
   [ "$dedicated" = 1 ] && [ $(( max + minfree )) -gt "$vol" ] && minfree=$(( vol - max > 0 ? vol - max : 0 ))
-  say "  Limit ${max} GB: the reaper keeps $dir/blocks at or below $(( max - headroom )) GB after each run"
-  say "  (headroom ${headroom} GB), and the filesystem at or below ${pct}% with ${minfree} GB free."
-  root install -m 0755 "$OPS/kvcache-reap.sh" /usr/local/bin/kvcache-reap.sh
-  root install -m 0644 "$OPS/kvcache-reap.service" "$OPS/kvcache-reap.timer" /etc/systemd/system/
-  reap_drop_in "$dir" "$max" "$pct" "$minfree"
-  root systemctl daemon-reload
-  root systemctl enable --now kvcache-reap.timer
-  [ -z "$DRY" ] && say "  timer: $(systemctl is-enabled kvcache-reap.timer 2>/dev/null) / $(systemctl is-active kvcache-reap.timer 2>/dev/null)"
-  [ -z "$DRY" ] && { say "  first run:"; root systemctl start kvcache-reap.service; journalctl -u kvcache-reap.service -n 3 --no-pager -o cat 2>/dev/null | sed 's/^/    /'; }
+  say "  Limit ${max} GB: each pass leaves $dir/blocks at or below $(( max - headroom )) GB (headroom ${headroom} GB),"
+  say "  and the filesystem at or below ${pct}% with ${minfree} GB free."
+  env_set KVCACHE_MAX_GB "$max"
+  env_set KVCACHE_TARGET_PCT "$pct"
+  env_set KVCACHE_MIN_FREE_GB "$minfree"
+  if systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
+    say "  A system reaper timer (kvcache-reap.timer) is installed. While it is enabled the launcher leaves"
+    say "  reaping to it and these limits are not used."
+    if yes_no "Disable the system timer and use the built-in reaper?" y; then
+      root systemctl disable --now kvcache-reap.timer
+    fi
+  fi
 }
 own_blocks() {  # the container writes as the invoking user (rootless podman); docker users may need root
   local dir=$1 u=${SUDO_USER:-$(id -un)}
@@ -268,7 +265,7 @@ step_disk() {
     warn "$tdir is not writable by $(id -un); speed test skipped"
   fi
   own_blocks "$dir"
-  install_reaper "$dir" "$dedicated"
+  set_limits "$dir" "$dedicated"
   env_set KVCACHE_DISK_TIER 1
   env_set KVCACHE_DISK "$dir"
 }
@@ -337,9 +334,13 @@ step_status() {
     say "  disk tier: $d -- $(findmnt -n -o SOURCE,FSTYPE,SIZE,USE% --target "$d" | tr -s ' ')$(mountpoint -q "$d" || echo '  (not its own mount)')"
     [ -d "$d/blocks" ] && du -sh "$d/blocks"/* 2>/dev/null | sed 's/^/    /'
   else say "  disk tier: $d does not exist (the launcher will refuse to start with the disk tier on)"; fi
-  say "  reaper timer: $(systemctl is-enabled kvcache-reap.timer 2>/dev/null || echo not installed) / $(systemctl is-active kvcache-reap.timer 2>/dev/null)"
-  local dropin=/etc/systemd/system/kvcache-reap.service.d/10-setup-kvcache.conf
-  [ -f "$dropin" ] && grep -E 'KVCACHE_(ROOT|TARGET_PCT|MIN_FREE_GB)' "$dropin" | sed 's/^Environment=/    /'
+  if systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
+    say "  reaper: the system kvcache-reap.timer ($(systemctl is-active kvcache-reap.timer 2>/dev/null)); the built-in one stays off"
+  else
+    local m p f; m=$(env_get KVCACHE_MAX_GB); p=$(env_get KVCACHE_TARGET_PCT); f=$(env_get KVCACHE_MIN_FREE_GB)
+    say "  reaper: built into the launcher (runs while the server runs); cache limit ${m:-none}${m:+ GB};"
+    say "          volume at most ${p:-75}% full with ${f:-24} GB free"
+  fi
 }
 
 # ---------------------------------------------------------------- menu
@@ -347,7 +348,7 @@ step_status() {
 while :; do
   hdr "KV-cache offload setup"
   say "  1) RAM tier       size it, resize /dev/shm"
-  say "  2) Disk tier      speed test, filesystem, reaper"
+  say "  2) Disk tier      speed test, filesystem, size limit"
   say "  3) Both           1 then 2"
   say "  4) Wipe caches    ./clear-cache.sh"
   say "  5) Status"
