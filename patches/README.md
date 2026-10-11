@@ -24,7 +24,7 @@ actually running.
 
 This directory replaces that heuristic's decisions for the shapes we measured, and leaves
 it untouched for everything else. This only matters for a *dense* model
-(`startup-qwen3.6-27b-vllm.sh`) — the 35B-A3B MoE checkpoint quantizes only its routed
+(`old_work/startup-qwen3.6-27b-vllm.sh`) — the 35B-A3B MoE checkpoint quantizes only its routed
 experts and never touches this kernel at all (see that script's header).
 
 The table covers **both supported checkpoints**. It is keyed
@@ -241,13 +241,13 @@ milliseconds would just pick the smallest M and measure nothing about tile quali
 
 ## Usage
 
-`startup-qwen3.6-27b-vllm.sh` applies this by default (`TUNED_TILES=1`), bind-mounting
+`old_work/startup-qwen3.6-27b-vllm.sh` applies this by default (`TUNED_TILES=1`), bind-mounting
 `patches/rdna_hybrid_w4a16.py` over the kernel's path inside the container. To run the
 kernel exactly as the image ships it instead (Avesed checkpoint only, see above):
 
 ```
 MODEL_DIR=./models/qwen3.6-27b-int4 QUANT=compressed-tensors TUNED_TILES=0 \
-  ./startup-qwen3.6-27b-vllm.sh
+  ./old_work/startup-qwen3.6-27b-vllm.sh
 ```
 
 It's a community-measured override, not something upstream has reviewed or blessed —

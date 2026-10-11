@@ -35,7 +35,7 @@ The rest of the documentation:
 | Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
 | Disk tier | **About 96 GB of cache**, held there by the launcher's built-in reaper: a folder on any fast disk with a size limit (`KVCACHE_MAX_GB`), or a 128 GiB filesystem or image file of its own (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
-| Downloads | About 40 GiB for the checkpoints |
+| Downloads | About 40 GiB through ggz14's `setup-mxfp4.sh` (it also keeps a Hugging Face cache copy); about 22 GiB stay in `~/models` (target 19 GiB, 4-bit drafter 1.2, FP8 drafter 2.0) |
 
 ## Setup
 

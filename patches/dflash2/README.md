@@ -1,5 +1,9 @@
 # DFlash2 overlay for vLLM 0.26.0 (`vllm-radiance:0.5.8`)
 
+> **Scope:** this overlay is for the int4 launcher on `vllm-radiance:0.5.8` (vLLM 0.26.0), now in `old_work/`. The
+> MXFP4 launcher runs `:0.9.3` (vLLM 0.27.1), which carries DFlash2 itself, and does not mount any of it. Block
+> sizes below (1664, 832) are that launcher's; the MXFP4 launcher's is 880. Kept as the record of the back-port.
+
 Ten Python files, bind-mounted read-only over the image's `vllm` package by
 `old_work/startup-qwen3.8-27b-int4.sh` whenever `SPEC=dflash2`. Without them the image cannot run
 DFlash2 at all — it fails on an unknown model architecture.
