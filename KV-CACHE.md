@@ -149,10 +149,11 @@ the line on your box prints it for your sizes.
 
 ### The disk tier and the reaper
 
-- **Size.** 128 GiB with the reaper at 75% gives 96 GiB of cache, ~2.2M tokens of finished
-  conversations. A smaller volume works and holds proportionally less; the launcher warns below
-  128 GiB. Use a dedicated filesystem: the tier writes with O_DIRECT, so page cache does not help it,
-  and it should not share space with anything that matters.
+- **Size.** 96 GB of cache holds ~2.2M tokens of finished conversations. `./setup-kvcache.sh` sets it
+  up: it measures the disk, makes a filesystem or an image file if you want one, and gives the reaper a
+  size limit (`KVCACHE_MAX_GB`) that it enforces on the folder itself. Without a limit the reaper keeps
+  the whole volume at 75%, so the tier then wants a filesystem of its own (128 GiB). The tier writes
+  with O_DIRECT, so page cache does not help it.
 - **The reaper is mandatory.** vLLM's filesystem tier has no capacity limit and never deletes.
   Without the reaper (`kv-cache/ops/kvcache-reap.{sh,service,timer}`), the volume fills until writes
   fail. It keeps the volume at or below `KVCACHE_TARGET_PCT` (75), oldest blocks first, and the

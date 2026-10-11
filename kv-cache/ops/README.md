@@ -7,10 +7,20 @@ The default build has no disk tier and needs none of this section. With
 capacity, quota or TTL parameter and exposes no eviction hook. Without an
 external reaper the filesystem fills until it is full.
 
+`../../setup-kvcache.sh` installs it with a size limit and a drop-in pointing it at your folder.
+By hand:
+
     sudo cp kvcache-reap.sh /usr/local/bin/        # or wherever, then fix the unit
     sudo cp kvcache-reap.service kvcache-reap.timer /etc/systemd/system/
     sudo systemctl daemon-reload
     sudo systemctl enable --now kvcache-reap.timer
+
+**A size limit** (`KVCACHE_MAX_GB`, set by `setup-kvcache.sh`; 0 = off) caps the folder itself, whatever
+else the filesystem holds: every run deletes oldest-first down to the limit minus
+`KVCACHE_SIZE_HEADROOM_GB` (default 24, or a fifth of the limit if smaller), so a minute of peak writes
+cannot carry it past the limit, and a folder found over the limit is an emergency (the age floor
+below is crossed). With a limit the tier can share a filesystem; the percentage and free-space
+rules below then only guard the volume.
 
 It keeps the filesystem at or below 75% (`KVCACHE_TARGET_PCT`), oldest blocks first, and
 leaves blocks younger than 15 minutes (`KVCACHE_MIN_AGE_MIN`) alone unless the volume passes

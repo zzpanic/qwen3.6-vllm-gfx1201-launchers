@@ -53,7 +53,7 @@ Measured with rx17 (one R9700, the served stack):
 
 **Still open:** at ~141k a verbatim-copy score fell 14 -> 9 of 28 lines from two near-tie token flips in
 two of eight prompts -- one sample, but re-measure with a larger set before calling long-range copying
-unaffected. Switching `MAMBA_SSM_FP16` changes the disk tier's geometry (README.md, step 4).
+unaffected. Switching `MAMBA_SSM_FP16` changes the disk tier's geometry (README.md, step 3).
 
 ---
 

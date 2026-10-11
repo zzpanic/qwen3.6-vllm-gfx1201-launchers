@@ -25,6 +25,13 @@
 # DFlash x7, fp8 KV, 94 GB tier volume), 2026-10-05: peak fs store 2.25 GB per 10 s
 # metrics interval (225 MB/s; analytic ceiling ~3,200 prefill t/s x 73 KB/token on disk), gap
 # between runs <= 80 s (1-min timer + 10 s accuracy, runs take <= 3 s) -> 19.2 GB; x1.25 -> 24.
+#
+# KVCACHE_MAX_GB (0 = off): a hard ceiling on the SIZE of KVCACHE_ROOT itself, whatever else the
+# filesystem holds (2026-10-11, setup-kvcache.sh). Every run deletes oldest-first until the folder is
+# at most KVCACHE_MAX_GB - KVCACHE_SIZE_HEADROOM_GB, so the writes between two runs (the same peak
+# rate x gap as above; headroom default min(24, MAX_GB / 5)) cannot carry it past KVCACHE_MAX_GB.
+# A folder over the ceiling itself is an emergency (the minimum-age floor is crossed). With a ceiling
+# the tier can share a filesystem: the percentage and free-space rules still guard the volume.
 set -euo pipefail
 
 ROOT=${KVCACHE_ROOT:-${KVCACHE_DISK:+$KVCACHE_DISK/blocks}}
@@ -37,6 +44,8 @@ EMERGENCY_PCT=${KVCACHE_EMERGENCY_PCT:-90}  # above this after Stage B, Stage C 
 EMERGENCY_MIN_AGE_MIN=${KVCACHE_EMERGENCY_MIN_AGE_MIN:-1}  # Stage C still spares blocks written in the last minute
 TMP_AGE_MIN=${KVCACHE_TMP_AGE_MIN:-60}      # orphaned *.tmp older than this go too
 MIN_FREE_GB=${KVCACHE_MIN_FREE_GB:-0}       # keep at least this much free after every run (0 = off); see header
+MAX_GB=${KVCACHE_MAX_GB:-0}                 # hard ceiling on the folder's size (0 = off); see header
+HEADROOM_GB=${KVCACHE_SIZE_HEADROOM_GB:-$(( MAX_GB / 5 < 24 ? MAX_GB / 5 : 24 ))}
 DRY=${DRY_RUN:-}
 
 [ -d "$ROOT" ] || { echo "kvcache-reap: $ROOT does not exist; nothing to do" >&2; exit 0; }
@@ -53,8 +62,16 @@ fi
 
 pct() { df --output=pcent "$ROOT" | tail -1 | tr -dc '0-9'; }
 free_gb() { df -B1G --output=avail "$ROOT" | tail -1 | tr -dc '0-9'; }
-# "at target" means both: %use at or below TARGET_PCT and at least MIN_FREE_GB free.
-at_target() { [ "$(pct)" -le "$TARGET_PCT" ] && [ "$(free_gb)" -ge "$MIN_FREE_GB" ]; }
+# The folder's size in bytes, measured once per run and then kept by subtracting what is deleted
+# (a du per check would walk every block file again).
+SIZE_B=0
+[ "$MAX_GB" -gt 0 ] && SIZE_B=$(du -sb "$ROOT" 2>/dev/null | cut -f1)
+size_gb() { echo $(( SIZE_B / 1000000000 )); }
+size_ok() { [ "$MAX_GB" -eq 0 ] || [ "$SIZE_B" -le $(( (MAX_GB - HEADROOM_GB) * 1000000000 )) ]; }
+over_ceiling() { [ "$MAX_GB" -gt 0 ] && [ "$SIZE_B" -gt $(( MAX_GB * 1000000000 )) ]; }
+# "at target" means all three: %use at or below TARGET_PCT, at least MIN_FREE_GB free, and the folder
+# at or below its size target (KVCACHE_MAX_GB - headroom) when a ceiling is set.
+at_target() { [ "$(pct)" -le "$TARGET_PCT" ] && [ "$(free_gb)" -ge "$MIN_FREE_GB" ] && size_ok; }
 
 # A crashed store leaves <name>.bin.tmp<suffix> behind: io.py writes to a temp
 # path and os.replace()s it. Those are never read and never reaped by vLLM.
@@ -69,9 +86,11 @@ capped=0
 floor_hit=0
 # The loops below read from fd 3 via process substitution, so the body runs in
 # this shell and `removed` survives the iteration. A pipe would not.
-rm_one() {
+rm_one() {  # rm_one PATH [BYTES]
+  local b=${2:-$(stat -c %s -- "$1" 2>/dev/null || echo 0)}
   if [ -n "$DRY" ]; then echo "would remove $1"; else rm -f -- "$1" || return 0; fi
   removed=$((removed+1))
+  SIZE_B=$(( SIZE_B - b ))
 }
 
 # --- Stage A: age. OFF by default: capacity alone decides. When KVCACHE_MAX_AGE_HOURS > 0 it
@@ -92,14 +111,14 @@ if ! at_target && [ "$capped" -eq 0 ]; then
   # NUL-delimited and mtime-sorted so filenames can contain anything.
   while IFS= read -r -d '' -u 3 line; do
     if [ "$removed" -ge "$MAX_DELETE" ]; then capped=1; break; fi
-    f=${line#* }
+    rest=${line#* }; sz=${rest%% *}; f=${rest#* }
     [ -f "$f" ] || continue
-    rm_one "$f"
-    # df is not free; re-check in batches rather than per file.
-    if [ $(( (removed - aged) % 200 )) -eq 0 ]; then
+    rm_one "$f" "$sz"
+    # df is not free: re-check in batches of 200, and every file once the size target is met.
+    if [ $(( (removed - aged) % 200 )) -eq 0 ] || { [ "$MAX_GB" -gt 0 ] && size_ok; }; then
       at_target && break
     fi
-  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$MIN_AGE_MIN" -printf '%T@ %p\0' | sort -z -n 2>/dev/null)
+  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$MIN_AGE_MIN" -printf '%T@ %s %p\0' | sort -z -n 2>/dev/null)
   [ -z "$DRY" ] && ! at_target && floor_hit=1
 fi
 
@@ -110,17 +129,17 @@ emergency=0
 cur=$(pct)
 low_free=0
 [ "$MIN_FREE_GB" -gt 0 ] && [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && low_free=1
-if { { [ "$EMERGENCY_PCT" -gt 0 ] && [ "$cur" -gt "$EMERGENCY_PCT" ]; } || [ "$low_free" -eq 1 ]; } && [ "$capped" -eq 0 ]; then
+if { { [ "$EMERGENCY_PCT" -gt 0 ] && [ "$cur" -gt "$EMERGENCY_PCT" ]; } || [ "$low_free" -eq 1 ] || over_ceiling; } && [ "$capped" -eq 0 ]; then
   emergency=1
   while IFS= read -r -d '' -u 3 line; do
     if [ "$removed" -ge "$MAX_DELETE" ]; then capped=1; break; fi
-    f=${line#* }
+    rest=${line#* }; sz=${rest%% *}; f=${rest#* }
     [ -f "$f" ] || continue
-    rm_one "$f"
-    if [ $(( removed % 200 )) -eq 0 ]; then
+    rm_one "$f" "$sz"
+    if [ $(( removed % 200 )) -eq 0 ] || { [ "$MAX_GB" -gt 0 ] && size_ok; }; then
       at_target && break
     fi
-  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$EMERGENCY_MIN_AGE_MIN" -printf '%T@ %p\0' | sort -z -n 2>/dev/null)
+  done 3< <(find "$ROOT" -type f -name '*.bin' -mmin "+$EMERGENCY_MIN_AGE_MIN" -printf '%T@ %s %p\0' | sort -z -n 2>/dev/null)
   [ -z "$DRY" ] && at_target && floor_hit=0
 fi
 
@@ -131,19 +150,21 @@ if [ -z "$DRY" ] && [ "$removed" -gt 0 ]; then
 fi
 
 now=$(pct)
+sz_note=""
+[ "$MAX_GB" -gt 0 ] && sz_note=", folder $(size_gb) GB of a ${MAX_GB} GB ceiling (target $(( MAX_GB - HEADROOM_GB )))"
 if [ "$removed" -eq 0 ]; then
   if [ "$MAX_AGE_HOURS" -gt 0 ]; then
-    echo "kvcache-reap: ${now}% used, nothing older than ${MAX_AGE_HOURS}h and at/below the ${TARGET_PCT}% target; nothing to do"
+    echo "kvcache-reap: ${now}% used${sz_note}, nothing older than ${MAX_AGE_HOURS}h and at/below the ${TARGET_PCT}% target; nothing to do"
   else
-    echo "kvcache-reap: ${now}% used, at/below the ${TARGET_PCT}% target (age rule off); nothing to do"
+    echo "kvcache-reap: ${now}% used${sz_note}, at/below the ${TARGET_PCT}% target (age rule off); nothing to do"
   fi
 else
-  echo "kvcache-reap: removed $removed block(s) [${aged} by age, $((removed - aged)) for capacity]; now ${now}% used, $(free_gb) GB free"
+  echo "kvcache-reap: removed $removed block(s) [${aged} by age, $((removed - aged)) for capacity]; now ${now}% used, $(free_gb) GB free${sz_note}"
 fi
 [ "$capped" -eq 1 ] && echo "kvcache-reap: stopped at the ${MAX_DELETE}-block per-run cap; the next cycle continues where this one left off"
-[ "$emergency" -eq 1 ] && echo "kvcache-reap: EMERGENCY stage ran (volume above ${EMERGENCY_PCT}% or under ${MIN_FREE_GB} GB free, with every block under ${MIN_AGE_MIN} min); deleted below the floor, sparing the last ${EMERGENCY_MIN_AGE_MIN} min" >&2
+[ "$emergency" -eq 1 ] && echo "kvcache-reap: EMERGENCY stage ran (volume above ${EMERGENCY_PCT}%, under ${MIN_FREE_GB} GB free or the folder over its ${MAX_GB} GB ceiling, with every block under ${MIN_AGE_MIN} min); deleted below the floor, sparing the last ${EMERGENCY_MIN_AGE_MIN} min" >&2
 if [ "$floor_hit" -eq 1 ]; then
-  echo "kvcache-reap: WARNING ${now}% used / $(free_gb) GB free misses the target (${TARGET_PCT}%, ${MIN_FREE_GB} GB free), but every remaining block is" >&2
+  echo "kvcache-reap: WARNING ${now}% used / $(free_gb) GB free${sz_note} misses the target (${TARGET_PCT}%, ${MIN_FREE_GB} GB free), but every remaining block is" >&2
   echo "kvcache-reap:   younger than ${MIN_AGE_MIN} min. NOT deleting those -- recent blocks are the engine's hot set." >&2
   echo "kvcache-reap:   If this line repeats, the volume is too small for this workload; grow it, lower KVCACHE_MIN_AGE_MIN, or set" >&2
   echo "kvcache-reap:   KVCACHE_MAX_AGE_HOURS to a positive value to shed old blocks before pressure builds." >&2

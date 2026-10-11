@@ -34,7 +34,7 @@ The rest of the documentation:
 | Container runtime | Podman or Docker |
 | Host RAM | 32 GiB: the RAM tier is 16 GiB, pinned, plus ~15 GiB for the engine and OS |
 | `/dev/shm` | At least 20 GiB |
-| Disk tier | A dedicated filesystem of **128 GiB**, kept at 75% by the reaper. On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
+| Disk tier | **96 GB of cache**, held there by the reaper: a 128 GiB filesystem or image file of its own is simplest (`setup-kvcache.sh` makes either). On by default: if the folder is missing the launcher refuses to start; `KVCACHE_DISK_TIER=0` runs RAM-only. |
 | Downloads | About 40 GiB for the checkpoints |
 
 ## Setup
@@ -60,22 +60,19 @@ hf download just1moremodel/Qwen3.8-27B-Uncensored-MXFP4-awq \
   --local-dir ~/models/Qwen3.8-27B-Uncensored-MXFP4-awq
 ```
 
-**3. Size `/dev/shm` for the RAM tier.** The tier is 16 GiB (KV-CACHE.md explains the sizing: with
-checkpoint retention, 16 GiB of RAM and a 128 GiB disk at 75% hold what dense storage needed twice that for).
+**3. Set up the KV-cache tiers.** `./setup-kvcache.sh` asks a few questions and does the rest:
+- it measures your RAM and suggests a RAM-tier size (16 GiB by default), then resizes `/dev/shm` to match;
+- it measures your disk's direct-I/O speed, then uses an existing mount, creates an image file, or formats a
+  spare disk for the disk tier;
+- it installs the reaper with a size limit you choose (96 GB recommended). The reaper is required: the
+  tier never deletes on its own.
+
+It shows every command it runs as root and asks first; `--dry-run` only prints them. Your choices go to
+`kvcache.env`, which the launcher reads. Or skip the disk tier and run RAM-only with `KVCACHE_DISK_TIER=0`.
+kv-cache/docs/SETUP.md has the same steps by hand.
 
 ```bash
-echo 'tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=20G 0 0' | sudo tee -a /etc/fstab
-sudo mount -o remount,size=20G /dev/shm
-```
-
-**4. Set up the disk tier and its reaper.** The reaper is required: the tier never deletes on its own.
-Skip this step and set `KVCACHE_DISK_TIER=0` to run RAM-only.
-
-```bash
-# a dedicated 128 GiB filesystem, mounted at /kvcache (kv-cache/docs/SETUP.md has fstab lines)
-sudo cp kv-cache/ops/kvcache-reap.sh /usr/local/bin/
-sudo cp kv-cache/ops/kvcache-reap.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
+./setup-kvcache.sh
 ```
 
 > **Upgrading from a release before 2026-10-08: the fp16 SSM default invalidates your disk tier.**
@@ -95,7 +92,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
 > new tree, `blocks/<model>-f16ssm-canon`. Rows in the old `blocks/<model>-f16ssm` were computed on a
 > different chunk grid and are never read again; wipe it to get the space back.
 
-**5. Check the configuration.** This prints the container command and runs nothing. The log lines
+**4. Check the configuration.** This prints the container command and runs nothing. The log lines
 tagged `[kvcache]` show the RAM tier and disk tier the launcher chose.
 
 ```bash
@@ -155,7 +152,7 @@ it off).
 
 ## Clearing the caches
 
-`./clear-cache.sh` lists the KV-offload disk tier (one entry per model and numerics) and the startup
+`./clear-cache.sh` (also option 4 of `./setup-kvcache.sh`) lists the KV-offload disk tier (one entry per model and numerics) and the startup
 caches (compile trees, libr4d builds, boot overlays) with their sizes, and wipes all of them, the ones
 you pick, or everything except the ones you pick. It is all cache: the cost is recompute time, never
 data. It skips anything a running container has mounted; `--dry-run` deletes nothing.

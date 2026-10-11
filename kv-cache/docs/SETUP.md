@@ -48,8 +48,8 @@ at dense bytes, 19 GiB at 262,144); `0` turns offload off.
 ## The reaper — *disk build*, and then required
 
 Nothing bounds the disk tier's growth on its own. **Install the reaper before serving the
-disk build**, or the filesystem fills. The default build has no disk tier and does not
-need it.
+disk build**, or the filesystem fills. `./setup-kvcache.sh` (repository root) does everything in
+this file interactively, with a size limit for the reaper; the manual steps follow.
 
 ```bash
 sudo cp kv-cache/ops/kvcache-reap.sh /usr/local/bin/

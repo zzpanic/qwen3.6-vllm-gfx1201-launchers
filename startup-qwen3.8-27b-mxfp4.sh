@@ -120,6 +120,9 @@ done
 die() { echo "[serve-mxfp4] ERROR: $1" >&2; shift; for l in "$@"; do echo "  $l" >&2; done; exit 1; }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# kvcache.env (written by setup-kvcache.sh): the KV-offload tier settings chosen there. Its lines are
+# `: "${NAME:=value}"`, so anything already set in the environment (llama-swap env:, the shell) wins.
+if [ -f "$SCRIPT_DIR/kvcache.env" ]; then . "$SCRIPT_DIR/kvcache.env"; fi
 # This file lives outside the repo it was copied from, so the repo's own files (gpu-detect.sh,
 # the r4d patch, the chat template, the /patches mount) are resolved from REPO instead.
 # 2026-09-18: repointed from ggz14-mxfp4 (v0.11.0 @ 22c69cd, 09-04) to v0.13.0 @ 980f891 (09-17).
@@ -1039,8 +1042,8 @@ KVOFF_DISK=${KVOFF_DISK:-}
 if [ -n "$KVOFF_DISK" ] && [ ! -d "$KVOFF_DISK" ]; then
   die "the KV-offload disk tier folder $KVOFF_DISK does not exist." \
       "The disk tier is ON by default (KVCACHE_DISK_TIER=1). Do ONE of:" \
-      "  * create it: a dedicated filesystem of 128 GiB mounted at $KVOFF_DISK" \
-      "    (kv-cache/docs/SETUP.md has the fstab line), then install the reaper (kv-cache/ops)," \
+      "  * create it: run ./setup-kvcache.sh (it makes the folder, a filesystem if you want one," \
+      "    and installs the reaper; kv-cache/docs/SETUP.md has the manual steps)," \
       "  * point the launcher at another folder:  KVCACHE_DISK=/path/to/folder" \
       "  * or run RAM-only:                       KVCACHE_DISK_TIER=0"
 fi
@@ -1048,13 +1051,17 @@ if [ -n "$KVOFF_DISK" ]; then
   # 128 GiB recommended: the reaper keeps KVCACHE_MIN_FREE_GB (24) free and works on a 5-minute
   # cadence, so a smaller volume holds little more than a couple of full 256k conversations.
   _kvc_disk_gib=$(df -P -B1G "$KVOFF_DISK" 2>/dev/null | awk 'NR==2 {print $2}')
-  if [ -n "$_kvc_disk_gib" ] && [ "$_kvc_disk_gib" -lt 128 ]; then
+  _kvc_max=$(grep -hoE "KVCACHE_MAX_GB=[0-9]+" /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)
+  if [ -n "$_kvc_max" ]; then
+    # a size limit from setup-kvcache.sh: that, not the volume, is what the cache gets
+    [ "$_kvc_max" -lt 64 ] && echo "[kvcache] WARNING: the reaper limits the disk tier to ${_kvc_max} GB; 96 GB is recommended." >&2
+  elif [ -n "$_kvc_disk_gib" ] && [ "$_kvc_disk_gib" -lt 128 ]; then
     echo "[kvcache] WARNING: disk tier $KVOFF_DISK is ${_kvc_disk_gib} GiB; 128 GiB or more is recommended." >&2
   fi
   if ! systemctl is-enabled kvcache-reap.timer >/dev/null 2>&1; then
     echo "[kvcache] *** WARNING: the disk tier is ON but kvcache-reap.timer is not enabled." >&2
     echo "[kvcache]     This tier NEVER deletes on its own; $KVOFF_DISK fills until the filesystem is" >&2
-    echo "[kvcache]     full. Install the reaper: kv-cache/ops/README.md." >&2
+    echo "[kvcache]     full. Install the reaper: ./setup-kvcache.sh (or by hand, kv-cache/ops/README.md)." >&2
   fi
 fi
 KVOFF_DISK_MNT=/kvcache                                   # path INSIDE the container
@@ -2120,8 +2127,9 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # The two knobs the patch prelude branches on are final by now; pass them exactly as the
 # container gets them (-e below), plus /house, where half of the prelude patches live.
 # Both go into the overlay key, and the builder applies the prelude with them.
-# Warm-history line inputs (patch_warm_history.py): RAM = the tier size in EXTRA; disk = the volume size x
-# the reaper's KVCACHE_TARGET_PCT (from its unit or a drop-in; 75 if none is found; KVOFF_DISK_USABLE_PCT wins).
+# Warm-history line inputs (patch_warm_history.py): RAM = the tier size in EXTRA; disk = the reaper's size
+# limit KVCACHE_MAX_GB minus its headroom when one is set (setup-kvcache.sh), else the volume size x its
+# KVCACHE_TARGET_PCT (from its unit or a drop-in; 75 if none is found; KVOFF_DISK_USABLE_PCT wins).
 WARM_RAM_GIB="$(grep -oE -- "--kv-offloading-size[= ]*[0-9.]+" <<<"$EXTRA" | grep -oE "[0-9.]+$" || true)"
 WARM_DISK_BYTES=0
 if [[ -n "$KVOFF_DISK" ]]; then
@@ -2129,6 +2137,12 @@ if [[ -n "$KVOFF_DISK" ]]; then
     /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)}
   _wd_size=$(df -B1 --output=size "$KVOFF_DISK" 2>/dev/null | tail -1 | tr -d " ")
   WARM_DISK_BYTES=$(( ${_wd_size:-0} * ${_wd_pct:-75} / 100 ))
+  _wd_max=$(grep -hoE "KVCACHE_MAX_GB=[0-9]+" /etc/systemd/system/kvcache-reap.service \
+    /etc/systemd/system/kvcache-reap.service.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2)
+  if [ -z "${KVOFF_DISK_USABLE_PCT:-}" ] && [ "${_wd_max:-0}" -gt 0 ]; then
+    _wd_head=$(( _wd_max / 5 < 24 ? _wd_max / 5 : 24 ))
+    WARM_DISK_BYTES=$(( (_wd_max - _wd_head) * 1000000000 ))
+  fi
 fi
 STARTUP_CACHE_OVERLAY_ENV="KVOFF_MINIMAL=$KVOFF_MINIMAL KVOFF_FS_TIER=$KVOFF_FS_TIER RADIANCE_GDN_LAZY=$GDN_LAZY"
 STARTUP_CACHE_OVERLAY_MOUNTS="$HOUSE:/house"
