@@ -2555,6 +2555,13 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --rm --name "$NAME" --priv
     # a cached prefix with one uncomputed token) took the GDN recurrent decode path against the wrong state.
     # Plain vLLM bug (split_decodes_and_prefills early return). FATAL.
     hp /house/patch_short_prefill.py
+    # House patch 2026-10-21: vllm#51603 backport (fixed upstream in v0.28.0, not in 0.27.1), Mamba alignment
+    # before the encoder caps. Without it a request carrying two images that do not fit the encoder cache
+    # together (two 4,096-token images at MAXPIX 4 MP) livelocks: GPU idle, 0 tokens scheduled every step,
+    # until the client gives up (vllm#40707). Needs the canonical-chunk patches applied first. Non-fatal:
+    # without it the engine serves stock 0.27.1 behaviour.
+    hp /house/patch_mamba_align_encoder_order.py \
+      || echo "[radiance] WARNING: mamba-align/encoder order fix did not apply; multi-image requests can livelock"
     echo "[radiance] vLLM patches applied (each patch prints only on failure)"
     # END patch prelude
     fi

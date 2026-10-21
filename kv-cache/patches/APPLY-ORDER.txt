@@ -54,6 +54,10 @@
  20  patch_short_prefill.py                           always applied, FATAL on failure. Correctness fix
                                                    (SlyBase): a 1-token prefill took the GDN recurrent
                                                    decode path against uninitialised state. Order-free.
+ 26  patch_mamba_align_encoder_order.py               always applied, non-fatal. Correctness fix (vllm#51603
+                                                   backport, upstream in v0.28.0): Mamba alignment before the
+                                                   encoder caps, so two images that do not fit the encoder
+                                                   cache together no longer livelock the request. After 8a.
  
  This order is a dependency, not a preference. 11 extends the get_stats() that 2
  creates on the fs tier, and refuses to apply if 2 has not run -- it says so
