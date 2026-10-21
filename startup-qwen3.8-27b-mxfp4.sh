@@ -1333,6 +1333,9 @@ _kvc_geom=""; [ "$MAMBA_SSM_FP16" = 1 ] && _kvc_geom="-f16ssm"
 # Canonical chunks change which bytes a row holds (2026-10-11), so canonical rows get their own tree too:
 # rows written without them would otherwise be served as hits and break cached == uncached.
 [ "$KVOFF_CANONICAL_CHUNKS" = 1 ] && _kvc_geom="$_kvc_geom-canon"
+# Pinned Inductor reduction configs (INDUCTOR_DET, see the compilation-config block) change row bytes as well.
+INDUCTOR_DET=${INDUCTOR_DET:-1}
+[ "$INDUCTOR_DET" = 1 ] && _kvc_geom="$_kvc_geom-det"
 KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")$_kvc_geom}}
 
 # KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
@@ -1757,8 +1760,21 @@ COOP_RED=${COOP_RED:-0}
 if [ -n "$COMPILE_SIZES" ] && [ "$COMPILE_SIZES" != none ]; then
   CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"compile_sizes\":$COMPILE_SIZES"
 fi
+IC_ITEMS=""
 if [ "$COOP_RED" = 1 ]; then
-  CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"inductor_compile_config\":{\"triton.cooperative_reductions\":true}"
+  IC_ITEMS="\"triton.cooperative_reductions\":true"
+fi
+# INDUCTOR_DET=1 (default) pins every generated reduction kernel to one config. Inductor otherwise times
+# its candidates on first launch and keeps the fastest; the candidates sum in a different order, so the
+# pick, which can change from one compile to the next, changed greedy output between a fresh-compile
+# boot and later boots (vllm#58899). Measured 2026-10-21: prefill and decode unchanged.
+# benchmark_combo_kernel must be off for deterministic mode to start (vllm#59074); setting it also
+# skips the vLLM combo_kernels default, so combo_kernels is set here too. INDUCTOR_DET=0 = upstream.
+if [ "${INDUCTOR_DET:-1}" = 1 ]; then
+  IC_ITEMS="${IC_ITEMS:+$IC_ITEMS,}\"deterministic\":true,\"combo_kernels\":true,\"benchmark_combo_kernel\":false"
+fi
+if [ -n "$IC_ITEMS" ]; then
+  CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"inductor_compile_config\":{$IC_ITEMS}"
 fi
 if [ "$NQF" = 1 ]; then
   CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"pass_config\":{\"fuse_norm_quant\":true,\"fuse_act_quant\":true}"

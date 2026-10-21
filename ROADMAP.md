@@ -15,8 +15,9 @@ The current shape:
 - **Memory:** the input embedding in pinned host RAM; the 4-bit DFlash2 drafter (-0.78 GiB) and KV pin 12.65e9;
   checkpoint retention (a 16 GiB RAM tier and a 128 GiB disk at 75% hold what dense storage needed twice that for).
 - **Correctness:** the uniform-decode guard, the DFlash2 sampling-RNG fix, canonical prefill chunks
-  (cached == uncached at fp16 and fp32, KV-CACHE.md), the 1-token prefill fix and the multi-image livelock fix
-  (vLLM #51603 backport).
+  (cached == uncached at fp16 and fp32, KV-CACHE.md), the 1-token prefill fix, the multi-image livelock fix
+  (vLLM #51603 backport) and pinned Inductor reduction configs, so a fresh compile gives the same output as the
+  boots after it (vLLM #58899; `INDUCTOR_DET=0` restores the timed pick).
 - **ROCm allocator:** the load-time allocator split.
 - **Startup:** CUDA graphs captured up to `MAXSEQS x 8` tokens, and a JIT warm-up after `/health`.
 
