@@ -1336,6 +1336,10 @@ _kvc_geom=""; [ "$MAMBA_SSM_FP16" = 1 ] && _kvc_geom="-f16ssm"
 # Pinned Inductor reduction configs (INDUCTOR_DET, see the compilation-config block) change row bytes as well.
 INDUCTOR_DET=${INDUCTOR_DET:-1}
 [ "$INDUCTOR_DET" = 1 ] && _kvc_geom="$_kvc_geom-det"
+# The build changes row bytes too (2026-10-21): the image and arch plus the cache flags, the libr4d key and the
+# MXFP4 kernel source. A short hash of them ends the name, so a new image or kernel starts a fresh tree.
+_kvc_mfx=${MFX_KEY:-$(sha256sum "$REPO/radiance_mxfp4_fp8.hip" 2>/dev/null | cut -c1-16)}
+_kvc_geom="$_kvc_geom-b$(printf %s "$STARTUP_CACHE_KEY$CACHE_SUF|$R4D_KEY|$_kvc_mfx" | sha256sum | cut -c1-8)"
 KVOFF_DISK_SUBDIR=${KVOFF_DISK_SUBDIR:-${KVCACHE_DISK_SUBDIR:-blocks/$(basename "$_kvc_snap")$_kvc_geom}}
 
 # KVOFF_POLICY: eviction policy for the CPU PRIMARY tier (the /dev/shm region; 22 GiB here).
